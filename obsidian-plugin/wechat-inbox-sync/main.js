@@ -1276,7 +1276,7 @@ var require_auto_sync_controller = __commonJS({
           idleRuns = 0;
         } else {
           failures = 0;
-          const hadActivity = result && (result.written > 0 || result.failed > 0);
+          const hadActivity = result && (result.written > 0 || result.failed > 0 || result.cloudFallbackPending > 0);
           idleRuns = hadActivity ? 0 : Math.min(idleRuns + 1, 7);
         }
         const delay2 = failures ? Math.min(maxIntervalMs, intervalMs * 2 ** failures) : Math.min(maxIdleIntervalMs, intervalMs * (idleRuns >= 7 ? 10 : idleRuns >= 5 ? 5 : idleRuns >= 3 ? 2 : 1));
@@ -12564,6 +12564,1123 @@ var require_cloud_transcription_response_utils = __commonJS({
   }
 });
 
+// src/cloud-fallback-job-utils.js
+var require_cloud_fallback_job_utils = __commonJS({
+  "src/cloud-fallback-job-utils.js"(exports2, module2) {
+    "use strict";
+    var CONNECTION_TICKET_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    var CONNECTION_TICKET_PAYLOAD_LENGTH = 12;
+    var CONNECTION_TICKET_PATTERN = new RegExp(
+      `^CNT[${CONNECTION_TICKET_ALPHABET}]{${CONNECTION_TICKET_PAYLOAD_LENGTH}}$`
+    );
+    var TERMINAL_CLOUD_FALLBACK_STATUSES = /* @__PURE__ */ new Set([
+      "succeeded",
+      "no_speech",
+      "needs_action",
+      "cancelled",
+      // The note is written locally and the cloud copy has been released. The
+      // status only appears while an acknowledgement is being reconciled.
+      "acknowledged"
+    ]);
+    var CLOUD_FALLBACK_STATUSES = /* @__PURE__ */ new Set([
+      "queued",
+      "acquiring",
+      "transcribing",
+      "submitting",
+      "submission_unknown",
+      ...TERMINAL_CLOUD_FALLBACK_STATUSES
+    ]);
+    function normalizeConnectionTicket2(value) {
+      const compact = String(value || "").trim().toUpperCase().replace(/[\s-]+/g, "");
+      if (!CONNECTION_TICKET_PATTERN.test(compact)) return "";
+      const payload = compact.slice(3);
+      return `CNT-${payload.slice(0, 4)}-${payload.slice(4, 8)}-${payload.slice(8, 12)}`;
+    }
+    __name(normalizeConnectionTicket2, "normalizeConnectionTicket");
+    function isConnectionTicket2(value) {
+      return Boolean(normalizeConnectionTicket2(value));
+    }
+    __name(isConnectionTicket2, "isConnectionTicket");
+    function normalizeCloudFallbackStatus(value) {
+      const status = String(value || "").trim().toLowerCase();
+      return CLOUD_FALLBACK_STATUSES.has(status) ? status : "failed";
+    }
+    __name(normalizeCloudFallbackStatus, "normalizeCloudFallbackStatus");
+    function normalizeCloudFallbackError(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const code = String(value.code || "").trim().slice(0, 120);
+      const message = String(value.message || "").trim().slice(0, 2e3);
+      if (!code && !message) return null;
+      return {
+        ...code ? { code } : {},
+        ...message ? { message } : {},
+        ...typeof value.retryable === "boolean" ? { retryable: value.retryable } : {},
+        ...String(value.stage || "").trim() ? { stage: String(value.stage).trim().slice(0, 80) } : {}
+      };
+    }
+    __name(normalizeCloudFallbackError, "normalizeCloudFallbackError");
+    function normalizeCloudFallbackRecordSnapshot2(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const metadata = value.metadata && typeof value.metadata === "object" && !Array.isArray(value.metadata) ? { ...value.metadata } : {};
+      delete metadata.cookie;
+      delete metadata.cookies;
+      delete metadata.authorization;
+      delete metadata.headers;
+      delete metadata.proxy;
+      const snapshot = {
+        ...String(value.id || "").trim() ? { id: String(value.id).trim().slice(0, 180) } : {},
+        ...String(value._id || "").trim() ? { _id: String(value._id).trim().slice(0, 180) } : {},
+        ...String(value.recordId || value.syncRecordId || "").trim() ? { recordId: String(value.recordId || value.syncRecordId).trim().slice(0, 180) } : {},
+        ...String(value.type || "").trim() ? { type: String(value.type).trim().slice(0, 80) } : {},
+        ...String(value.content || "").trim() ? { content: String(value.content).slice(0, 24e4) } : {},
+        ...String(value.title || "").trim() ? { title: String(value.title).trim().slice(0, 2e3) } : {},
+        ...String(value.description || "").trim() ? { description: String(value.description).trim().slice(0, 12e3) } : {},
+        ...String(value.createdAt || "").trim() ? { createdAt: String(value.createdAt).trim().slice(0, 80) } : {},
+        ...String(value.uploadedAt || "").trim() ? { uploadedAt: String(value.uploadedAt).trim().slice(0, 80) } : {},
+        ...String(value.source || "").trim() ? { source: String(value.source).trim().slice(0, 120) } : {},
+        ...String(value.platform || "").trim() ? { platform: String(value.platform).trim().slice(0, 120) } : {},
+        ...Number.isFinite(Number(value.retryCount)) ? { retryCount: Math.max(0, Math.floor(Number(value.retryCount))) } : {},
+        metadata
+      };
+      try {
+        if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > 32e4) return null;
+      } catch (_) {
+        return null;
+      }
+      return snapshot;
+    }
+    __name(normalizeCloudFallbackRecordSnapshot2, "normalizeCloudFallbackRecordSnapshot");
+    function normalizeCloudFallbackJob2(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const jobId = String(value.jobId || value.id || "").trim();
+      if (!jobId || jobId.length > 180) return null;
+      const sourceType = String(value.sourceType || "").trim().toLowerCase();
+      if (!["douyin_url", "uploaded_file"].includes(sourceType)) return null;
+      const status = normalizeCloudFallbackStatus(value.status);
+      const recordId = String(value.recordId || value.syncRecordId || "").trim().slice(0, 180);
+      const sourceUrl = String(value.sourceUrl || value.url || "").trim().slice(0, 4096);
+      const fileID = String(value.fileID || value.audioFileID || value.fileId || "").trim().slice(0, 512);
+      const transcription = String(value.transcription || "").trim().slice(0, 2e5);
+      const recordSnapshot = normalizeCloudFallbackRecordSnapshot2(value.recordSnapshot);
+      return {
+        jobId,
+        recordId,
+        sourceType,
+        bindingFingerprint: String(value.bindingFingerprint || "").trim().slice(0, 80),
+        clientId: String(value.clientId || "").trim().slice(0, 180),
+        sourceFingerprint: String(value.sourceFingerprint || "").trim().slice(0, 80),
+        ...sourceUrl ? { sourceUrl } : {},
+        ...fileID ? { fileID } : {},
+        status,
+        stage: String(value.stage || "").trim().slice(0, 100),
+        progress: Number.isFinite(Number(value.progress)) ? Math.max(0, Math.min(100, Number(value.progress))) : 0,
+        attemptId: String(value.attemptId || "").trim().slice(0, 180),
+        ...String(value.syncAttemptId || "").trim() ? { syncAttemptId: String(value.syncAttemptId).trim().slice(0, 180) } : {},
+        ...String(value.syncLeaseUntil || "").trim() ? { syncLeaseUntil: String(value.syncLeaseUntil).trim().slice(0, 80) } : {},
+        provider: String(value.provider || "").trim().slice(0, 120),
+        providerRequestId: String(value.providerRequestId || "").trim().slice(0, 180),
+        ...transcription ? { transcription } : {},
+        error: normalizeCloudFallbackError(value.error),
+        clientRequestId: String(value.clientRequestId || value.idempotencyKey || "").trim().slice(0, 240),
+        createdAt: String(value.createdAt || "").trim(),
+        updatedAt: String(value.updatedAt || "").trim(),
+        completedAt: String(value.completedAt || "").trim(),
+        retryCount: Math.max(0, Number(value.retryCount) || 0),
+        ...Number.isFinite(Number(value.recordRetryCount)) ? { recordRetryCount: Math.max(0, Math.floor(Number(value.recordRetryCount))) } : {},
+        retryable: value.retryable === true,
+        ...recordSnapshot ? { recordSnapshot } : {}
+      };
+    }
+    __name(normalizeCloudFallbackJob2, "normalizeCloudFallbackJob");
+    function normalizeCloudFallbackJobs2(value) {
+      if (!Array.isArray(value)) return [];
+      const seen = /* @__PURE__ */ new Set();
+      const normalized = value.map(normalizeCloudFallbackJob2).filter((job) => {
+        if (!job) return false;
+        const sourceIdentity = job.sourceFingerprint || [job.sourceType, job.sourceUrl || job.fileID || ""].join(":");
+        const identity = [
+          job.jobId,
+          job.bindingFingerprint,
+          job.clientId,
+          job.recordId,
+          sourceIdentity
+        ].join("");
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      });
+      const pending = normalized.filter((job) => isCloudFallbackPendingStatus(job.status) || job.status === "failed" && job.retryable === true);
+      const terminal = normalized.filter((job) => isCloudFallbackTerminalStatus(job.status) || job.status === "failed" && job.retryable !== true).slice(-100);
+      return [...pending, ...terminal];
+    }
+    __name(normalizeCloudFallbackJobs2, "normalizeCloudFallbackJobs");
+    function isCloudFallbackTerminalStatus(value) {
+      return TERMINAL_CLOUD_FALLBACK_STATUSES.has(String(value || "").trim().toLowerCase());
+    }
+    __name(isCloudFallbackTerminalStatus, "isCloudFallbackTerminalStatus");
+    function isCloudFallbackPendingStatus(value) {
+      const status = String(value || "").trim().toLowerCase();
+      return CLOUD_FALLBACK_STATUSES.has(status) && !TERMINAL_CLOUD_FALLBACK_STATUSES.has(status);
+    }
+    __name(isCloudFallbackPendingStatus, "isCloudFallbackPendingStatus");
+    function isCloudFallbackJobTerminal2(value) {
+      const job = value && typeof value === "object" ? value : { status: value };
+      const status = String(job.status || "").trim().toLowerCase();
+      return isCloudFallbackTerminalStatus(status) || status === "failed" && job.retryable !== true;
+    }
+    __name(isCloudFallbackJobTerminal2, "isCloudFallbackJobTerminal");
+    function isCloudFallbackJobPending2(value) {
+      const job = value && typeof value === "object" ? value : { status: value };
+      const status = String(job.status || "").trim().toLowerCase();
+      return isCloudFallbackPendingStatus(status) || status === "failed" && job.retryable === true;
+    }
+    __name(isCloudFallbackJobPending2, "isCloudFallbackJobPending");
+    function normalizeCloudFallbackAck2(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const jobId = String(value.jobId || value.id || "").trim();
+      const bindingFingerprint = String(value.bindingFingerprint || "").trim();
+      const clientId = String(value.clientId || "").trim();
+      if (!jobId || jobId.length > 180 || !bindingFingerprint || !clientId) return null;
+      return {
+        jobId,
+        bindingFingerprint: bindingFingerprint.slice(0, 80),
+        clientId: clientId.slice(0, 180),
+        recordId: String(value.recordId || "").trim().slice(0, 180),
+        queuedAt: String(value.queuedAt || "").trim().slice(0, 80),
+        attempts: Math.max(0, Math.floor(Number(value.attempts) || 0))
+      };
+    }
+    __name(normalizeCloudFallbackAck2, "normalizeCloudFallbackAck");
+    function normalizeCloudFallbackAcks2(value) {
+      if (!Array.isArray(value)) return [];
+      const seen = /* @__PURE__ */ new Set();
+      return value.map(normalizeCloudFallbackAck2).filter((ack) => {
+        if (!ack) return false;
+        const identity = [ack.jobId, ack.bindingFingerprint, ack.clientId].join("");
+        if (seen.has(identity)) return false;
+        seen.add(identity);
+        return true;
+      }).slice(-100);
+    }
+    __name(normalizeCloudFallbackAcks2, "normalizeCloudFallbackAcks");
+    function normalizeCloudFallbackSourceType2(value) {
+      const sourceType = String(value || "").trim().toLowerCase();
+      return ["douyin_url", "uploaded_file"].includes(sourceType) ? sourceType : "";
+    }
+    __name(normalizeCloudFallbackSourceType2, "normalizeCloudFallbackSourceType");
+    function isControlledCloudFallbackFileId2(value) {
+      const fileID = String(value || "").trim();
+      return Boolean(fileID) && fileID.length <= 512 && !/[?&#\s]/.test(fileID) && (!/^[a-z][a-z0-9+.-]*:\/\//i.test(fileID) || /^cloud:\/\//i.test(fileID)) && !/["'<>]/.test(fileID);
+    }
+    __name(isControlledCloudFallbackFileId2, "isControlledCloudFallbackFileId");
+    module2.exports = {
+      CONNECTION_TICKET_ALPHABET,
+      CONNECTION_TICKET_PAYLOAD_LENGTH,
+      normalizeConnectionTicket: normalizeConnectionTicket2,
+      isConnectionTicket: isConnectionTicket2,
+      normalizeCloudFallbackStatus,
+      normalizeCloudFallbackError,
+      normalizeCloudFallbackRecordSnapshot: normalizeCloudFallbackRecordSnapshot2,
+      normalizeCloudFallbackJob: normalizeCloudFallbackJob2,
+      normalizeCloudFallbackJobs: normalizeCloudFallbackJobs2,
+      normalizeCloudFallbackAck: normalizeCloudFallbackAck2,
+      normalizeCloudFallbackAcks: normalizeCloudFallbackAcks2,
+      isCloudFallbackTerminalStatus,
+      isCloudFallbackPendingStatus,
+      isCloudFallbackJobTerminal: isCloudFallbackJobTerminal2,
+      isCloudFallbackJobPending: isCloudFallbackJobPending2,
+      normalizeCloudFallbackSourceType: normalizeCloudFallbackSourceType2,
+      isControlledCloudFallbackFileId: isControlledCloudFallbackFileId2
+    };
+  }
+});
+
+// src/cloud-media-upload.js
+var require_cloud_media_upload = __commonJS({
+  "src/cloud-media-upload.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var fs2 = require("fs");
+    var http2 = require("http");
+    var https2 = require("https");
+    var MAX_CLOUD_FALLBACK_MEDIA_BYTES2 = 100 * 1024 * 1024;
+    var DEFAULT_UPLOAD_TIMEOUT_MS = 12e4;
+    function cloudMediaError(code, message, extra = {}) {
+      const error = new Error(message);
+      error.code = code;
+      Object.assign(error, extra);
+      return error;
+    }
+    __name(cloudMediaError, "cloudMediaError");
+    function throwIfAborted2(signal) {
+      if (signal && signal.aborted) {
+        throw cloudMediaError("CLOUD_MEDIA_UPLOAD_ABORTED", "云端媒体上传已取消", { name: "AbortError" });
+      }
+    }
+    __name(throwIfAborted2, "throwIfAborted");
+    function normalizeMaxBytes(value) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? Math.min(MAX_CLOUD_FALLBACK_MEDIA_BYTES2, Math.floor(numeric)) : MAX_CLOUD_FALLBACK_MEDIA_BYTES2;
+    }
+    __name(normalizeMaxBytes, "normalizeMaxBytes");
+    async function statMediaFile(filePath, maxBytes = MAX_CLOUD_FALLBACK_MEDIA_BYTES2) {
+      const normalizedPath = String(filePath || "").trim();
+      if (!normalizedPath) throw cloudMediaError("CLOUD_MEDIA_FILE_REQUIRED", "云端媒体文件缺失");
+      let stat;
+      try {
+        stat = await fs2.promises.stat(normalizedPath);
+      } catch (_) {
+        throw cloudMediaError("CLOUD_MEDIA_FILE_UNAVAILABLE", "云端媒体文件不可用");
+      }
+      const size = Number(stat && stat.size);
+      if (!stat.isFile() || !Number.isSafeInteger(size) || size <= 0) {
+        throw cloudMediaError("CLOUD_MEDIA_FILE_INVALID", "云端媒体文件无效");
+      }
+      if (size > normalizeMaxBytes(maxBytes)) {
+        throw cloudMediaError("CLOUD_MEDIA_TOO_LARGE", "云端媒体文件超过大小限制", { size });
+      }
+      return { path: normalizedPath, size };
+    }
+    __name(statMediaFile, "statMediaFile");
+    async function hashFileSha2562(filePath, { signal, maxBytes = MAX_CLOUD_FALLBACK_MEDIA_BYTES2 } = {}) {
+      throwIfAborted2(signal);
+      const file = await statMediaFile(filePath, maxBytes);
+      return await new Promise((resolve, reject) => {
+        const hash = crypto2.createHash("sha256");
+        const stream = fs2.createReadStream(file.path);
+        let settled = false;
+        let bytes = 0;
+        const finish = /* @__PURE__ */ __name((error, value) => {
+          if (settled) return;
+          settled = true;
+          if (signal && typeof signal.removeEventListener === "function") signal.removeEventListener("abort", abort);
+          if (error) {
+            stream.destroy();
+            reject(error);
+          } else {
+            resolve(value);
+          }
+        }, "finish");
+        const abort = /* @__PURE__ */ __name(() => finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_ABORTED", "云端媒体处理已取消", { name: "AbortError" })), "abort");
+        if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
+        stream.on("data", (chunk) => {
+          bytes += chunk.length;
+          if (bytes > normalizeMaxBytes(maxBytes)) {
+            finish(cloudMediaError("CLOUD_MEDIA_TOO_LARGE", "云端媒体文件超过大小限制", { size: bytes }));
+            return;
+          }
+          hash.update(chunk);
+        });
+        stream.on("error", (error) => finish(cloudMediaError("CLOUD_MEDIA_FILE_READ_FAILED", "读取云端媒体文件失败", { cause: error })));
+        stream.on("end", () => {
+          if (!bytes) {
+            finish(cloudMediaError("CLOUD_MEDIA_FILE_INVALID", "云端媒体文件为空"));
+            return;
+          }
+          finish(null, { size: bytes, sha256: hash.digest("hex") });
+        });
+      });
+    }
+    __name(hashFileSha2562, "hashFileSha256");
+    function sanitizeFileName(value) {
+      const text = String(value || "audio.mp3").replace(/[^A-Za-z0-9._-]/g, "_");
+      return text || "audio.mp3";
+    }
+    __name(sanitizeFileName, "sanitizeFileName");
+    function makeMultipartParts(fields, fileName, contentType) {
+      const boundary = `----wechatInboxMedia${crypto2.randomBytes(12).toString("hex")}`;
+      const fieldBuffers = [];
+      Object.entries(fields && typeof fields === "object" ? fields : {}).forEach(([key, value]) => {
+        fieldBuffers.push(Buffer.from(
+          `--${boundary}\r
+Content-Disposition: form-data; name="${String(key).replace(/["\r\n]/g, "")}"\r
+\r
+${String(value)}\r
+`,
+          "utf8"
+        ));
+      });
+      const fileHeader = Buffer.from(
+        `--${boundary}\r
+Content-Disposition: form-data; name="file"; filename="${sanitizeFileName(fileName)}"\r
+Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
+\r
+`,
+        "utf8"
+      );
+      const closing = Buffer.from(`\r
+--${boundary}--\r
+`, "utf8");
+      return { boundary, prefix: Buffer.concat([...fieldBuffers, fileHeader]), closing };
+    }
+    __name(makeMultipartParts, "makeMultipartParts");
+    function normalizeSignedHeaders(value) {
+      const headers = {};
+      const allowed = /^(?:authorization|signature|key|x-cos-security-token|x-cos-meta-fileid)$/i;
+      Object.entries(value && typeof value === "object" ? value : {}).forEach(([key, headerValue]) => {
+        if (!allowed.test(String(key)) || headerValue === void 0 || headerValue === null) return;
+        headers[String(key)] = String(headerValue);
+      });
+      return headers;
+    }
+    __name(normalizeSignedHeaders, "normalizeSignedHeaders");
+    async function uploadRawFile(uploadUrl, file, {
+      signal,
+      timeoutMs,
+      headers: signedHeaders,
+      method = "PUT",
+      contentType = "audio/mpeg",
+      maxBytes,
+      onProgress
+    } = {}) {
+      const transport = uploadUrl.protocol === "https:" ? https2 : http2;
+      const requestHeaders = normalizeSignedHeaders(signedHeaders);
+      requestHeaders["Content-Length"] = file.size;
+      const requestOptions = {
+        protocol: uploadUrl.protocol,
+        hostname: uploadUrl.hostname,
+        port: uploadUrl.port || void 0,
+        method: String(method || "PUT").toUpperCase() === "PUT" ? "PUT" : "PUT",
+        path: `${uploadUrl.pathname || "/"}${uploadUrl.search || ""}`,
+        headers: requestHeaders
+      };
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        let timer = null;
+        let stream = null;
+        let sent = 0;
+        let request;
+        const finish = /* @__PURE__ */ __name((error, value) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (signal && typeof signal.removeEventListener === "function") signal.removeEventListener("abort", abort);
+          if (stream) stream.destroy();
+          if (error) reject(error);
+          else resolve(value);
+        }, "finish");
+        const abort = /* @__PURE__ */ __name(() => {
+          if (request) request.destroy();
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_ABORTED", "云端媒体上传已取消", { name: "AbortError" }));
+        }, "abort");
+        try {
+          request = transport.request(requestOptions, (response) => {
+            response.resume();
+            response.on("end", () => {
+              if (response.statusCode < 200 || response.statusCode >= 300) {
+                finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_FAILED", "云端媒体上传失败", { statusCode: response.statusCode }));
+                return;
+              }
+              finish(null, { statusCode: response.statusCode, size: file.size });
+            });
+          });
+        } catch (error) {
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_FAILED", "云端媒体上传失败", { cause: error }));
+          return;
+        }
+        if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
+        timer = setTimeout(() => {
+          request.destroy();
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时"));
+        }, Math.max(1e3, Math.min(10 * 60 * 1e3, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS)));
+        request.on("error", (error) => {
+          if (settled) return;
+          if (signal && signal.aborted) finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_ABORTED", "云端媒体上传已取消", { name: "AbortError" }));
+          else finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_FAILED", "云端媒体上传失败", { cause: error }));
+        });
+        stream = fs2.createReadStream(file.path);
+        stream.on("data", (chunk) => {
+          if (settled) return;
+          sent += chunk.length;
+          if (sent > file.size || sent > normalizeMaxBytes(maxBytes)) {
+            stream.destroy();
+            request.destroy();
+            finish(cloudMediaError("CLOUD_MEDIA_TOO_LARGE", "云端媒体文件超过大小限制", { size: sent }));
+            return;
+          }
+          if (typeof onProgress === "function") {
+            try {
+              onProgress({ bytesSent: sent, totalBytes: file.size, percent: Math.round(sent / file.size * 100) });
+            } catch (_) {
+            }
+          }
+          if (!request.write(chunk)) stream.pause();
+        });
+        request.on("drain", () => {
+          if (stream && !settled) stream.resume();
+        });
+        stream.on("error", (error) => finish(cloudMediaError("CLOUD_MEDIA_FILE_READ_FAILED", "读取云端媒体文件失败", { cause: error })));
+        stream.on("end", () => {
+          if (!settled) request.end();
+        });
+      });
+    }
+    __name(uploadRawFile, "uploadRawFile");
+    async function uploadMultipartFile2(uploadUrl, fields, filePath, {
+      signal,
+      timeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS,
+      maxBytes = MAX_CLOUD_FALLBACK_MEDIA_BYTES2,
+      fileName = "audio.mp3",
+      contentType = "audio/mpeg",
+      onProgress,
+      method = "",
+      headers = {}
+    } = {}) {
+      throwIfAborted2(signal);
+      let parsed;
+      try {
+        parsed = new URL(String(uploadUrl || ""));
+      } catch (_) {
+        throw cloudMediaError("CLOUD_MEDIA_UPLOAD_URL_INVALID", "云端媒体上传地址无效");
+      }
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        throw cloudMediaError("CLOUD_MEDIA_UPLOAD_URL_INVALID", "云端媒体上传地址无效");
+      }
+      const file = await statMediaFile(filePath, maxBytes);
+      if (String(method || "").trim().toUpperCase() === "PUT" || Object.keys(headers || {}).length > 0) {
+        return await uploadRawFile(parsed, file, {
+          signal,
+          timeoutMs,
+          headers,
+          method: "PUT",
+          contentType,
+          maxBytes,
+          onProgress
+        });
+      }
+      const parts = makeMultipartParts(fields, fileName, contentType);
+      const contentLength = parts.prefix.length + file.size + parts.closing.length;
+      const transport = parsed.protocol === "https:" ? https2 : http2;
+      const requestOptions = {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port || void 0,
+        method: "POST",
+        path: `${parsed.pathname || "/"}${parsed.search || ""}`,
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${parts.boundary}`,
+          "Content-Length": contentLength
+        }
+      };
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        let sent = 0;
+        let stream = null;
+        let timer = null;
+        const finish = /* @__PURE__ */ __name((error, value) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (signal && typeof signal.removeEventListener === "function") signal.removeEventListener("abort", abort);
+          if (stream) stream.destroy();
+          if (error) reject(error);
+          else resolve(value);
+        }, "finish");
+        const abort = /* @__PURE__ */ __name(() => {
+          if (request) request.destroy();
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_ABORTED", "云端媒体上传已取消", { name: "AbortError" }));
+        }, "abort");
+        let request;
+        try {
+          request = transport.request(requestOptions, (response) => {
+            response.resume();
+            response.on("end", () => {
+              if (response.statusCode < 200 || response.statusCode >= 300) {
+                finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_FAILED", "云端媒体上传失败", { statusCode: response.statusCode }));
+                return;
+              }
+              finish(null, { statusCode: response.statusCode, size: file.size });
+            });
+          });
+        } catch (error) {
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_FAILED", "云端媒体上传失败", { cause: error }));
+          return;
+        }
+        if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
+        const timeout = Math.max(1e3, Math.min(10 * 60 * 1e3, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS));
+        timer = setTimeout(() => {
+          request.destroy();
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时"));
+        }, timeout);
+        request.on("error", (error) => {
+          if (settled) return;
+          if (signal && signal.aborted) {
+            finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_ABORTED", "云端媒体上传已取消", { name: "AbortError" }));
+          } else {
+            finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_FAILED", "云端媒体上传失败", { cause: error }));
+          }
+        });
+        request.write(parts.prefix);
+        stream = fs2.createReadStream(file.path);
+        stream.on("data", (chunk) => {
+          if (settled) return;
+          sent += chunk.length;
+          if (sent > file.size || sent > normalizeMaxBytes(maxBytes)) {
+            stream.destroy();
+            request.destroy();
+            finish(cloudMediaError("CLOUD_MEDIA_TOO_LARGE", "云端媒体文件超过大小限制", { size: sent }));
+            return;
+          }
+          if (typeof onProgress === "function") {
+            try {
+              onProgress({ bytesSent: sent, totalBytes: file.size, percent: Math.round(sent / file.size * 100) });
+            } catch (_) {
+            }
+          }
+          if (!request.write(chunk)) stream.pause();
+        });
+        request.on("drain", () => {
+          if (stream && !settled) stream.resume();
+        });
+        stream.on("error", (error) => finish(cloudMediaError("CLOUD_MEDIA_FILE_READ_FAILED", "读取云端媒体文件失败", { cause: error })));
+        stream.on("end", () => {
+          if (settled) return;
+          request.end(parts.closing);
+        });
+      });
+    }
+    __name(uploadMultipartFile2, "uploadMultipartFile");
+    module2.exports = {
+      MAX_CLOUD_FALLBACK_MEDIA_BYTES: MAX_CLOUD_FALLBACK_MEDIA_BYTES2,
+      DEFAULT_UPLOAD_TIMEOUT_MS,
+      hashFileSha256: hashFileSha2562,
+      uploadMultipartFile: uploadMultipartFile2,
+      uploadPreparedFile: uploadMultipartFile2,
+      statMediaFile
+    };
+  }
+});
+
+// src/operator-media-node.js
+var require_operator_media_node = __commonJS({
+  "src/operator-media-node.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var http2 = require("http");
+    var https2 = require("https");
+    var OPERATOR_NODE_ENABLED_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_ENABLED";
+    var OPERATOR_NODE_ID_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_ID";
+    var OPERATOR_NODE_TOKEN_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_TOKEN";
+    var OPERATOR_NODE_API_BASE_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_API_BASE";
+    var WORKER_PROTOCOL_VERSION2 = "cfb-worker/v2";
+    var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
+    var DEFAULT_POLL_INTERVAL_MS = 15e3;
+    var DEFAULT_MAX_IDLE_POLL_INTERVAL_MS = 12e4;
+    var DEFAULT_HEARTBEAT_INTERVAL_MS = 3e4;
+    var DEFAULT_REQUEST_TIMEOUT_MS = 3e4;
+    var MAX_OPERATOR_RESPONSE_BYTES = 1024 * 1024;
+    var MAX_OPERATOR_MEDIA_BYTES = 100 * 1024 * 1024;
+    function nodeError(code, message, extra = {}) {
+      const error = new Error(message);
+      error.code = code;
+      Object.assign(error, extra);
+      return error;
+    }
+    __name(nodeError, "nodeError");
+    function isOperatorNodeEnabled(env = process.env) {
+      return String(env && env[OPERATOR_NODE_ENABLED_ENV2] || "").trim() === "1" && Boolean(String(env && env[OPERATOR_NODE_ID_ENV2] || "").trim()) && Boolean(String(env && env[OPERATOR_NODE_TOKEN_ENV2] || "").trim());
+    }
+    __name(isOperatorNodeEnabled, "isOperatorNodeEnabled");
+    function readOperatorNodeConfig({ env = process.env, apiBase = "" } = {}) {
+      const workerId = String(env && env[OPERATOR_NODE_ID_ENV2] || "").trim();
+      const workerToken = String(env && env[OPERATOR_NODE_TOKEN_ENV2] || "").trim();
+      const configuredApiBase = String(env && env[OPERATOR_NODE_API_BASE_ENV2] || apiBase || "").trim().replace(/\/+$/, "");
+      return {
+        enabled: isOperatorNodeEnabled(env),
+        workerId,
+        workerToken,
+        apiBase: configuredApiBase
+      };
+    }
+    __name(readOperatorNodeConfig, "readOperatorNodeConfig");
+    function redactError(error) {
+      const code = String(error && error.code || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80) || "OPERATOR_NODE_FAILED";
+      return { code };
+    }
+    __name(redactError, "redactError");
+    function throwIfAborted2(signal) {
+      if (signal && signal.aborted) throw nodeError("OPERATOR_NODE_CANCELLED", "运营节点任务已取消", { name: "AbortError" });
+    }
+    __name(throwIfAborted2, "throwIfAborted");
+    function requestJsonViaNode2(baseUrl, path2, token, body, {
+      signal,
+      timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+      allowInsecureLoopback = false
+    } = {}) {
+      let parsed;
+      try {
+        parsed = new URL(`${String(baseUrl || "").replace(/\/+$/, "")}${path2}`);
+      } catch (_) {
+        return Promise.reject(nodeError("OPERATOR_NODE_API_INVALID", "运营节点 API 地址无效"));
+      }
+      const loopbackHost = ["127.0.0.1", "::1", "localhost"].includes(String(parsed.hostname || "").toLowerCase());
+      if (parsed.protocol !== "https:" && !(allowInsecureLoopback === true && parsed.protocol === "http:" && loopbackHost)) {
+        return Promise.reject(nodeError("OPERATOR_NODE_API_INVALID", "运营节点 API 地址无效"));
+      }
+      throwIfAborted2(signal);
+      const transport = parsed.protocol === "https:" ? https2 : http2;
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let timer = null;
+        const finish = /* @__PURE__ */ __name((error, value) => {
+          if (settled) return;
+          settled = true;
+          if (timer) clearTimeout(timer);
+          if (signal && typeof signal.removeEventListener === "function") signal.removeEventListener("abort", abort);
+          if (error) reject(error);
+          else resolve(value);
+        }, "finish");
+        let request;
+        const abort = /* @__PURE__ */ __name(() => {
+          if (request) request.destroy();
+          finish(nodeError("OPERATOR_NODE_CANCELLED", "运营节点请求已取消", { name: "AbortError" }));
+        }, "abort");
+        try {
+          request = transport.request({
+            protocol: parsed.protocol,
+            hostname: parsed.hostname,
+            port: parsed.port || void 0,
+            method: "POST",
+            path: `${parsed.pathname || "/"}${parsed.search || ""}`,
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "X-Cloud-Transcription-Worker-Token": token,
+              Accept: "application/json",
+              "Content-Type": "application/json"
+            }
+          }, (response) => {
+            let text = "";
+            let responseBytes = 0;
+            response.setEncoding("utf8");
+            response.on("data", (chunk) => {
+              responseBytes += Buffer.byteLength(String(chunk));
+              if (responseBytes > MAX_OPERATOR_RESPONSE_BYTES) {
+                response.destroy();
+                if (request) request.destroy();
+                finish(nodeError("OPERATOR_NODE_RESPONSE_TOO_LARGE", "运营节点 API 响应过大"));
+                return;
+              }
+              text += chunk;
+            });
+            response.on("end", () => {
+              let payload = null;
+              try {
+                payload = text ? JSON.parse(text) : {};
+              } catch (_) {
+                payload = {};
+              }
+              if (response.statusCode < 200 || response.statusCode >= 300) {
+                const error = nodeError(
+                  String(payload && (payload.code || payload.errCode) || `HTTP_${response.statusCode}`).slice(0, 80),
+                  "运营节点 API 请求失败",
+                  { statusCode: response.statusCode }
+                );
+                finish(error);
+                return;
+              }
+              finish(null, payload);
+            });
+          });
+        } catch (error) {
+          finish(nodeError("OPERATOR_NODE_REQUEST_FAILED", "运营节点 API 请求失败", { cause: error }));
+          return;
+        }
+        if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
+        timer = setTimeout(() => {
+          request.destroy();
+          finish(nodeError("OPERATOR_NODE_REQUEST_TIMEOUT", "运营节点 API 请求超时", { retryable: true }));
+        }, Math.max(1e3, Math.min(12e4, Number(timeoutMs) || DEFAULT_REQUEST_TIMEOUT_MS)));
+        request.on("error", (error) => {
+          if (settled) return;
+          if (signal && signal.aborted) finish(nodeError("OPERATOR_NODE_CANCELLED", "运营节点请求已取消", { name: "AbortError" }));
+          else finish(nodeError("OPERATOR_NODE_REQUEST_FAILED", "运营节点 API 请求失败", { cause: error, retryable: true }));
+        });
+        request.end(JSON.stringify(body || {}));
+      });
+    }
+    __name(requestJsonViaNode2, "requestJsonViaNode");
+    function normalizeJobs(response) {
+      const data = response && response.data && typeof response.data === "object" ? response.data : response;
+      return Array.isArray(data) ? data : Array.isArray(data && data.jobs) ? data.jobs : [];
+    }
+    __name(normalizeJobs, "normalizeJobs");
+    function isDouyinSourceUrl(value) {
+      try {
+        const url = new URL(String(value || "").trim());
+        return /^https?:$/.test(url.protocol) && /(^|\.)douyin\.com$/i.test(url.hostname);
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isDouyinSourceUrl, "isDouyinSourceUrl");
+    function createOperatorMediaNode2({
+      plugin = null,
+      env = process.env,
+      apiBase = "",
+      request = null,
+      pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+      heartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+      capacityHeartbeatIntervalMs = DEFAULT_HEARTBEAT_INTERVAL_MS,
+      maxIdlePollIntervalMs = DEFAULT_MAX_IDLE_POLL_INTERVAL_MS,
+      logger = /* @__PURE__ */ __name(() => {
+      }, "logger"),
+      clock = /* @__PURE__ */ __name(() => Date.now(), "clock"),
+      setTimer = /* @__PURE__ */ __name((fn, delay2) => setTimeout(fn, delay2), "setTimer"),
+      clearTimer = /* @__PURE__ */ __name((id) => clearTimeout(id), "clearTimer")
+    } = {}) {
+      const config = readOperatorNodeConfig({ env, apiBase });
+      const callApi = typeof request === "function" ? request : (path2, body, options) => requestJsonViaNode2(config.apiBase, path2, config.workerToken, body, options);
+      let running = false;
+      let pollTimer = null;
+      let pollInFlight = null;
+      let activeJob = null;
+      let activePromise = null;
+      let activeController = null;
+      let activeHeartbeatTimer = null;
+      let capacityHeartbeatTimer = null;
+      let capacityHeartbeatInFlight = null;
+      let capacityController = null;
+      let capacityReady = false;
+      let stopRequested = false;
+      let lastErrorCode = "";
+      let lastPollAt = 0;
+      let completedCount = 0;
+      let idleRuns = 0;
+      let nextPollDelayMs = 0;
+      const baseForJob = /* @__PURE__ */ __name((job) => ({
+        jobId: String(job && job.jobId || job && job.id || "").trim(),
+        workerId: config.workerId,
+        attemptId: String(job && job.attemptId || "").trim(),
+        leaseToken: String(job && job.leaseToken || "").trim(),
+        fencingVersion: job && job.fencingVersion,
+        protocolVersion: WORKER_PROTOCOL_VERSION2
+      }), "baseForJob");
+      const snapshot = /* @__PURE__ */ __name(() => ({
+        enabled: config.enabled,
+        running,
+        status: activeJob ? "processing" : running ? "idle" : "stopped",
+        active: Boolean(activeJob),
+        phase: activeJob ? String(activeJob.phase || "") : "",
+        stage: activeJob ? String(activeJob.stage || "") : "",
+        queuedCount: activeJob ? 1 : 0,
+        completedCount,
+        lastErrorCode,
+        lastPollAt,
+        idleRuns,
+        nextPollDelayMs
+      }), "snapshot");
+      const schedule = /* @__PURE__ */ __name((delay2 = pollIntervalMs) => {
+        if (!running || pollTimer) return;
+        nextPollDelayMs = Math.max(1e3, Number(delay2) || DEFAULT_POLL_INTERVAL_MS);
+        pollTimer = setTimer(() => {
+          pollTimer = null;
+          poll().catch(() => {
+          });
+        }, nextPollDelayMs);
+        if (pollTimer && typeof pollTimer.unref === "function") pollTimer.unref();
+      }, "schedule");
+      const heartbeat = /* @__PURE__ */ __name(async (job, stage, progress) => {
+        const body = { ...baseForJob(job), stage: String(stage || "").slice(0, 64), progress: Math.max(0, Math.min(100, Number(progress) || 0)) };
+        return await callApi("/transcriptions/fallback/worker/heartbeat", body, { signal: activeController && activeController.signal });
+      }, "heartbeat");
+      const stopHeartbeat = /* @__PURE__ */ __name(() => {
+        if (activeHeartbeatTimer) clearInterval(activeHeartbeatTimer);
+        activeHeartbeatTimer = null;
+      }, "stopHeartbeat");
+      const startHeartbeat = /* @__PURE__ */ __name((job) => {
+        stopHeartbeat();
+        activeHeartbeatTimer = setInterval(async () => {
+          if (!running || !activeJob || !activeController || activeController.signal.aborted) return;
+          try {
+            await heartbeat(job, activeJob.stage || "processing", activeJob.progress || 10);
+          } catch (error) {
+            lastErrorCode = redactError(error).code;
+            if (error && error.code !== "STALE_HEARTBEAT" && (error.code === "LEASE_LOST" || error.code === "JOB_CANCELLED")) {
+              activeController.abort();
+            }
+          }
+        }, Math.max(5e3, Number(heartbeatIntervalMs) || DEFAULT_HEARTBEAT_INTERVAL_MS));
+        if (activeHeartbeatTimer && typeof activeHeartbeatTimer.unref === "function") activeHeartbeatTimer.unref();
+      }, "startHeartbeat");
+      const complete = /* @__PURE__ */ __name(async (job, body) => {
+        return await callApi("/transcriptions/fallback/worker/complete", { ...baseForJob(job), ...body }, { signal: null });
+      }, "complete");
+      const getCapabilities = /* @__PURE__ */ __name(() => {
+        const capabilities = ["media_acquire"];
+        try {
+          if (plugin && typeof plugin.getLocalAsrInstallStatus === "function" && plugin.getLocalAsrInstallStatus().ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
+        } catch (_) {
+        }
+        return capabilities;
+      }, "getCapabilities");
+      const stopCapacityHeartbeat = /* @__PURE__ */ __name(() => {
+        if (capacityHeartbeatTimer) clearInterval(capacityHeartbeatTimer);
+        capacityHeartbeatTimer = null;
+        if (capacityController && !capacityController.signal.aborted) capacityController.abort();
+        capacityController = null;
+        capacityReady = false;
+      }, "stopCapacityHeartbeat");
+      const sendCapacityHeartbeat = /* @__PURE__ */ __name(async () => {
+        if (!running) return false;
+        if (capacityHeartbeatInFlight) return await capacityHeartbeatInFlight;
+        const capabilities = getCapabilities();
+        const controller = new AbortController();
+        capacityController = controller;
+        const body = {
+          workerId: config.workerId,
+          protocolVersion: WORKER_PROTOCOL_VERSION2,
+          capabilities,
+          runtimeCapabilities: capabilities,
+          availableCapabilities: capabilities,
+          phases: ["media", "asr"],
+          capacitySlots: 1,
+          activeSlots: activeJob ? 1 : 0
+        };
+        capacityHeartbeatInFlight = (async () => {
+          try {
+            await callApi("/transcriptions/fallback/worker/capacity", body, { signal: controller.signal });
+            capacityReady = true;
+            return true;
+          } catch (error) {
+            capacityReady = false;
+            lastErrorCode = redactError(error).code;
+            try {
+              logger({ type: "capacity-heartbeat-failed", code: lastErrorCode });
+            } catch (_) {
+            }
+            return false;
+          } finally {
+            if (capacityController === controller) capacityController = null;
+            capacityHeartbeatInFlight = null;
+          }
+        })();
+        return await capacityHeartbeatInFlight;
+      }, "sendCapacityHeartbeat");
+      const startCapacityHeartbeat = /* @__PURE__ */ __name(() => {
+        if (capacityHeartbeatTimer) clearInterval(capacityHeartbeatTimer);
+        capacityHeartbeatTimer = null;
+        void sendCapacityHeartbeat().catch(() => {
+        });
+        capacityHeartbeatTimer = setInterval(() => {
+          void sendCapacityHeartbeat().catch(() => {
+          });
+        }, Math.max(5e3, Number(capacityHeartbeatIntervalMs) || DEFAULT_HEARTBEAT_INTERVAL_MS));
+        if (capacityHeartbeatTimer && typeof capacityHeartbeatTimer.unref === "function") capacityHeartbeatTimer.unref();
+      }, "startCapacityHeartbeat");
+      const failBody = /* @__PURE__ */ __name((error, stage, { shutdown = false } = {}) => ({
+        // Closing an operator node must release the lease for another node. It is
+        // retryable work, never a user cancellation terminal state.
+        outcome: shutdown ? "failed" : error && error.noSpeech === true ? "no_speech" : "failed",
+        phase: String(activeJob && activeJob.phase || "").trim() || "asr",
+        backend: String(activeJob && activeJob.backend || "").trim() || void 0,
+        error: {
+          ...shutdown ? { code: "OPERATOR_NODE_STOPPED" } : redactError(error),
+          message: shutdown ? "运营节点已停止，任务可由其他节点继续" : "运营节点任务处理失败",
+          retryable: true,
+          stage: String(stage || "").slice(0, 64)
+        }
+      }), "failBody");
+      const processJob = /* @__PURE__ */ __name(async (job) => {
+        const phase = String(job && job.phase || "").trim();
+        const base = baseForJob(job);
+        if (!base.jobId || !base.attemptId || !base.leaseToken) throw nodeError("OPERATOR_JOB_INVALID", "运营节点任务租约无效");
+        if (!["media", "asr"].includes(phase)) throw nodeError("OPERATOR_JOB_PHASE_INVALID", "运营节点任务阶段无效");
+        if (phase === "media" && (!isDouyinSourceUrl(job.sourceUrl) || String(job.sourceType || "").trim() !== "douyin_url")) {
+          throw nodeError("OPERATOR_MEDIA_SOURCE_INVALID", "运营节点只处理受控抖音媒体任务", { retryable: false });
+        }
+        if (phase === "asr" && !/^https?:\/\//i.test(String(job.controlledMediaUrl || "").trim())) {
+          throw nodeError("OPERATOR_CONTROLLED_MEDIA_REQUIRED", "运营节点 ASR 缺少受控媒体地址", { retryable: false });
+        }
+        activeController = new AbortController();
+        activeJob = { phase, backend: String(job.backend || "").trim(), stage: "acquiring", progress: 5 };
+        startHeartbeat(job);
+        let tempPath = "";
+        let mediaCompletionAttempted = false;
+        try {
+          await heartbeat(job, "acquiring", 5);
+          if (phase === "media") {
+            if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== "function" || typeof plugin.uploadWorkerMediaForJob !== "function") {
+              throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点媒体能力未就绪", { retryable: true });
+            }
+            tempPath = await plugin.acquireOperatorDouyinMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
+            activeJob.progress = 45;
+            const uploaded = await plugin.uploadWorkerMediaForJob(tempPath, job, {
+              signal: activeController.signal,
+              workerConfig: config,
+              request: callApi,
+              beforeComplete: /* @__PURE__ */ __name(() => {
+                mediaCompletionAttempted = true;
+                stopHeartbeat();
+              }, "beforeComplete")
+            });
+            activeJob.progress = 100;
+            stopHeartbeat();
+            const completedPayload = uploaded && uploaded.completion;
+            if (!completedPayload) throw nodeError("OPERATOR_MEDIA_COMPLETE_INVALID", "运营节点媒体上传未完成", { retryable: true });
+            return completedPayload;
+          }
+          if (!plugin || typeof plugin.downloadMediaToTempFile !== "function" || typeof plugin.runOperatorLocalTranscription !== "function" && typeof plugin.runLocalTranscription !== "function") {
+            throw nodeError("OPERATOR_ASR_HANDLER_UNAVAILABLE", "运营节点本地转写能力未就绪", { retryable: true });
+          }
+          if (typeof plugin.isOperatorLocalAsrAvailable === "function" && !plugin.isOperatorLocalAsrAvailable()) {
+            throw nodeError("OPERATOR_ASR_BUSY", "运营节点本地转写正忙", { retryable: true });
+          }
+          tempPath = await plugin.downloadMediaToTempFile(job.controlledMediaUrl, {
+            signal: activeController.signal,
+            maxBytes: MAX_OPERATOR_MEDIA_BYTES
+          });
+          if (typeof plugin.verifyOperatorControlledMediaFile !== "function") {
+            throw nodeError("OPERATOR_MEDIA_INTEGRITY_REQUIRED", "运营节点缺少受控媒体校验能力", { retryable: false });
+          }
+          await plugin.verifyOperatorControlledMediaFile(tempPath, job, { signal: activeController.signal });
+          activeJob.stage = "transcribing";
+          activeJob.progress = 45;
+          const runLocalAsr = typeof plugin.runOperatorLocalTranscription === "function" ? plugin.runOperatorLocalTranscription.bind(plugin) : plugin.runLocalTranscription.bind(plugin);
+          const result = await runLocalAsr(tempPath, {
+            inputPath: tempPath,
+            signal: activeController.signal,
+            includeQualityDetails: true,
+            recordId: "",
+            sourceUrl: "",
+            operatorNode: true
+          });
+          const transcription = String(result && typeof result === "object" ? result.transcription : result || "").trim();
+          if (!transcription) throw nodeError("OPERATOR_ASR_EMPTY", "运营节点本地转写结果为空", { retryable: true });
+          activeJob.progress = 100;
+          stopHeartbeat();
+          return await complete(job, {
+            phase: "asr",
+            backend: "local_whisper_cpp",
+            outcome: "succeeded",
+            transcription
+          });
+        } catch (error) {
+          lastErrorCode = redactError(error).code;
+          if (phase === "media" && mediaCompletionAttempted) throw error;
+          try {
+            return await complete(job, failBody(error, activeJob && activeJob.stage, { shutdown: stopRequested }));
+          } catch (completionError) {
+            lastErrorCode = redactError(completionError).code;
+            throw completionError;
+          }
+        } finally {
+          stopHeartbeat();
+          if (tempPath) {
+            try {
+              await fs2.promises.rm(tempPath, { force: true });
+            } catch (_) {
+            }
+          }
+          activeController = null;
+          activeJob = null;
+          completedCount += 1;
+        }
+      }, "processJob");
+      const poll = /* @__PURE__ */ __name(async () => {
+        if (!running) return;
+        if (pollInFlight) return await pollInFlight;
+        if (activeJob) return;
+        pollInFlight = (async () => {
+          lastPollAt = clock();
+          let claimed = false;
+          try {
+            if (!capacityReady && !await sendCapacityHeartbeat()) return;
+            const response = await callApi("/transcriptions/fallback/worker/claim", {
+              workerId: config.workerId,
+              protocolVersion: WORKER_PROTOCOL_VERSION2,
+              capabilities: getCapabilities(),
+              capacitySlots: 1,
+              activeSlots: 0,
+              limit: 1
+            }, { signal: null });
+            const jobs = normalizeJobs(response).slice(0, 1);
+            if (jobs.length) {
+              claimed = true;
+              if (!running || stopRequested) {
+                try {
+                  await complete(jobs[0], {
+                    phase: String(jobs[0] && jobs[0].phase || "").trim() || "asr",
+                    backend: String(jobs[0] && jobs[0].backend || "").trim() || void 0,
+                    outcome: "failed",
+                    error: {
+                      code: "OPERATOR_NODE_STOPPED",
+                      message: "运营节点已停止，任务可由其他节点继续",
+                      retryable: true,
+                      stage: "acquiring"
+                    }
+                  });
+                } catch (completionError) {
+                  lastErrorCode = redactError(completionError).code;
+                }
+                return;
+              }
+              activePromise = processJob(jobs[0]).catch((error) => {
+                lastErrorCode = redactError(error).code;
+              }).finally(() => {
+                activePromise = null;
+              });
+              await activePromise;
+            }
+          } catch (error) {
+            lastErrorCode = redactError(error).code;
+          } finally {
+            pollInFlight = null;
+            idleRuns = claimed ? 0 : Math.min(idleRuns + 1, 3);
+            const ceiling = Math.max(
+              1e3,
+              Number(maxIdlePollIntervalMs) || DEFAULT_MAX_IDLE_POLL_INTERVAL_MS
+            );
+            schedule(Math.min(ceiling, Math.max(1e3, Number(pollIntervalMs) || DEFAULT_POLL_INTERVAL_MS) * 2 ** idleRuns));
+          }
+        })();
+        return await pollInFlight;
+      }, "poll");
+      return {
+        config: { ...config, workerToken: void 0 },
+        isEnabled: /* @__PURE__ */ __name(() => config.enabled, "isEnabled"),
+        getSnapshot: snapshot,
+        start() {
+          if (!config.enabled || running) return false;
+          stopRequested = false;
+          running = true;
+          startCapacityHeartbeat();
+          schedule(0);
+          return true;
+        },
+        async stop() {
+          running = false;
+          stopRequested = true;
+          if (pollTimer) clearTimer(pollTimer);
+          pollTimer = null;
+          stopCapacityHeartbeat();
+          stopHeartbeat();
+          if (activeController && !activeController.signal.aborted) activeController.abort();
+          if (activePromise) await activePromise.catch(() => {
+          });
+          activePromise = null;
+          activeController = null;
+          activeJob = null;
+          return snapshot();
+        },
+        poll
+      };
+    }
+    __name(createOperatorMediaNode2, "createOperatorMediaNode");
+    module2.exports = {
+      OPERATOR_NODE_ENABLED_ENV: OPERATOR_NODE_ENABLED_ENV2,
+      OPERATOR_NODE_ID_ENV: OPERATOR_NODE_ID_ENV2,
+      OPERATOR_NODE_TOKEN_ENV: OPERATOR_NODE_TOKEN_ENV2,
+      OPERATOR_NODE_API_BASE_ENV: OPERATOR_NODE_API_BASE_ENV2,
+      WORKER_PROTOCOL_VERSION: WORKER_PROTOCOL_VERSION2,
+      DEFAULT_CAPABILITIES,
+      isOperatorNodeEnabled,
+      readOperatorNodeConfig,
+      requestJsonViaNode: requestJsonViaNode2,
+      createOperatorMediaNode: createOperatorMediaNode2
+    };
+  }
+});
+
 // src/wechat-channels-decrypt-utils.js
 var require_wechat_channels_decrypt_utils = __commonJS({
   "src/wechat-channels-decrypt-utils.js"(exports2, module2) {
@@ -13940,7 +15057,7 @@ var require_sync_lifecycle_utils = __commonJS({
         const attemptId = String(source.attemptId || "").trim();
         const bindingFingerprint = String(source.bindingFingerprint || "").trim().toLowerCase();
         const stage = String(source.stage || "").trim().toLowerCase();
-        if (!recordId || !/^[A-Za-z0-9_-]{8,128}$/.test(attemptId) || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint) || !["processing", "failed", "committed"].includes(stage)) continue;
+        if (!recordId || !/^[A-Za-z0-9_-]{8,128}$/.test(attemptId) || !/^[a-f0-9]{16,64}$/.test(bindingFingerprint) || !["processing", "failed", "committed", "cloud-fallback"].includes(stage)) continue;
         const normalized = {
           recordId,
           attemptId,
@@ -18633,6 +19750,33 @@ var {
   tryParseJson
 } = require_cloud_transcription_response_utils();
 var {
+  normalizeConnectionTicket,
+  isConnectionTicket,
+  normalizeCloudFallbackJob,
+  normalizeCloudFallbackJobs,
+  normalizeCloudFallbackAck,
+  normalizeCloudFallbackAcks,
+  normalizeCloudFallbackRecordSnapshot,
+  isCloudFallbackJobTerminal,
+  isCloudFallbackJobPending,
+  normalizeCloudFallbackSourceType,
+  isControlledCloudFallbackFileId
+} = require_cloud_fallback_job_utils();
+var {
+  MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+  hashFileSha256,
+  uploadMultipartFile
+} = require_cloud_media_upload();
+var {
+  createOperatorMediaNode,
+  OPERATOR_NODE_API_BASE_ENV,
+  OPERATOR_NODE_ENABLED_ENV,
+  OPERATOR_NODE_ID_ENV,
+  OPERATOR_NODE_TOKEN_ENV,
+  WORKER_PROTOCOL_VERSION,
+  requestJsonViaNode: requestOperatorJsonViaNode
+} = require_operator_media_node();
+var {
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer
 } = require_wechat_channels_decrypt_utils();
@@ -18837,7 +19981,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.193";
+var PLUGIN_RUNTIME_VERSION = "1.3.194";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -19003,6 +20147,7 @@ var DEFAULT_SETTINGS = {
   settingsVersion: 2,
   token: "",
   pendingBindCode: "",
+  pendingConnectionTicket: "",
   pendingRedeemCode: "",
   localTranscriptionEntitlementStatus: null,
   proEntitlementLastError: "",
@@ -19035,6 +20180,10 @@ var DEFAULT_SETTINGS = {
   deepseekBaseUrl: "https://api.deepseek.com/v1/chat/completions",
   cloudPreTranscriptionEnabled: false,
   cloudPreTranscriptionThresholdMinutes: 10,
+  cloudFallbackEnabled: false,
+  cloudFallbackJobs: [],
+  cloudFallbackSubmissions: [],
+  cloudFallbackPendingAcks: [],
   localAsrPlatform: "auto",
   localAsrInstallMode: "default",
   localTranscriptionCommand: "",
@@ -21355,6 +22504,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     rawEntitlementStatus && (rawEntitlementStatus.code || rawEntitlementStatus.redeemCode) || ""
   );
   const pendingBindToken = normalizeBindCodeInput(merged.pendingBindCode);
+  merged.pendingConnectionTicket = normalizeConnectionTicket(merged.pendingConnectionTicket);
   if (entitlementRedeemCode && !merged.pendingRedeemCode) {
     merged.pendingRedeemCode = entitlementRedeemCode;
   }
@@ -21431,6 +22581,10 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || "").trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
+  merged.cloudFallbackEnabled = merged.cloudFallbackEnabled === true;
+  merged.cloudFallbackJobs = normalizeCloudFallbackJobs(merged.cloudFallbackJobs);
+  merged.cloudFallbackSubmissions = normalizeCloudFallbackSubmissions(merged.cloudFallbackSubmissions);
+  merged.cloudFallbackPendingAcks = normalizeCloudFallbackAcks(merged.cloudFallbackPendingAcks);
   merged.localAsrPlatform = "auto";
   merged.localAsrInstallMode = normalizeLocalAsrInstallMode(merged.localAsrInstallMode);
   merged.localTranscriptionCommand = normalizeLocalTranscriptionCommand(
@@ -21477,6 +22631,128 @@ function validateSettings(settings) {
   return errors;
 }
 __name(validateSettings, "validateSettings");
+function normalizeCloudFallbackRecordRetryCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : 0;
+}
+__name(normalizeCloudFallbackRecordRetryCount, "normalizeCloudFallbackRecordRetryCount");
+function normalizeCloudFallbackSubmission(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const sourceType = normalizeCloudFallbackSourceType(value.sourceType);
+  const fileID = String(value.fileID || value.audioFileID || value.fileId || "").trim();
+  const recordId = String(value.recordId || "").trim().slice(0, 180);
+  const bindingFingerprint = String(value.bindingFingerprint || "").trim().slice(0, 80);
+  const clientId = String(value.clientId || "").trim().slice(0, 180);
+  const clientRequestId = String(value.clientRequestId || value.idempotencyKey || "").trim().slice(0, 240);
+  if (sourceType !== "uploaded_file" || !fileID || !isControlledCloudFallbackFileId(fileID) || !recordId || !bindingFingerprint || !clientId || !clientRequestId) return null;
+  return {
+    sourceType,
+    fileID,
+    recordId,
+    bindingFingerprint,
+    clientId,
+    sourceFingerprint: String(value.sourceFingerprint || "").trim().slice(0, 80),
+    clientRequestId,
+    recordRetryCount: normalizeCloudFallbackRecordRetryCount(value.recordRetryCount),
+    createdAt: String(value.createdAt || "").trim().slice(0, 80),
+    updatedAt: String(value.updatedAt || "").trim().slice(0, 80)
+  };
+}
+__name(normalizeCloudFallbackSubmission, "normalizeCloudFallbackSubmission");
+function normalizeCloudFallbackSubmissions(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  return value.map(normalizeCloudFallbackSubmission).filter((submission) => {
+    if (!submission) return false;
+    const identity = [
+      submission.bindingFingerprint,
+      submission.clientId,
+      submission.recordId,
+      submission.recordRetryCount,
+      submission.clientRequestId
+    ].join("");
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+__name(normalizeCloudFallbackSubmissions, "normalizeCloudFallbackSubmissions");
+function isCloudFallbackSubmissionUncertain(error) {
+  if (!error || isAbortError(error)) return false;
+  const status = Number(error.statusCode || error.status) || 0;
+  if (status >= 500 || status === 0) return true;
+  return /network|网络|request failed|timeout|超时|连接失败|fetch/i.test(String(error.message || ""));
+}
+__name(isCloudFallbackSubmissionUncertain, "isCloudFallbackSubmissionUncertain");
+function getCloudFallbackRecordRetryCount(record) {
+  return normalizeCloudFallbackRecordRetryCount(record && record.retryCount);
+}
+__name(getCloudFallbackRecordRetryCount, "getCloudFallbackRecordRetryCount");
+function getCloudFallbackJobRecordRetryCount(job) {
+  if (!job || !Object.prototype.hasOwnProperty.call(job, "recordRetryCount")) return null;
+  const numeric = Number(job.recordRetryCount);
+  return Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric)) : null;
+}
+__name(getCloudFallbackJobRecordRetryCount, "getCloudFallbackJobRecordRetryCount");
+function isCloudFallbackRecordGenerationCurrent(record) {
+  const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+  const currentRetryCount = getCloudFallbackRecordRetryCount(record);
+  if (!Object.prototype.hasOwnProperty.call(metadata, "cloudFallbackRecordRetryCount")) {
+    return currentRetryCount === 0;
+  }
+  const marker = Number(metadata.cloudFallbackRecordRetryCount);
+  return Number.isFinite(marker) && Math.max(0, Math.floor(marker)) === currentRetryCount;
+}
+__name(isCloudFallbackRecordGenerationCurrent, "isCloudFallbackRecordGenerationCurrent");
+function isCloudFallbackJobForRecord(job, record) {
+  const jobRetryCount = getCloudFallbackJobRecordRetryCount(job);
+  if (jobRetryCount === null) return getCloudFallbackRecordRetryCount(record) === 0;
+  return jobRetryCount === getCloudFallbackRecordRetryCount(record);
+}
+__name(isCloudFallbackJobForRecord, "isCloudFallbackJobForRecord");
+function isCloudFallbackPendingRecord(record) {
+  const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+  return isCloudFallbackRecordGenerationCurrent(record) && Boolean(metadata.cloudFallbackJobId) && isCloudFallbackJobPending({
+    status: metadata.cloudFallbackStatus || metadata.transcriptionStatus,
+    retryable: metadata.cloudFallbackRetryable === true
+  });
+}
+__name(isCloudFallbackPendingRecord, "isCloudFallbackPendingRecord");
+function isCloudFallbackTerminalRecord(record) {
+  const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+  if (!isCloudFallbackRecordGenerationCurrent(record) || !metadata.cloudFallbackJobId || isCloudFallbackPendingRecord(record)) return false;
+  const status = String(metadata.cloudFallbackStatus || metadata.transcriptionStatus || "").trim().toLowerCase();
+  if (!["no_speech", "failed", "needs_action", "cancelled"].includes(status)) return false;
+  if (Object.prototype.hasOwnProperty.call(metadata, "cloudFallbackRecordRetryCount")) {
+    return normalizeCloudFallbackRecordRetryCount(metadata.cloudFallbackRecordRetryCount) === getCloudFallbackRecordRetryCount(record);
+  }
+  return getCloudFallbackRecordRetryCount(record) === 0;
+}
+__name(isCloudFallbackTerminalRecord, "isCloudFallbackTerminalRecord");
+function isCloudFallbackCompletedRecord(record) {
+  const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+  return isCloudFallbackRecordGenerationCurrent(record) && Boolean(metadata.cloudFallbackJobId) && String(metadata.transcriptionStatus || "").trim().toLowerCase() === "success" && Boolean(String(metadata.transcription || "").trim());
+}
+__name(isCloudFallbackCompletedRecord, "isCloudFallbackCompletedRecord");
+function getActiveCloudFallbackLifecycle(record) {
+  if (!isCloudFallbackRecordGenerationCurrent(record)) return null;
+  const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+  const attemptId = String(metadata.cloudFallbackSyncAttemptId || "").trim();
+  const leaseUntil = String(metadata.cloudFallbackSyncLeaseUntil || "").trim();
+  if (!attemptId || !leaseUntil) return null;
+  const leaseAt = Date.parse(leaseUntil);
+  if (!Number.isFinite(leaseAt) || leaseAt <= Date.now()) return null;
+  return { enabled: true, attemptId, leaseUntil, resumedCloudFallback: true };
+}
+__name(getActiveCloudFallbackLifecycle, "getActiveCloudFallbackLifecycle");
+function createCloudFallbackPendingError(job, localError = "") {
+  const error = new Error("云端兜底任务已提交，等待转写结果");
+  error.code = "CLOUD_FALLBACK_QUEUED";
+  error.cloudFallbackJob = job || null;
+  error.localError = String(localError || "").trim();
+  return error;
+}
+__name(createCloudFallbackPendingError, "createCloudFallbackPendingError");
 function isBindingInvalidMessage(message) {
   const text = String(message || "");
   return text.includes("绑定码未绑定或已失效") || text.includes("Invalid bind code") || text.includes("Invalid or expired token");
@@ -28428,7 +29704,24 @@ async function downloadArrayBufferViaElectronSession(url, headers = {}, options 
   if (!response || !response.ok) {
     throw new Error(`媒体下载失败：HTTP ${response ? response.status : 0}`);
   }
-  return response.arrayBuffer();
+  const maxBytes = Math.max(0, Number(options.maxBytes) || 0);
+  if (maxBytes > 0) {
+    const contentLength = Number(
+      response.headers && typeof response.headers.get === "function" ? response.headers.get("content-length") : 0
+    );
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      const error = new Error("媒体文件超过云端兜底大小限制");
+      error.code = "MEDIA_DOWNLOAD_TOO_LARGE";
+      throw error;
+    }
+  }
+  const body = await response.arrayBuffer();
+  if (maxBytes > 0 && body && Number(body.byteLength) > maxBytes) {
+    const error = new Error("媒体文件超过云端兜底大小限制");
+    error.code = "MEDIA_DOWNLOAD_TOO_LARGE";
+    throw error;
+  }
+  return body;
 }
 __name(downloadArrayBufferViaElectronSession, "downloadArrayBufferViaElectronSession");
 function isMediaAuthorizationError(error) {
@@ -33147,6 +34440,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.currentTranscriptionProcess = null;
     this.currentTranscriptionProcessDetached = false;
     this.currentTranscriptionContext = null;
+    this.operatorLocalAsrActive = false;
+    this.localAsrMutexOwner = null;
     this.currentProcessingAbortController = null;
     this.currentProcessingContext = null;
     this.pendingStoppedTranscriptionDeletes = /* @__PURE__ */ new Map();
@@ -33220,6 +34515,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.transcriptionStopRibbon = this.addRibbonIcon("square", "暂停当前转写", (event) => this.stopCurrentTranscription({ trigger: "stop_button", trustedEvent: Boolean(event && event.isTrusted) }));
     this.setTranscriptionStopAvailable(false);
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
+    this.operatorMediaNode = createOperatorMediaNode({
+      plugin: this,
+      apiBase: this.settings.apiBase
+    });
+    this.register(() => {
+      if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
+        return this.operatorMediaNode.stop();
+      }
+      return void 0;
+    });
+    if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
     this.startAutoSync();
     this.getSyncDiagnosticReporter().kick();
   }
@@ -33894,6 +35200,56 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     return payload;
   }
+  async requestUnauthenticatedJson(path2, method = "GET", body = {}, options = {}) {
+    const signal = options.signal || null;
+    throwIfAborted(signal);
+    const apiBase = trimTrailingSlash(this.settings && this.settings.apiBase || "");
+    if (!apiBase) throw new Error("请填写同步 API 地址");
+    const requestOptions = {
+      url: `${apiBase}${path2}`,
+      method,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-Wechat-Inbox-Client-Id": String(this.settings && this.settings.clientId || "").trim(),
+        ...options.noCache === true ? {
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache"
+        } : {}
+      },
+      body: method === "POST" ? JSON.stringify(body || {}) : void 0,
+      signal,
+      ...Number(options.timeoutMs) > 0 ? { timeout: Math.min(Number(options.timeoutMs), 12e4) } : {}
+    };
+    let response;
+    try {
+      response = signal ? await requestJsonViaNode(requestOptions) : await requestUrl({ ...requestOptions, throw: false });
+    } catch (error) {
+      if (isAbortError(error) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+      const message = error && error.message ? error.message : String(error || "");
+      if (!isRequestUrlTransportError(message)) throw error;
+      try {
+        response = await requestJsonViaNode(requestOptions);
+      } catch (fallbackError) {
+        if (isAbortError(fallbackError) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+        throw fallbackError;
+      }
+    }
+    throwIfAborted(signal);
+    const payload = response && (response.json || (response.text ? tryParseJson(response.text) : null));
+    const status = Number(response && response.status) || 0;
+    const errorPayload = payload && (payload.errMsg || payload.message || payload.error && payload.error.message);
+    if (status && (status < 200 || status >= 300) || !payload || payload.success === false) {
+      const requestError = new Error(String(errorPayload || `同步 API 请求失败${status ? `：HTTP ${status}` : ""}`));
+      requestError.status = status;
+      requestError.statusCode = status;
+      if (payload && (payload.errCode || payload.code || payload.error && payload.error.code)) {
+        requestError.code = String(payload.errCode || payload.code || payload.error.code);
+      }
+      throw requestError;
+    }
+    return payload;
+  }
   async requestExternalJson(url, { method = "POST", headers = {}, body = null } = {}) {
     const requestOptions = {
       url,
@@ -34212,6 +35568,10 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return result;
   }
   async bindCurrentCode() {
+    const pendingCode = this.settings.pendingBindCode || this.settings.token;
+    if (isConnectionTicket(pendingCode)) {
+      return await this.connectWithConnectionTicket(pendingCode);
+    }
     if (!this.settings.clientId) {
       await this.saveSettings({
         ...this.settings,
@@ -34294,6 +35654,594 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }
       new Notice(`绑定失败：${message || "请稍后重试"}`);
     }
+  }
+  async connectWithConnectionTicket(ticketInput = this.settings.pendingConnectionTicket || this.settings.pendingBindCode) {
+    const ticket = normalizeConnectionTicket(ticketInput);
+    if (!ticket) {
+      new Notice("请填写有效的短期连接码（CNT-XXXX-XXXX-XXXX）");
+      return null;
+    }
+    if (!this.settings.apiBase) {
+      new Notice("请填写同步 API 地址");
+      return null;
+    }
+    const currentBindings = normalizeBindings(this.settings);
+    const activeBindingCount = currentBindings.filter((item) => item.status !== "needs_rebind").length;
+    if (activeBindingCount >= MAX_PLUGIN_BINDINGS) {
+      new Notice(`最多绑定 ${MAX_PLUGIN_BINDINGS} 个小程序码`);
+      return null;
+    }
+    const clientId = String(this.settings.clientId || "").trim() || createClientId();
+    if (clientId !== this.settings.clientId) {
+      await this.saveSettings({ ...this.settings, clientId });
+    }
+    try {
+      const payload = await this.requestUnauthenticatedJson("/connection/consume", "POST", {
+        version: "v1",
+        ticket,
+        purpose: "obsidian_bind",
+        clientId,
+        clientVersion: String(this.manifest && this.manifest.version || PLUGIN_RUNTIME_VERSION || "").trim(),
+        platform: process.platform
+      });
+      const data = payload && payload.data ? payload.data : payload;
+      const credentialType = String(data && data.credentialType || "").trim();
+      const bindingToken = normalizeBindCodeInput(data && data.bindingToken);
+      if (!["bind_code", "binding_token"].includes(credentialType) || !bindingToken) {
+        const malformed = new Error("连接服务未返回有效绑定凭据");
+        malformed.code = "CONNECTION_RESPONSE_INVALID";
+        throw malformed;
+      }
+      const replacement = currentBindings.length >= MAX_PLUGIN_BINDINGS ? currentBindings.find((item) => item.status === "needs_rebind") : null;
+      const existing = currentBindings.find((item) => item.token === bindingToken);
+      const nextBinding = existing ? {
+        ...existing,
+        enabled: true,
+        status: "bound",
+        lastError: "",
+        unboundAt: ""
+      } : {
+        token: bindingToken,
+        label: `微信 ${currentBindings.length + 1}`,
+        enabled: true,
+        status: "bound",
+        boundAt: String(data && data.boundAt || (/* @__PURE__ */ new Date()).toISOString()),
+        lastSyncAt: "",
+        unboundAt: "",
+        lastError: ""
+      };
+      const nextBindings = [
+        nextBinding,
+        ...currentBindings.filter((item) => item.token !== bindingToken && (!replacement || item.token !== replacement.token))
+      ];
+      await this.saveSettings({
+        ...this.settings,
+        clientId,
+        token: getPrimaryBindingToken(nextBindings),
+        pendingConnectionTicket: "",
+        ...isConnectionTicket(this.settings.pendingBindCode) ? { pendingBindCode: "" } : {},
+        bindings: nextBindings
+      });
+      new Notice("连接成功");
+      if (this.autoSyncController) this.autoSyncController.wake();
+      this.refreshProAndMaybePromptLocalComponentInstall({ reason: "bind", force: true }).catch((error) => {
+        new Notice(`Pro 组件检查失败：${error.message || error}`);
+      });
+      return nextBinding;
+    } catch (error) {
+      const code = String(error && error.code || "").trim().toUpperCase();
+      const status = Number(error && (error.status || error.statusCode)) || 0;
+      const message = String(error && error.message || error || "").trim();
+      if (["CONNECTION_TICKET_INVALID", "INVALID_CONNECTION_TICKET"].includes(code)) {
+        new Notice("连接码无效，请回到小程序重新生成后再试");
+      } else if (code === "CONNECTION_TICKET_EXPIRED") {
+        new Notice("连接码已过期，请回到小程序重新生成后再试");
+      } else if (code === "CONNECTION_TICKET_USED") {
+        new Notice("连接码已使用，请回到小程序重新生成后再试");
+      } else if (code === "DEVICE_LIMIT_EXCEEDED") {
+        new Notice("绑定电脑名额已满，请在小程序绑定页增加设备名额后再试");
+      } else if (code === "TEMPORARY_UNAVAILABLE" || status === 404 || status === 405 || status >= 500 || /not found|route|暂不可用|网络连接失败|连接失败|request failed,?\s*status\s*[45]\d\d|http\s*[45]\d\d/i.test(message)) {
+        new Notice("新版连接服务暂不可用，请暂时使用旧绑定码");
+      } else {
+        new Notice(`连接失败：${message || "请稍后重试"}`);
+      }
+      return null;
+    }
+  }
+  async persistCloudFallbackJobs(value) {
+    this.ensureSerializedSaveData();
+    const cloudFallbackJobs = normalizeCloudFallbackJobs(value);
+    this.settings = { ...this.settings || {}, cloudFallbackJobs };
+    if (typeof this.saveData === "function") await this.saveData(this.settings);
+    return cloudFallbackJobs;
+  }
+  async persistCloudFallbackSubmissions(value) {
+    this.ensureSerializedSaveData();
+    const cloudFallbackSubmissions = normalizeCloudFallbackSubmissions(value);
+    this.settings = { ...this.settings || {}, cloudFallbackSubmissions };
+    if (typeof this.saveData === "function") await this.saveData(this.settings);
+    return cloudFallbackSubmissions;
+  }
+  async persistCloudFallbackAcks(value) {
+    this.ensureSerializedSaveData();
+    const cloudFallbackPendingAcks = normalizeCloudFallbackAcks(value);
+    this.settings = { ...this.settings || {}, cloudFallbackPendingAcks };
+    if (typeof this.saveData === "function") await this.saveData(this.settings);
+    return cloudFallbackPendingAcks;
+  }
+  async rememberCloudFallbackAck(value = {}) {
+    const ack = normalizeCloudFallbackAck(value);
+    if (!ack) return normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const acks = normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const sameTarget = /* @__PURE__ */ __name((item) => item.jobId === ack.jobId && item.bindingFingerprint === ack.bindingFingerprint && item.clientId === ack.clientId, "sameTarget");
+    const previous = acks.find(sameTarget) || null;
+    return await this.persistCloudFallbackAcks([
+      ...acks.filter((item) => !sameTarget(item)),
+      {
+        ...ack,
+        queuedAt: previous && previous.queuedAt ? previous.queuedAt : ack.queuedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        attempts: (previous ? previous.attempts : 0) + 1
+      }
+    ]);
+  }
+  async clearCloudFallbackAck(value = {}) {
+    const jobId = String(value.jobId || "").trim();
+    const bindingFingerprint = String(value.bindingFingerprint || "").trim();
+    const clientId = String(value.clientId || "").trim();
+    if (!jobId) return normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const acks = normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks);
+    const next = acks.filter((item) => !(item.jobId === jobId && item.bindingFingerprint === bindingFingerprint && item.clientId === clientId));
+    if (next.length !== acks.length) await this.persistCloudFallbackAcks(next);
+    return next;
+  }
+  async forgetCloudFallbackJob(jobId, scope = {}) {
+    const normalizedJobId = String(jobId || "").trim();
+    if (!normalizedJobId) return normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const bindingFingerprint = String(scope.bindingFingerprint || "").trim();
+    const clientId = String(scope.clientId || "").trim();
+    const jobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const next = jobs.filter((item) => !(item.jobId === normalizedJobId && (!bindingFingerprint || item.bindingFingerprint === bindingFingerprint) && (!clientId || item.clientId === clientId)));
+    if (next.length !== jobs.length) await this.persistCloudFallbackJobs(next);
+    return next;
+  }
+  async rememberCloudFallbackSubmission(value) {
+    const submission = normalizeCloudFallbackSubmission(value);
+    if (!submission) throw new Error("云端兜底待提交记录无效");
+    const submissions = normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions);
+    const sameRequest = /* @__PURE__ */ __name((item) => item.bindingFingerprint === submission.bindingFingerprint && item.clientId === submission.clientId && item.recordId === submission.recordId && item.recordRetryCount === submission.recordRetryCount && item.clientRequestId === submission.clientRequestId, "sameRequest");
+    return await this.persistCloudFallbackSubmissions([
+      ...submissions.filter((item) => !sameRequest(item)),
+      submission
+    ]);
+  }
+  async clearCloudFallbackSubmission(value = {}) {
+    const bindingFingerprint = String(value.bindingFingerprint || "").trim();
+    const clientId = String(value.clientId || "").trim();
+    const recordId = String(value.recordId || "").trim();
+    const recordRetryCount = normalizeCloudFallbackRecordRetryCount(value.recordRetryCount);
+    const clientRequestId = String(value.clientRequestId || "").trim();
+    const submissions = normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions);
+    const next = submissions.filter((item) => !(item.bindingFingerprint === bindingFingerprint && item.clientId === clientId && item.recordId === recordId && item.recordRetryCount === recordRetryCount && (!clientRequestId || item.clientRequestId === clientRequestId)));
+    if (next.length !== submissions.length) await this.persistCloudFallbackSubmissions(next);
+    return next;
+  }
+  findCloudFallbackSubmission(options = {}) {
+    const binding = options.binding || null;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings && this.settings.clientId || "").trim();
+    const recordId = String(options.recordId || "").trim();
+    const recordRetryCount = normalizeCloudFallbackRecordRetryCount(options.retryCount);
+    return normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions).find((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId && item.recordId === recordId && item.recordRetryCount === recordRetryCount);
+  }
+  async upsertCloudFallbackJob(value) {
+    const job = normalizeCloudFallbackJob(value);
+    if (!job) throw new Error("云端兜底任务响应无效");
+    const jobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const sameIdentity = /* @__PURE__ */ __name((item) => item.jobId === job.jobId && (!item.bindingFingerprint && !item.clientId && !item.sourceFingerprint || item.bindingFingerprint === job.bindingFingerprint && item.clientId === job.clientId && item.recordId === job.recordId && (!item.sourceFingerprint || !job.sourceFingerprint || item.sourceFingerprint === job.sourceFingerprint)), "sameIdentity");
+    return await this.persistCloudFallbackJobs([
+      ...jobs.filter((item) => !sameIdentity(item)),
+      job
+    ]);
+  }
+  buildCloudFallbackClientRequestId(options = {}) {
+    const explicit = String(options.clientRequestId || options.idempotencyKey || "").trim();
+    if (explicit) return explicit.slice(0, 240);
+    const recordId = String(options.recordId || "").trim();
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    const source = String(options.sourceUrl || options.fileID || "").trim();
+    const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const retrySalt = options.retry === true ? `|retry|${createRequestId()}` : "";
+    const basis = [recordId, sourceType, source, retryCount].join("|") + retrySalt;
+    return `plugin-${crypto.createHash("sha256").update(basis).digest("hex").slice(0, 48)}`;
+  }
+  buildCloudFallbackSourceFingerprint(options = {}) {
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    const source = String(options.sourceUrl || options.fileID || "").trim();
+    const recordId = String(options.recordId || "").trim();
+    return crypto.createHash("sha256").update([sourceType, recordId, source].join("|"), "utf8").digest("hex").slice(0, 32);
+  }
+  rememberCloudFallbackJobContext(job, options = {}) {
+    const normalized = normalizeCloudFallbackJob(job);
+    if (!normalized) return null;
+    const recordId = String(options.recordId || normalized.recordId || "").trim();
+    const contexts = [this.currentProcessingContext, this.currentTranscriptionContext].filter((context, index, list) => context && context.recordId === recordId && list.indexOf(context) === index);
+    contexts.forEach((context) => {
+      context.cloudFallbackJobId = normalized.jobId;
+      context.cloudFallbackBinding = options.binding && options.binding.token ? { ...options.binding } : context.binding ? { ...context.binding } : null;
+    });
+    return normalized;
+  }
+  async attachCloudFallbackRecordContext(job, record, binding, lifecycle = {}) {
+    const normalized = normalizeCloudFallbackJob(job);
+    if (!normalized) return null;
+    const recordSnapshot = normalizeCloudFallbackRecordSnapshot(record);
+    const recordId = getRecordId(record) || normalized.recordId;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings && this.settings.clientId || "").trim();
+    const sourceFingerprint = normalized.sourceFingerprint || this.buildCloudFallbackSourceFingerprint({
+      sourceType: normalized.sourceType,
+      sourceUrl: normalized.sourceUrl,
+      fileID: normalized.fileID,
+      recordId
+    });
+    const syncAttemptId = String(lifecycle && lifecycle.attemptId || "").trim();
+    const syncLeaseUntil = String(lifecycle && lifecycle.leaseUntil || "").trim();
+    const enriched = normalizeCloudFallbackJob({
+      ...normalized,
+      recordId,
+      bindingFingerprint,
+      clientId,
+      sourceFingerprint,
+      recordRetryCount: getCloudFallbackRecordRetryCount(record),
+      ...recordSnapshot ? { recordSnapshot } : {},
+      ...syncAttemptId ? { syncAttemptId } : {},
+      ...syncLeaseUntil ? { syncLeaseUntil } : {}
+    });
+    if (!enriched) return null;
+    this.rememberCloudFallbackJobContext(enriched, {
+      recordId: getRecordId(record) || enriched.recordId,
+      binding
+    });
+    await this.upsertCloudFallbackJob(enriched);
+    return enriched;
+  }
+  async submitCloudFallbackJob(options = {}) {
+    if (this.settings.cloudFallbackEnabled !== true) {
+      const error = new Error("云端兜底尚未启用");
+      error.code = "CLOUD_FALLBACK_DISABLED";
+      throw error;
+    }
+    const binding = options.binding || this.getActiveBindings()[0] || null;
+    if (!binding || !binding.token) {
+      const error = new Error("云端兜底失败：未绑定小程序");
+      error.code = "CLOUD_FALLBACK_BINDING_REQUIRED";
+      throw error;
+    }
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    if (!sourceType) {
+      const error = new Error("云端兜底来源类型无效");
+      error.code = "CLOUD_FALLBACK_SOURCE_INVALID";
+      throw error;
+    }
+    const recordId = String(options.recordId || "").trim();
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding.token);
+    const clientId = String(this.settings.clientId || "").trim() || createClientId();
+    if (clientId !== String(this.settings.clientId || "").trim()) {
+      await this.saveSettings({ ...this.settings, clientId });
+    }
+    let sourceUrl = "";
+    let fileID = "";
+    if (sourceType === "douyin_url") {
+      sourceUrl = String(options.sourceUrl || options.url || "").trim();
+      if (!/^https?:\/\//i.test(sourceUrl) || !isDouyinUrl(sourceUrl)) {
+        const error = new Error("云端兜底只接受有效的抖音原始链接");
+        error.code = "CLOUD_FALLBACK_SOURCE_INVALID";
+        throw error;
+      }
+    } else {
+      fileID = String(options.fileID || options.audioFileID || options.fileId || "").trim();
+      if (!fileID || !isControlledCloudFallbackFileId(fileID)) {
+        const error = new Error("云端兜底失败：缺少受控的云端文件 ID");
+        error.code = "CLOUD_FALLBACK_SOURCE_INVALID";
+        throw error;
+      }
+    }
+    const sourceFingerprint = this.buildCloudFallbackSourceFingerprint({
+      sourceType,
+      sourceUrl,
+      fileID,
+      recordId
+    });
+    const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const scopedJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs).filter((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId && item.recordId === recordId && item.sourceType === sourceType && item.sourceFingerprint === sourceFingerprint && isCloudFallbackJobForRecord(item, { retryCount }));
+    const hasCancelledJob = scopedJobs.some((item) => item.status === "cancelled");
+    const explicitClientRequestId = String(options.clientRequestId || options.idempotencyKey || "").trim();
+    if (hasCancelledJob && !explicitClientRequestId && options.retry !== true && retryCount <= 0) {
+      const error = new Error("该云端兜底任务已取消，请明确发起新的重试");
+      error.code = "CLOUD_FALLBACK_RETRY_REQUIRED";
+      throw error;
+    }
+    const requestBody = {
+      sourceType,
+      recordId,
+      clientRequestId: this.buildCloudFallbackClientRequestId({
+        ...options,
+        sourceType,
+        sourceUrl,
+        fileID,
+        retryCount
+      }),
+      title: String(options.title || "").trim(),
+      localError: String(options.localError || "").trim(),
+      provider: String(options.provider || "").trim()
+    };
+    if (Number(options.durationSeconds) > 0) requestBody.durationSeconds = Number(options.durationSeconds);
+    if (sourceType === "douyin_url") {
+      requestBody.sourceUrl = sourceUrl;
+    } else {
+      requestBody.fileID = fileID;
+    }
+    delete requestBody.cookie;
+    delete requestBody.cookies;
+    delete requestBody.authorization;
+    delete requestBody.headers;
+    delete requestBody.proxy;
+    this.showSyncProgress({
+      stage: "transcribing",
+      title: requestBody.title,
+      message: "本地转写不可用，正在提交云端兜底任务"
+    });
+    throwIfAborted(options.signal || null);
+    const payload = await this.requestJson("/transcriptions/fallback/jobs", "POST", requestBody, binding);
+    const data = payload && payload.data ? payload.data : payload;
+    const job = normalizeCloudFallbackJob({
+      ...data,
+      recordId: data && data.recordId || requestBody.recordId,
+      sourceType: data && data.sourceType || sourceType,
+      sourceUrl: data && data.sourceUrl || requestBody.sourceUrl,
+      fileID: data && (data.fileID || data.audioFileID) || requestBody.fileID,
+      clientRequestId: data && data.clientRequestId || requestBody.clientRequestId,
+      bindingFingerprint,
+      clientId,
+      sourceFingerprint,
+      recordRetryCount: retryCount
+    });
+    if (!job) throw new Error("云端兜底未返回有效任务");
+    this.rememberCloudFallbackJobContext(job, { recordId, binding });
+    await this.upsertCloudFallbackJob(job);
+    await this.clearCloudFallbackSubmission({
+      bindingFingerprint,
+      clientId,
+      recordId,
+      recordRetryCount: retryCount,
+      clientRequestId: requestBody.clientRequestId
+    });
+    if (this.autoSyncController && typeof this.autoSyncController.wake === "function") {
+      this.autoSyncController.wake();
+    }
+    if (options.signal && options.signal.aborted) {
+      try {
+        await this.cancelCloudFallbackJob(job.jobId, binding);
+      } catch (cancelError) {
+        await this.upsertCloudFallbackJob({
+          ...job,
+          status: "cancelled",
+          retryable: false,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      }
+      throw createAbortError();
+    }
+    return job;
+  }
+  async cancelCloudFallbackJob(jobId, binding = null) {
+    const normalizedJobId = String(jobId || "").trim();
+    if (!normalizedJobId) return null;
+    const candidateBinding = binding || this.getActiveBindings()[0] || null;
+    if (!candidateBinding || !candidateBinding.token) return null;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(candidateBinding.token);
+    const clientId = String(this.settings && this.settings.clientId || "").trim();
+    const currentJob = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs).find((item) => item.jobId === normalizedJobId && item.bindingFingerprint === bindingFingerprint && item.clientId === clientId);
+    const payload = await this.requestJson(
+      `/transcriptions/fallback/jobs/${encodeURIComponent(normalizedJobId)}/cancel`,
+      "POST",
+      {},
+      candidateBinding
+    );
+    const data = payload && payload.data ? payload.data : payload;
+    const job = normalizeCloudFallbackJob({
+      ...data,
+      jobId: data && (data.jobId || data.id) || normalizedJobId,
+      bindingFingerprint,
+      clientId,
+      sourceType: data && data.sourceType || currentJob && currentJob.sourceType,
+      recordId: data && data.recordId || currentJob && currentJob.recordId,
+      sourceUrl: data && data.sourceUrl || currentJob && currentJob.sourceUrl,
+      fileID: data && (data.fileID || data.audioFileID) || currentJob && currentJob.fileID,
+      clientRequestId: data && data.clientRequestId || currentJob && currentJob.clientRequestId,
+      sourceFingerprint: currentJob && currentJob.sourceFingerprint,
+      recordRetryCount: currentJob && currentJob.recordRetryCount,
+      status: data && data.status || "cancelled"
+    }) || currentJob && { ...currentJob, status: "cancelled", updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    if (job) await this.upsertCloudFallbackJob(job);
+    return job;
+  }
+  // Releases the stored media and transcription once the user has the note.
+  // The intent is persisted first so an offline request is retried by the
+  // next sync rather than leaking the cloud copy until its expiry sweep.
+  async acknowledgeCloudFallbackJob(jobId, binding = null) {
+    const normalizedJobId = String(jobId || "").trim();
+    if (!normalizedJobId) return null;
+    const candidateBinding = binding || this.getActiveBindings()[0] || null;
+    if (!candidateBinding || !candidateBinding.token) return null;
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(candidateBinding.token);
+    const clientId = String(this.settings && this.settings.clientId || "").trim();
+    if (!clientId) return null;
+    const scope = { jobId: normalizedJobId, bindingFingerprint, clientId };
+    try {
+      await this.rememberCloudFallbackAck(scope);
+      const payload = await this.requestJson(
+        `/transcriptions/fallback/jobs/${encodeURIComponent(normalizedJobId)}/ack`,
+        "POST",
+        {},
+        candidateBinding
+      );
+      await this.clearCloudFallbackAck(scope);
+      await this.forgetCloudFallbackJob(normalizedJobId, { bindingFingerprint, clientId });
+      const data = payload && payload.data ? payload.data : payload;
+      return data || null;
+    } catch (error) {
+      const status = Number(error && (error.statusCode || error.status)) || 0;
+      const code = String(error && error.code || "");
+      if (status === 404 || code === "JOB_NOT_FOUND") {
+        await this.clearCloudFallbackAck(scope);
+        await this.forgetCloudFallbackJob(normalizedJobId, { bindingFingerprint, clientId });
+      }
+      return null;
+    }
+  }
+  async acknowledgeCloudFallbackJobForRecord(record, binding = null) {
+    const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+    const jobId = String(metadata.cloudFallbackJobId || "").trim();
+    if (!jobId) return null;
+    return await this.acknowledgeCloudFallbackJob(jobId, binding);
+  }
+  async flushCloudFallbackAcks(binding = null) {
+    const candidateBinding = binding || this.getActiveBindings()[0] || null;
+    if (!candidateBinding || !candidateBinding.token) return { acknowledged: 0 };
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(candidateBinding.token);
+    const clientId = String(this.settings && this.settings.clientId || "").trim();
+    if (!clientId) return { acknowledged: 0 };
+    const acks = normalizeCloudFallbackAcks(this.settings && this.settings.cloudFallbackPendingAcks).filter((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId);
+    let acknowledged = 0;
+    for (const ack of acks) {
+      const done = await this.acknowledgeCloudFallbackJob(ack.jobId, candidateBinding);
+      if (done) acknowledged += 1;
+    }
+    return { acknowledged };
+  }
+  async pollCloudFallbackJobs(binding, records = []) {
+    const allJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings && this.settings.clientId || "").trim();
+    const recordsById = new Map((Array.isArray(records) ? records : []).map((record) => [getRecordId(record), record]).filter(([recordId]) => Boolean(recordId)));
+    const currentJobs = allJobs.filter((job) => job.bindingFingerprint === bindingFingerprint && Boolean(clientId) && job.clientId === clientId && (() => {
+      const currentRecord = recordsById.get(job.recordId) || job.recordSnapshot || null;
+      return !currentRecord || isCloudFallbackJobForRecord(job, currentRecord);
+    })());
+    if (!currentJobs.length) return { records, jobs: [] };
+    const refreshedJobs = [];
+    let changed = false;
+    for (const current of currentJobs) {
+      if (isCloudFallbackJobTerminal(current)) {
+        refreshedJobs.push(current);
+        continue;
+      }
+      try {
+        const payload = await this.requestJson(
+          `/transcriptions/fallback/jobs/${encodeURIComponent(current.jobId)}`,
+          "GET",
+          {},
+          binding,
+          { noCache: true }
+        );
+        const data = payload && payload.data ? payload.data : payload;
+        const refreshed = normalizeCloudFallbackJob({
+          ...data,
+          jobId: data && (data.jobId || data.id) || current.jobId,
+          recordId: data && data.recordId || current.recordId,
+          sourceType: data && data.sourceType || current.sourceType,
+          sourceUrl: data && data.sourceUrl || current.sourceUrl,
+          fileID: data && (data.fileID || data.audioFileID) || current.fileID,
+          clientRequestId: data && data.clientRequestId || current.clientRequestId,
+          bindingFingerprint,
+          clientId,
+          sourceFingerprint: current.sourceFingerprint,
+          syncAttemptId: current.syncAttemptId,
+          syncLeaseUntil: current.syncLeaseUntil,
+          recordSnapshot: current.recordSnapshot,
+          recordRetryCount: current.recordRetryCount
+        });
+        if (refreshed) {
+          refreshedJobs.push(refreshed);
+          changed = changed || JSON.stringify(refreshed) !== JSON.stringify(current);
+        } else {
+          refreshedJobs.push(current);
+        }
+      } catch (error) {
+        refreshedJobs.push(current);
+      }
+    }
+    if (changed || refreshedJobs.length !== currentJobs.length) {
+      await this.persistCloudFallbackJobs([
+        ...allJobs.filter((job) => job.bindingFingerprint !== bindingFingerprint || job.clientId !== clientId),
+        ...refreshedJobs
+      ]);
+    }
+    const latestByRecord = /* @__PURE__ */ new Map();
+    const timestamp = /* @__PURE__ */ __name((job) => job ? Date.parse(job.updatedAt || job.createdAt || "") || 0 : 0, "timestamp");
+    refreshedJobs.forEach((job) => {
+      if (!job.recordId) return;
+      const previous = latestByRecord.get(job.recordId);
+      const newerTimestamp = timestamp(job) > timestamp(previous);
+      const sameTimestampActive = timestamp(job) === timestamp(previous) && isCloudFallbackJobPending(job) && !isCloudFallbackJobPending(previous);
+      if (!previous || newerTimestamp || sameTimestampActive) latestByRecord.set(job.recordId, job);
+    });
+    const applyJobToRecord = /* @__PURE__ */ __name((record, job) => {
+      const recordId = getRecordId(record);
+      const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+      if (metadata.cloudFallbackJobId && metadata.cloudFallbackJobId !== job.jobId) return record;
+      const recordRetryCount = getCloudFallbackJobRecordRetryCount(job) === null ? getCloudFallbackRecordRetryCount(record) : getCloudFallbackJobRecordRetryCount(job);
+      const nextMetadata = {
+        ...metadata,
+        cloudFallbackJobId: job.jobId,
+        cloudFallbackStatus: job.status,
+        cloudFallbackRetryable: job.retryable === true,
+        cloudFallbackRecordRetryCount: recordRetryCount,
+        cloudFallbackRetryCount: recordRetryCount,
+        cloudFallbackWorkerRetryCount: Number(job.retryCount) || 0,
+        cloudFallbackAttemptId: job.attemptId || metadata.cloudFallbackAttemptId || "",
+        cloudFallbackSyncAttemptId: job.syncAttemptId || metadata.cloudFallbackSyncAttemptId || "",
+        cloudFallbackSyncLeaseUntil: job.syncLeaseUntil || metadata.cloudFallbackSyncLeaseUntil || "",
+        cloudFallbackUpdatedAt: job.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        transcriptionSource: "cloud-fallback",
+        webpageMediaType: "audio_video",
+        transcriptOnly: true
+      };
+      if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+        nextMetadata.transcription = job.transcription;
+        nextMetadata.transcriptionStatus = "success";
+        nextMetadata.conversionStatus = "success";
+        nextMetadata.transcriptionError = "";
+      } else if (job.status === "no_speech") {
+        nextMetadata.transcription = "";
+        nextMetadata.transcriptionStatus = "no_speech";
+        nextMetadata.conversionStatus = "no_speech";
+        nextMetadata.transcriptionError = job.error && job.error.message || "云端未检测到语音";
+      } else if (isCloudFallbackJobPending(job)) {
+        nextMetadata.transcriptionStatus = "pending";
+        nextMetadata.conversionStatus = "pending";
+      } else if (job.status === "failed" || job.status === "needs_action" || job.status === "cancelled") {
+        nextMetadata.transcriptionStatus = "failed";
+        nextMetadata.conversionStatus = "failed";
+        nextMetadata.transcriptionError = job.error && job.error.message || `云端兜底${job.status}`;
+      }
+      return { ...record, metadata: nextMetadata };
+    }, "applyJobToRecord");
+    const nextRecords = (Array.isArray(records) ? records : []).map((record) => {
+      const recordId = getRecordId(record);
+      const job = latestByRecord.get(recordId);
+      return job ? applyJobToRecord(record, job) : record;
+    });
+    const existingRecordIds = new Set(nextRecords.map((record) => getRecordId(record)).filter(Boolean));
+    refreshedJobs.forEach((job) => {
+      if (job.status !== "succeeded" || !String(job.transcription || "").trim()) return;
+      if (!job.recordId || existingRecordIds.has(job.recordId) || !job.recordSnapshot) return;
+      const syntheticRecord = applyJobToRecord({ ...job.recordSnapshot }, job);
+      nextRecords.push(syntheticRecord);
+      existingRecordIds.add(job.recordId);
+    });
+    return { records: nextRecords, jobs: refreshedJobs };
   }
   async markBindingUnbound(token, reason = "") {
     const normalizedToken = normalizeBindCodeInput(token);
@@ -34694,6 +36642,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       new Notice("已停止当前转写，会继续处理后面的同步内容。");
       return true;
     }
+    let cloudFallbackCancelError = null;
+    if (context.cloudFallbackJobId) {
+      const localJob = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs).find((job) => job.jobId === context.cloudFallbackJobId);
+      if (!localJob || isCloudFallbackJobPending(localJob)) {
+        try {
+          await this.cancelCloudFallbackJob(context.cloudFallbackJobId, context.cloudFallbackBinding || context.binding);
+        } catch (error) {
+          cloudFallbackCancelError = error;
+        }
+      }
+    }
     const pendingDeletes = this.getPendingStoppedTranscriptionDeletes();
     let deletePromise = pendingDeletes.get(String(context.recordId));
     if (!deletePromise) {
@@ -34710,11 +36669,13 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const deleteResult = await deletePromise;
     if (deleteResult && deleteResult.deleted) {
       const cleanupWarning = deleteResult.response && deleteResult.response.cleanupComplete === false ? "；记录已删除，但部分关联文件清理失败" : "";
-      new Notice(`已停止当前转写，并从云端删除这条内容；后续同步不会再出现${cleanupWarning}。`);
+      const cloudWarning2 = cloudFallbackCancelError ? "；云端兜底任务取消未确认" : "";
+      new Notice(`已停止当前转写，并从云端删除这条内容；后续同步不会再出现${cleanupWarning}${cloudWarning2}。`);
       return true;
     }
     const message = deleteResult && deleteResult.error ? deleteResult.error.message || String(deleteResult.error) : "云端未确认删除成功";
-    new Notice(`已停止当前转写，但删除云端内容失败：${message}；这条内容下次同步可能还会出现。`);
+    const cloudWarning = cloudFallbackCancelError ? "；云端兜底任务取消未确认" : "";
+    new Notice(`已停止当前转写，但删除云端内容失败：${message}；这条内容下次同步可能还会出现${cloudWarning}。`);
     return true;
   }
   async unbindBinding(token) {
@@ -35724,6 +37685,74 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     } catch (error) {
       return false;
     }
+  }
+  /**
+   * Cloud fallback only covers platform-side capture/transcription failures.
+   * Missing Pro, an uninstalled local component, or a missing Douyin login are
+   * the user's own setup gaps: they must fail locally with guidance instead of
+   * being handed to the paid worker.
+   */
+  async evaluateCloudFallbackUserGate({
+    binding = null,
+    requireDouyinLogin = false,
+    requireDouyinResolver = false,
+    pluginDouyinLogin = null,
+    featureName = "云端转写兜底"
+  } = {}) {
+    const activeBinding = binding || this.getActiveBindings()[0] || null;
+    if (!activeBinding || !activeBinding.token) {
+      return {
+        allowed: false,
+        code: "CLOUD_FALLBACK_BINDING_REQUIRED",
+        message: "云端兜底未启用：请先完成小程序绑定。"
+      };
+    }
+    let status = {};
+    try {
+      status = await this.getProFeatureAccessStatus();
+    } catch (error) {
+      status = { hasAccess: false, status: "inactive" };
+    }
+    if (!isCachedProStatusActive(status)) {
+      return {
+        allowed: false,
+        code: "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED",
+        message: membershipGuidance(status, featureName)
+      };
+    }
+    const readiness = this.getLocalTranscriptionComponentReadiness();
+    if (!readiness.asrStatus || readiness.asrStatus.ready !== true) {
+      return {
+        allowed: false,
+        code: "LOCAL_COMPONENT_SETUP_REQUIRED",
+        message: "待安装组件：云端兜底只在本地转写组件已安装并实际尝试失败后使用。请先在插件设置中安装／更新本地组件，再在小程序同步历史中重试。"
+      };
+    }
+    if (requireDouyinResolver && (!readiness.resolverStatus || readiness.resolverStatus.ready !== true)) {
+      return {
+        allowed: false,
+        code: "DOUYIN_RESOLVER_NOT_INSTALLED",
+        message: "待安装组件：抖音解析组件未安装或未通过校验，云端兜底不会替代本地解析。请先在插件设置中安装／更新本地组件后重试。"
+      };
+    }
+    if (requireDouyinLogin) {
+      let loggedIn = pluginDouyinLogin;
+      if (loggedIn === null || loggedIn === void 0) {
+        try {
+          loggedIn = await this.checkDouyinLogin();
+        } catch (error) {
+          loggedIn = false;
+        }
+      }
+      if (loggedIn !== true) {
+        return {
+          allowed: false,
+          code: "DOUYIN_LOGIN_REQUIRED",
+          message: "未登录抖音：请先在插件设置中完成抖音登录后重试；云端兜底只处理平台侧取不到媒体的情况。"
+        };
+      }
+    }
+    return { allowed: true, binding: activeBinding };
   }
   openTranscriptionSetupSettings() {
     var _a;
@@ -36976,20 +39005,524 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw error;
     }
   }
+  async transcodeCloudFallbackMediaToMp3(inputPath, { signal = null } = {}) {
+    throwIfAborted(signal);
+    const normalizedPath = String(inputPath || "").trim();
+    if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+      const error = new Error("本地媒体文件不可用");
+      error.code = "CLOUD_MEDIA_FILE_UNAVAILABLE";
+      throw error;
+    }
+    if (path.extname(normalizedPath).toLowerCase() === ".mp3") {
+      return { path: normalizedPath, owned: false };
+    }
+    const installStatus = this.getLocalAsrInstallStatus();
+    const ffmpegPath = String(installStatus && installStatus.ffmpegPath || "").trim();
+    if (!ffmpegPath) {
+      const error = new Error("本地转写组件缺少 ffmpeg，无法准备云端音频");
+      error.code = "CLOUD_MEDIA_TRANSCODER_UNAVAILABLE";
+      throw error;
+    }
+    const outputPath = path.join(
+      os.tmpdir(),
+      `wechat-inbox-cloud-media-${Date.now()}-${crypto.randomBytes(5).toString("hex")}.mp3`
+    );
+    let child = null;
+    let settled = false;
+    const cleanupOutput = /* @__PURE__ */ __name(() => {
+      try {
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      } catch (_) {
+      }
+    }, "cleanupOutput");
+    try {
+      await new Promise((resolve, reject) => {
+        const finish = /* @__PURE__ */ __name((error) => {
+          if (settled) return;
+          settled = true;
+          if (signal && typeof signal.removeEventListener === "function") signal.removeEventListener("abort", abort);
+          if (error) reject(error);
+          else resolve();
+        }, "finish");
+        const abort = /* @__PURE__ */ __name(() => {
+          try {
+            child && child.kill();
+          } catch (_) {
+          }
+          const error = new Error("云端媒体准备已取消");
+          error.code = "CLOUD_MEDIA_UPLOAD_ABORTED";
+          error.name = "AbortError";
+          finish(error);
+        }, "abort");
+        if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
+        try {
+          child = childProcess.execFile(ffmpegPath, [
+            "-y",
+            "-i",
+            normalizedPath,
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "64k",
+            outputPath
+          ], { windowsHide: true, timeout: 12e4, maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => {
+            if (error) {
+              const wrapped = new Error("本地媒体无法转换为 MP3");
+              wrapped.code = "CLOUD_MEDIA_TRANSCODE_FAILED";
+              wrapped.stderr = String(stderr || "").slice(-2e3);
+              finish(wrapped);
+              return;
+            }
+            finish();
+          });
+        } catch (error) {
+          const wrapped = new Error("本地媒体无法启动 MP3 转换");
+          wrapped.code = "CLOUD_MEDIA_TRANSCODE_FAILED";
+          wrapped.cause = error;
+          finish(wrapped);
+        }
+        if (signal && signal.aborted) abort();
+      });
+      throwIfAborted(signal);
+      const stat = fs.statSync(outputPath);
+      if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_CLOUD_FALLBACK_MEDIA_BYTES) {
+        const error = new Error("转换后的云端音频无效");
+        error.code = stat.size > MAX_CLOUD_FALLBACK_MEDIA_BYTES ? "CLOUD_MEDIA_TOO_LARGE" : "CLOUD_MEDIA_TRANSCODE_EMPTY";
+        throw error;
+      }
+      return { path: outputPath, owned: true };
+    } catch (error) {
+      cleanupOutput();
+      throw error;
+    }
+  }
+  async uploadLocalMediaForCloudFallback(inputPath, options = {}) {
+    const binding = options.binding || this.getActiveBindings()[0] || null;
+    if (!binding || !binding.token) {
+      const error = new Error("云端兜底上传失败：未绑定小程序");
+      error.code = "CLOUD_FALLBACK_BINDING_REQUIRED";
+      throw error;
+    }
+    throwIfAborted(options.signal || null);
+    const preparedMedia = await this.transcodeCloudFallbackMediaToMp3(inputPath, { signal: options.signal || null });
+    try {
+      const digest = await hashFileSha256(preparedMedia.path, {
+        signal: options.signal || null,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES
+      });
+      const preparedPayload = await this.requestJson("/transcriptions/fallback/media/prepare", "POST", {
+        size: digest.size,
+        sha256: digest.sha256,
+        format: "mp3"
+      }, binding, {
+        signal: options.signal || null,
+        noCache: true,
+        timeoutMs: 3e4
+      });
+      const preparedData = preparedPayload && preparedPayload.data ? preparedPayload.data : preparedPayload;
+      const uploadId = String(preparedData && preparedData.uploadId || "").trim();
+      const uploadUrl = String(preparedData && preparedData.uploadUrl || "").trim();
+      const fields = preparedData && preparedData.fields && typeof preparedData.fields === "object" ? preparedData.fields : {};
+      const uploadHeaders = preparedData && preparedData.headers && typeof preparedData.headers === "object" ? preparedData.headers : {};
+      if (!uploadId || !uploadUrl) {
+        const error = new Error("云端媒体上传凭据无效");
+        error.code = "CLOUD_MEDIA_PREPARE_INVALID";
+        throw error;
+      }
+      await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+        signal: options.signal || null,
+        timeoutMs: 12e4,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+        fileName: "audio.mp3",
+        contentType: "audio/mpeg",
+        method: preparedData && preparedData.method ? preparedData.method : "",
+        headers: uploadHeaders
+      });
+      const completedPayload = await this.requestJson("/transcriptions/fallback/media/complete", "POST", { uploadId }, binding, {
+        signal: options.signal || null,
+        noCache: true,
+        timeoutMs: 3e4
+      });
+      const completedData = completedPayload && completedPayload.data ? completedPayload.data : completedPayload;
+      const fileID = String(completedData && (completedData.fileID || completedData.audioFileID || completedData.fileId) || "").trim();
+      if (!isControlledCloudFallbackFileId(fileID)) {
+        const error = new Error("云端媒体上传未返回受控文件 ID");
+        error.code = "CLOUD_MEDIA_COMPLETE_INVALID";
+        throw error;
+      }
+      return { fileID, uploadId, size: digest.size, sha256: digest.sha256 };
+    } finally {
+      if (preparedMedia.owned) {
+        try {
+          if (fs.existsSync(preparedMedia.path)) fs.unlinkSync(preparedMedia.path);
+        } catch (_) {
+        }
+      }
+    }
+  }
+  async acquireOperatorDouyinMediaToTempFile(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || "").trim();
+    if (!isDouyinUrl(pageUrl)) {
+      const error2 = new Error("运营节点只接受抖音原始链接");
+      error2.code = "OPERATOR_MEDIA_SOURCE_INVALID";
+      throw error2;
+    }
+    throwIfAborted(signal);
+    const candidates = [];
+    const addCandidate = /* @__PURE__ */ __name((value) => {
+      const candidate = String(value && typeof value === "object" ? value.url || value.mediaUrl || "" : value || "").trim();
+      if (!/^https?:\/\//i.test(candidate) || candidates.includes(candidate)) return;
+      candidates.push(candidate);
+    }, "addCandidate");
+    const awemeId = extractDouyinAwemeId(pageUrl);
+    if (awemeId && typeof this.fetchDouyinMediaResolutionWithSession === "function") {
+      try {
+        const sessionResolution = await this.fetchDouyinMediaResolutionWithSession(pageUrl, awemeId);
+        (Array.isArray(sessionResolution && sessionResolution.mediaUrls) ? sessionResolution.mediaUrls : []).forEach(addCandidate);
+      } catch (_) {
+      }
+    }
+    if (!candidates.length && typeof this.refreshDouyinMediaUrls === "function") {
+      try {
+        const refreshed = await this.refreshDouyinMediaUrls(pageUrl);
+        (Array.isArray(refreshed) ? refreshed : []).forEach(addCandidate);
+      } catch (error2) {
+        if (isAbortError(error2) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+      }
+    }
+    if (!candidates.length && typeof this.renderSocialMediaUrls === "function") {
+      try {
+        const rendered = await this.renderSocialMediaUrls(pageUrl, { signal, targetDouyinAwemeId: awemeId });
+        (Array.isArray(rendered) ? rendered : []).forEach(addCandidate);
+      } catch (error2) {
+        if (isAbortError(error2) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+      }
+    }
+    let lastError = null;
+    for (const candidate of candidates.slice(0, 5)) {
+      throwIfAborted(signal);
+      try {
+        return await this.downloadMediaToTempFile(candidate, {
+          sourceUrl: pageUrl,
+          signal,
+          maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES
+        });
+      } catch (error2) {
+        lastError = error2;
+        if (isAbortError(error2) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+      }
+    }
+    const error = new Error("运营节点未能从抖音会话获得可下载媒体");
+    error.code = "OPERATOR_MEDIA_RESOLUTION_EMPTY";
+    error.retryable = true;
+    error.cause = lastError || null;
+    throw error;
+  }
+  async verifyOperatorControlledMediaFile(filePath, job, { signal = null } = {}) {
+    const expectedSize = Number(job && (job.mediaSize ?? job.artifactSize));
+    const expectedSha256 = String(job && (job.mediaSha256 || job.artifactSha256) || "").trim().toLowerCase();
+    const mediaIntegrity = String(job && job.mediaIntegrity || "").trim().toLowerCase();
+    const legacyOwnedFile = job && (job.legacyOwnedFile === true || mediaIntegrity === "legacy_owned_file");
+    const hasExpectedSize = Number.isSafeInteger(expectedSize) && expectedSize > 0;
+    const hasExpectedSha256 = /^[a-f0-9]{64}$/.test(expectedSha256);
+    if ((!hasExpectedSize || !hasExpectedSha256) && !legacyOwnedFile) {
+      const error = new Error("运营节点受控媒体缺少完整性信息");
+      error.code = "OPERATOR_MEDIA_INTEGRITY_REQUIRED";
+      error.retryable = false;
+      throw error;
+    }
+    const digest = await hashFileSha256(filePath, {
+      signal,
+      maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES
+    });
+    if (hasExpectedSize && digest.size !== expectedSize || hasExpectedSha256 && digest.sha256 !== expectedSha256) {
+      const error = new Error("运营节点受控媒体完整性校验失败");
+      error.code = "OPERATOR_MEDIA_INTEGRITY_MISMATCH";
+      error.retryable = false;
+      throw error;
+    }
+    return digest;
+  }
+  async uploadWorkerMediaForJob(inputPath, job, {
+    signal = null,
+    workerConfig = null,
+    request = null,
+    beforeComplete = null
+  } = {}) {
+    const suppliedConfig = workerConfig && typeof workerConfig === "object" ? workerConfig : {};
+    const workerToken = String(suppliedConfig.workerToken || process.env[OPERATOR_NODE_TOKEN_ENV] || "").trim();
+    const workerId = String(suppliedConfig.workerId || process.env[OPERATOR_NODE_ID_ENV] || "").trim();
+    const apiBase = String(suppliedConfig.apiBase || process.env[OPERATOR_NODE_API_BASE_ENV] || this.settings.apiBase || "").trim().replace(/\/+$/, "");
+    const enabled = suppliedConfig.enabled === true || String(process.env[OPERATOR_NODE_ENABLED_ENV] || "").trim() === "1";
+    if (!enabled || !workerToken || !workerId || !apiBase) {
+      const error = new Error("运营节点未启用");
+      error.code = "OPERATOR_NODE_DISABLED";
+      throw error;
+    }
+    throwIfAborted(signal);
+    const preparedMedia = await this.transcodeCloudFallbackMediaToMp3(inputPath, { signal });
+    const lease = {
+      jobId: String(job && job.jobId || "").trim(),
+      attemptId: String(job && job.attemptId || "").trim(),
+      fencingVersion: job && job.fencingVersion,
+      leaseToken: String(job && job.leaseToken || "").trim(),
+      workerId,
+      protocolVersion: WORKER_PROTOCOL_VERSION
+    };
+    const requestWorker = typeof request === "function" ? request : (requestPath, body, options) => requestOperatorJsonViaNode(apiBase, requestPath, workerToken, body, options);
+    try {
+      const digest = await hashFileSha256(preparedMedia.path, { signal, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES });
+      const preparedPayload = await requestWorker("/transcriptions/fallback/worker/media/prepare", {
+        ...lease,
+        size: digest.size,
+        sha256: digest.sha256,
+        format: "mp3"
+      }, { signal, timeoutMs: 3e4 });
+      const preparedData = preparedPayload && preparedPayload.data ? preparedPayload.data : preparedPayload;
+      const uploadId = String(preparedData && preparedData.uploadId || "").trim();
+      const uploadUrl = String(preparedData && preparedData.uploadUrl || "").trim();
+      const fields = preparedData && preparedData.fields && typeof preparedData.fields === "object" ? preparedData.fields : {};
+      const uploadHeaders = preparedData && preparedData.headers && typeof preparedData.headers === "object" ? preparedData.headers : {};
+      if (!uploadId || !uploadUrl) {
+        const error = new Error("运营节点媒体上传凭据无效");
+        error.code = "OPERATOR_MEDIA_PREPARE_INVALID";
+        throw error;
+      }
+      await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+        signal,
+        timeoutMs: 12e4,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+        fileName: "audio.mp3",
+        contentType: "audio/mpeg",
+        method: preparedData && preparedData.method ? preparedData.method : "",
+        headers: uploadHeaders
+      });
+      if (typeof beforeComplete === "function") await beforeComplete();
+      const completedPayload = await requestWorker("/transcriptions/fallback/worker/media/complete", {
+        ...lease,
+        uploadId
+      }, { signal, timeoutMs: 3e4 });
+      const completedData = completedPayload && completedPayload.data ? completedPayload.data : completedPayload;
+      const fileID = String(completedData && (completedData.fileID || completedData.audioFileID || completedData.fileId || preparedData.fileID) || "").trim();
+      if (!isControlledCloudFallbackFileId(fileID)) {
+        const error = new Error("运营节点媒体上传未返回受控文件 ID");
+        error.code = "OPERATOR_MEDIA_COMPLETE_INVALID";
+        throw error;
+      }
+      return { fileID, uploadId, size: digest.size, sha256: digest.sha256, completion: completedPayload };
+    } finally {
+      if (preparedMedia.owned) {
+        try {
+          if (fs.existsSync(preparedMedia.path)) fs.unlinkSync(preparedMedia.path);
+        } catch (_) {
+        }
+      }
+    }
+  }
+  isOperatorLocalAsrAvailable() {
+    return this.operatorLocalAsrActive !== true && !this.localAsrMutexOwner && !this.currentTranscriptionAbortController && !this.currentTranscriptionProcess && !this.currentTranscriptionContext;
+  }
+  async runOperatorLocalTranscription(inputPath, options = {}) {
+    if (!this.isOperatorLocalAsrAvailable()) {
+      const error = new Error("负责人本地转写正忙，运营节点暂不领取本地转写任务");
+      error.code = "OPERATOR_ASR_BUSY";
+      error.retryable = true;
+      throw error;
+    }
+    const mutexToken = { kind: "operator" };
+    this.localAsrMutexOwner = mutexToken;
+    this.operatorLocalAsrActive = true;
+    try {
+      return await this.runLocalTranscription(inputPath, {
+        ...options,
+        inputPath,
+        operatorNode: true,
+        _localAsrMutexToken: mutexToken
+      });
+    } finally {
+      if (this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
+      this.operatorLocalAsrActive = false;
+    }
+  }
+  async resumePendingCloudFallbackSubmission(options = {}) {
+    var _a;
+    if (this.settings.cloudFallbackEnabled !== true) return null;
+    const pending = this.findCloudFallbackSubmission(options);
+    if (!pending) return null;
+    throwIfAborted(options.signal || null);
+    let job;
+    try {
+      job = await this.submitCloudFallbackJob({
+        sourceType: "uploaded_file",
+        fileID: pending.fileID,
+        recordId: pending.recordId,
+        retryCount: pending.recordRetryCount,
+        clientRequestId: pending.clientRequestId,
+        title: options.title,
+        durationSeconds: options.durationSeconds,
+        localError: options.localError || "恢复未确认的云端兜底提交",
+        provider: this.settings.aiProvider || "",
+        binding: options.binding,
+        signal: options.signal
+      });
+    } catch (error) {
+      if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+      error.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
+      throw error;
+    }
+    if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+      return {
+        transcription: job.transcription,
+        source: "cloud-fallback",
+        cloudProvider: job.provider || "cloud",
+        cloudRequestId: job.providerRequestId || ""
+      };
+    }
+    throw createCloudFallbackPendingError(job, "恢复未确认的云端兜底提交");
+  }
   async runConfiguredTranscription(audioUrl, options = {}) {
+    var _a;
     const provider = this.settings.aiProvider;
+    const runLocalWithCloudFallback = /* @__PURE__ */ __name(async ({ sourcePrefix = "", includeQualityDetails = false } = {}) => {
+      var _a2, _b;
+      const preserveLocalMedia = options.preserveLocalMediaForCloudFallback === true;
+      let retainedInputPath = "";
+      const localOptions = {
+        ...options,
+        ...includeQualityDetails ? { includeQualityDetails: true } : {},
+        ...preserveLocalMedia ? {
+          retainInputFileOnError: true,
+          onInputPathReady: /* @__PURE__ */ __name(async (inputPath) => {
+            retainedInputPath = String(inputPath || "").trim();
+            if (typeof options.onInputPathReady === "function") await options.onInputPathReady(inputPath);
+          }, "onInputPathReady")
+        } : {}
+      };
+      const resumedSubmission = await this.resumePendingCloudFallbackSubmission(options);
+      if (resumedSubmission) return resumedSubmission;
+      try {
+        const localResult = await this.runLocalTranscription(audioUrl, localOptions);
+        const normalizedResult = localResult && typeof localResult === "object" ? localResult : { transcription: localResult };
+        return {
+          transcription: normalizedResult.transcription,
+          source: sourcePrefix ? sourcePrefix + "-local" : "local",
+          ...normalizedResult.qualityStatus ? { transcriptionQualityStatus: normalizedResult.qualityStatus } : {},
+          ...normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {}
+        };
+      } catch (error) {
+        if (isAbortError(error) && !isRetryableTranscriptionError(error) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
+        if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH" || isRetryableTranscriptionError(error)) throw error;
+        if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true) {
+          let uploadedArtifactReady = false;
+          try {
+            const uploaded = await this.uploadLocalMediaForCloudFallback(retainedInputPath, {
+              ...options,
+              binding: options.binding,
+              signal: options.signal
+            });
+            uploadedArtifactReady = true;
+            const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+            const clientId = String(this.settings && this.settings.clientId || "").trim() || createClientId();
+            if (clientId !== String(this.settings && this.settings.clientId || "").trim()) {
+              await this.saveSettings({ ...this.settings, clientId });
+            }
+            const clientRequestId = this.buildCloudFallbackClientRequestId({
+              sourceType: "uploaded_file",
+              fileID: uploaded.fileID,
+              recordId: options.recordId,
+              retryCount
+            });
+            await this.rememberCloudFallbackSubmission({
+              sourceType: "uploaded_file",
+              fileID: uploaded.fileID,
+              recordId: options.recordId,
+              bindingFingerprint: getSyncLifecycleBindingFingerprint((options.binding || {}).token),
+              clientId,
+              sourceFingerprint: this.buildCloudFallbackSourceFingerprint({
+                sourceType: "uploaded_file",
+                fileID: uploaded.fileID,
+                recordId: options.recordId
+              }),
+              clientRequestId,
+              recordRetryCount: retryCount,
+              createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+              updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+            });
+            const job = await this.submitCloudFallbackJob({
+              sourceType: "uploaded_file",
+              fileID: uploaded.fileID,
+              recordId: options.recordId,
+              retryCount: options.retryCount,
+              title: options.title,
+              durationSeconds: options.durationSeconds,
+              localError: error && error.message ? error.message : String(error || ""),
+              provider,
+              clientRequestId,
+              binding: options.binding,
+              signal: options.signal
+            });
+            if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+              return {
+                transcription: job.transcription,
+                source: "cloud-fallback",
+                cloudProvider: job.provider || "cloud",
+                cloudRequestId: job.providerRequestId || ""
+              };
+            }
+            throw createCloudFallbackPendingError(job, error && error.message);
+          } catch (fallbackError) {
+            if (fallbackError && fallbackError.code === "CLOUD_FALLBACK_QUEUED") throw fallbackError;
+            if (isAbortError(fallbackError) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw createAbortError();
+            if (uploadedArtifactReady && isCloudFallbackSubmissionUncertain(fallbackError)) {
+              fallbackError.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
+              throw fallbackError;
+            }
+          }
+        }
+        const controlledFileId = String(options.fileID || options.audioFileID || "").trim();
+        if (this.settings.cloudFallbackEnabled === true && controlledFileId && isControlledCloudFallbackFileId(controlledFileId)) {
+          const job = await this.submitCloudFallbackJob({
+            sourceType: "uploaded_file",
+            fileID: controlledFileId,
+            recordId: options.recordId,
+            retryCount: options.retryCount,
+            title: options.title,
+            durationSeconds: options.durationSeconds,
+            localError: error && error.message ? error.message : String(error || ""),
+            provider,
+            binding: options.binding,
+            signal: options.signal
+          });
+          if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+            return {
+              transcription: job.transcription,
+              source: "cloud-fallback",
+              cloudProvider: job.provider || "cloud",
+              cloudRequestId: job.providerRequestId || ""
+            };
+          }
+          throw createCloudFallbackPendingError(job, error && error.message);
+        }
+        throw error;
+      } finally {
+        if (retainedInputPath) {
+          try {
+            if (fs.existsSync(retainedInputPath)) fs.unlinkSync(retainedInputPath);
+          } catch (_) {
+          }
+        }
+      }
+    }, "runLocalWithCloudFallback");
     const runLocalFallback = /* @__PURE__ */ __name(async (sourcePrefix) => {
       if (provider === "doubao") {
         await this.clearPendingDoubaoTask(getDoubaoTaskKey(audioUrl));
       }
-      const localResult = await this.runLocalTranscription(audioUrl, { ...options, includeQualityDetails: true });
-      const normalizedResult = localResult && typeof localResult === "object" ? localResult : { transcription: localResult };
-      return {
-        transcription: normalizedResult.transcription,
-        source: sourcePrefix ? sourcePrefix + "-local" : "local",
-        ...normalizedResult.qualityStatus ? { transcriptionQualityStatus: normalizedResult.qualityStatus } : {},
-        ...normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {}
-      };
+      return await runLocalWithCloudFallback({ sourcePrefix, includeQualityDetails: true });
     }, "runLocalFallback");
     if (options.forceLocal) {
       return runLocalFallback("");
@@ -37043,20 +39576,18 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
     }
     if (this.settings.aiProvider === "local") {
+      if (this.settings.cloudFallbackEnabled === true || options.preserveLocalMediaForCloudFallback === true) {
+        return await runLocalWithCloudFallback({ sourcePrefix: "", includeQualityDetails: false });
+      }
       try {
         return {
           transcription: await this.runLocalTranscription(audioUrl, options),
           source: "local"
         };
       } catch (error) {
-        if (error.transcriptionSetupRequired) throw error;
-        if (error.code === "TRANSCRIPTION_NO_SPEECH") throw error;
-        if (isRetryableTranscriptionError(error)) {
-          throw error;
-        }
-        if (!options.fileID && !options.allowCloudUrlFallback) {
-          throw error;
-        }
+        if (isAbortError(error) && !isRetryableTranscriptionError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+        if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH" || isRetryableTranscriptionError(error)) throw error;
+        if (!options.fileID && !options.allowCloudUrlFallback) throw error;
         return await this.runCloudFallbackTranscription(audioUrl, {
           ...options,
           localError: error && error.message ? error.message : String(error || ""),
@@ -37118,7 +39649,32 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
   }
   async runLocalTranscription(audioUrl, options = {}) {
+    const requestedOwner = options.operatorNode === true ? "operator" : "foreground";
+    const inheritedToken = options._localAsrMutexToken || null;
+    const currentOwner = this.localAsrMutexOwner || null;
+    if (currentOwner && currentOwner !== inheritedToken) {
+      const error = new Error(requestedOwner === "operator" ? "负责人前台正在进行本地转写，运营节点暂不领取本地转写任务" : "本机运营节点正在进行本地转写，请稍后重试");
+      error.code = "LOCAL_ASR_BUSY";
+      error.retryable = true;
+      throw error;
+    }
+    const acquiredHere = !currentOwner;
+    const mutexToken = inheritedToken || { kind: requestedOwner };
+    if (acquiredHere) this.localAsrMutexOwner = mutexToken;
+    try {
+      return await this.runLocalTranscriptionCore(audioUrl, { ...options, _localAsrMutexToken: mutexToken });
+    } finally {
+      if (acquiredHere && this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
+    }
+  }
+  async runLocalTranscriptionCore(audioUrl, options = {}) {
     var _a, _b, _c, _d, _e, _f;
+    if (this.operatorLocalAsrActive === true && options.operatorNode !== true) {
+      const error = new Error("本机运营节点正在进行本地转写，请稍后重试");
+      error.code = "LOCAL_ASR_BUSY";
+      error.retryable = true;
+      throw error;
+    }
     throwIfAborted(options.signal);
     try {
       await this.ensureLocalComponentReadyForUse("音视频转写", {
@@ -37376,6 +39932,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
     }, "stopProgressPolling");
     let inputPath = "";
+    const suppliedInputPath = String(options.inputPath || "").trim();
+    const ownsInputPath = !suppliedInputPath;
     let outputPath = "";
     let command = "";
     let channelsStage = "download";
@@ -37386,26 +39944,38 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         title: progressTitle,
         percent: 0
       });
-      inputPath = await this.downloadMediaToTempFile(audioUrl, {
-        sourceUrl: options.sourceUrl || options.url || "",
-        decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || "",
-        signal: abortController.signal,
-        onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
-        onProgress: /* @__PURE__ */ __name((progress = {}) => {
-          if (typeof progress.percent === "number") {
-            this.showSyncProgress({
-              ...options,
-              stage: "downloading",
-              title: progressTitle,
-              percent: progress.percent
-            });
-          }
-        }, "onProgress")
-      });
+      if (suppliedInputPath) {
+        if (!fs.existsSync(suppliedInputPath)) {
+          const error = new Error("本地转写输入文件不可用");
+          error.code = "LOCAL_ASR_INPUT_UNAVAILABLE";
+          throw error;
+        }
+        inputPath = suppliedInputPath;
+      } else {
+        inputPath = await this.downloadMediaToTempFile(audioUrl, {
+          sourceUrl: options.sourceUrl || options.url || "",
+          decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || "",
+          signal: abortController.signal,
+          onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
+          onProgress: /* @__PURE__ */ __name((progress = {}) => {
+            if (typeof progress.percent === "number") {
+              this.showSyncProgress({
+                ...options,
+                stage: "downloading",
+                title: progressTitle,
+                percent: progress.percent
+              });
+            }
+          }, "onProgress")
+        });
+      }
       throwIfAborted(abortController.signal);
       session.inputIdentity.media = await asrDiagnosticEvidence.captureMediaIdentityAsync(inputPath, {
         durationHintSeconds: options.durationSeconds
       });
+      if (typeof options.onInputPathReady === "function") {
+        await options.onInputPathReady(inputPath);
+      }
       asrRecovery.saveSession(installRoot, session, this.settings);
       channelsStage = "transcribe";
       outputPath = `${inputPath}.txt`;
@@ -37777,9 +40347,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       try {
         asrRecovery.saveSession(installRoot, session, this.settings);
       } finally {
-        [inputPath, outputPath].forEach((filePath) => {
+        [inputPath, outputPath].forEach((filePath, index) => {
           try {
-            if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+            const canDelete = index === 0 ? ownsInputPath && !(options.retainInputFileOnError === true && session.status === "failed") : true;
+            if (canDelete && filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
           } catch (error) {
           }
         });
@@ -37798,7 +40369,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         onProgress: options.onProgress,
         idleTimeoutMs: 9e4,
         totalTimeoutMs: remainingMs,
-        timeout: Math.max(100, Math.min(3e4, remainingMs))
+        timeout: Math.max(100, Math.min(3e4, remainingMs)),
+        ...Number(options.maxBytes) > 0 ? { maxBytes: Math.min(MAX_CLOUD_FALLBACK_MEDIA_BYTES, Number(options.maxBytes)) } : {}
       };
     }, "getMediaDownloadRequestOptions");
     const sourceUrl = String(options.sourceUrl || "").trim();
@@ -38151,6 +40723,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           binding,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
+          retryCount: record.retryCount,
           title,
           forceLocal: true,
           cloudFallbackReason: "cloud-pretranscription-failed"
@@ -38193,6 +40766,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           binding,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
+          retryCount: record.retryCount,
           title,
           forceLocal: metadata.transcriptionMode === "local"
         });
@@ -38316,6 +40890,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             binding,
             fileID: metadata.fileID,
             recordId: getRecordId(record),
+            retryCount: record.retryCount,
             title,
             source: "file-attachment",
             forceLocal: metadata.transcriptionMode === "local",
@@ -38339,6 +40914,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           nextMetadata.aiMetadataSource = nextMetadata.aiMetadataSource || transcriptProperties.aiMetadataSource;
           nextMetadata.contentCategory = nextMetadata.contentCategory || (["mp4", "mov", "m4v"].includes(fileExt) ? "视频" : "音频");
         } catch (error) {
+          if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
           if (isSetupRequired(error) || isRetryableTranscriptionError(error)) throw error;
           nextMetadata.transcription = "";
           nextMetadata.transcriptionStatus = "failed";
@@ -38788,7 +41364,53 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const getCandidates = /* @__PURE__ */ __name(() => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
     const candidates = getCandidates();
     if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
+    const fallbackGate = !candidates.length && this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding ? await this.evaluateCloudFallbackUserGate({
+      binding,
+      requireDouyinLogin: true,
+      requireDouyinResolver: true
+    }) : null;
     if (!candidates.length) {
+      if (fallbackGate && fallbackGate.allowed) {
+        try {
+          const job = await this.submitCloudFallbackJob({
+            sourceType: "douyin_url",
+            sourceUrl: url,
+            recordId: getRecordId(record),
+            retryCount: record.retryCount,
+            title: title || metadata.title || "",
+            durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
+            localError: noMediaError || "抖音媒体地址获取失败",
+            provider: this.settings.aiProvider || "",
+            binding,
+            signal
+          });
+          if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+            return {
+              ...record,
+              metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
+                url,
+                platform,
+                mediaUrl,
+                subtitleUrl,
+                transcription: job.transcription,
+                transcriptionStatus: "success",
+                transcriptionSource: "cloud-fallback",
+                conversionStatus: "success",
+                markdown,
+                trailingMarkdown,
+                sourceTitle: normalizedSourceTitle,
+                mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-ready")
+              })
+            };
+          }
+          throw createCloudFallbackPendingError(job, noMediaError);
+        } catch (cloudError) {
+          if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
+          noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`].filter(Boolean).join("；");
+        }
+      } else if (fallbackGate) {
+        noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join("；");
+      }
       return {
         ...record,
         metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
@@ -38856,6 +41478,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             forceLocal: platform === "视频号" || metadata.transcriptionMode === "local",
             sourcePlatform: platform,
             retryLocalQualityOnce: platform === "视频号",
+            preserveLocalMediaForCloudFallback: isDouyinUrl(url) && this.settings.cloudFallbackEnabled === true,
             signal,
             onMediaDownloadDiagnostic: reportMediaDownloadAttempt
           });
@@ -38890,6 +41513,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           };
         } catch (candidateError) {
           if (isAbortError(candidateError) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+          if (candidateError && candidateError.code === "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN") throw candidateError;
           lastError = candidateError;
           if (candidateError.code === "TRANSCRIPTION_NO_SPEECH" && (candidateError.noSpeechEvidence === "non-speech-markers" || platform === "视频号" && candidateError.noSpeechEvidence === "full-decode-and-vad-no-speech-segments")) {
             noSpeechCount += 1;
@@ -38921,6 +41545,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw (noSpeechCount > 0 ? firstRealError : null) || lastError || new Error("未能完成音视频转写");
     } catch (error) {
       if (isAbortError(error)) throw error;
+      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
+      if (error && error.code === "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN") throw error;
       if (error.code === "TRANSCRIPTION_NO_SPEECH" && noSpeechCount > 0 && noSpeechCount === processedCandidateUrls.size && !firstRealError) {
         return { ...record, metadata: {
           ...buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
@@ -38945,7 +41571,56 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "wechat-channels") error.diagnostic = channelsDiagnostic.sanitize(mediaDiagnosticTrace, this.settings);
         throw error;
       }
-      const recoveryCandidate = platform === "视频号" && error.code === "TRANSCRIPTION_LOW_QUALITY" && error.qualityRecoveryCandidate && error.qualityRecoveryCandidate.fullAudioProcessed === true && getChannelsUnresolvedWindowCount(error.qualityRecoveryCandidate) > 0 && Number(error.qualityRecoveryCandidate.windowCount) > 0 ? String(error.qualityRecoveryCandidate.transcription || "").trim() : "";
+      let finalError = error;
+      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate({ binding }) : null;
+      if (fallbackGate2 && fallbackGate2.allowed) {
+        try {
+          const job = await this.submitCloudFallbackJob({
+            sourceType: "douyin_url",
+            sourceUrl: url,
+            recordId: getRecordId(record),
+            retryCount: record.retryCount,
+            title: title || metadata.title || "",
+            durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
+            localError: error.message || String(error),
+            provider: this.settings.aiProvider || "",
+            binding,
+            signal
+          });
+          if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+            return {
+              ...record,
+              metadata: buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
+                url,
+                platform,
+                mediaUrl,
+                mediaUrls: getCandidates().map((item) => item.url),
+                subtitleUrl,
+                transcription: job.transcription,
+                transcriptionStatus: "success",
+                transcriptionSource: "cloud-fallback",
+                conversionStatus: "success",
+                markdown,
+                trailingMarkdown,
+                sourceTitle: normalizedSourceTitle,
+                mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-ready")
+              })
+            };
+          }
+          throw createCloudFallbackPendingError(job, error.message || String(error));
+        } catch (cloudError) {
+          if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
+          finalError = new Error([
+            error.message || String(error),
+            `云端兜底未提交：${cloudError && cloudError.message || cloudError}`
+          ].filter(Boolean).join("；"));
+          finalError.code = error.code;
+        }
+      } else if (fallbackGate2) {
+        finalError = new Error([error.message || String(error), fallbackGate2.message].filter(Boolean).join("；"));
+        finalError.code = error.code;
+      }
+      const recoveryCandidate = platform === "视频号" && finalError.code === "TRANSCRIPTION_LOW_QUALITY" && finalError.qualityRecoveryCandidate && finalError.qualityRecoveryCandidate.fullAudioProcessed === true && getChannelsUnresolvedWindowCount(finalError.qualityRecoveryCandidate) > 0 && Number(finalError.qualityRecoveryCandidate.windowCount) > 0 ? String(finalError.qualityRecoveryCandidate.transcription || "").trim() : "";
       const candidateNote = recoveryCandidate ? [
         "## 待确认的转写片段",
         "",
@@ -38962,7 +41637,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         subtitleUrl,
         transcription: "",
         transcriptionStatus: "failed",
-        transcriptionError: bilibiliDiagnostic.summary(mediaDiagnosticTrace) || error.message || String(error),
+        transcriptionError: bilibiliDiagnostic.summary(mediaDiagnosticTrace) || finalError.message || String(finalError),
         transcriptionSource: source || this.settings.aiProvider || "unknown",
         conversionStatus: "failed",
         markdown,
@@ -40901,7 +43576,49 @@ ${finalized.markdown}
           });
         }
         if (isVideoIntent && isDouyinRecord) {
-          const noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
+          let noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
+          if (this.settings.cloudFallbackEnabled === true && binding) {
+            const fallbackGate = await this.evaluateCloudFallbackUserGate({
+              binding,
+              requireDouyinLogin: true,
+              requireDouyinResolver: true,
+              pluginDouyinLogin: hasPluginDouyinLogin
+            });
+            if (!fallbackGate.allowed) {
+              noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join("；");
+            } else {
+              try {
+                const job = await this.submitCloudFallbackJob({
+                  sourceType: "douyin_url",
+                  sourceUrl: url,
+                  recordId: getRecordId(record),
+                  retryCount: record.retryCount,
+                  title: title || metadata.title || "抖音链接",
+                  localError: noMediaError,
+                  provider: this.settings.aiProvider || "",
+                  binding,
+                  signal
+                });
+                if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+                  return {
+                    ...record,
+                    metadata: buildTranscriptOnlyMetadata(metadata, {
+                      url,
+                      platform: "抖音",
+                      transcription: job.transcription,
+                      transcriptionStatus: "success",
+                      transcriptionSource: "cloud-fallback",
+                      conversionStatus: "success",
+                      sourceTitle: metadata.title || title || "抖音链接"
+                    })
+                  };
+                }
+                throw createCloudFallbackPendingError(job, noMediaError);
+              } catch (cloudError) {
+                if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
+              }
+            }
+          }
           return {
             ...record,
             metadata: {
@@ -41479,6 +44196,7 @@ ${finalized.markdown}
         updateCommentResult({ status: isAbortError(error) ? "aborted" : "not_attempted", reason: "content_failed", errorCode: getXiaohongshuCommentErrorCode(error) });
       }
       if (isAbortError(error)) throw error;
+      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
       }
@@ -41821,50 +44539,75 @@ ${finalized.markdown}
     let recordForMarkdown = record;
     const recordType = String(record.type || "").toLowerCase();
     const linkAsWebpage = recordType === "link" && shouldHydrateLinkAsWebpage(record.metadata && record.metadata.url || record.content || "");
+    const cloudFallbackCompleted = isCloudFallbackCompletedRecord(record);
     const textWebpageUrl = recordType === "text" ? selectAutomaticWebpageUrlFromText([
       record.content || "",
       record.metadata && record.metadata.url || ""
     ].filter(Boolean).join("\n")) : "";
     const textAsWebpage = Boolean(textWebpageUrl);
-    if (recordType === "voice") {
+    if (cloudFallbackCompleted && !(recordType === "webpage" || linkAsWebpage || textAsWebpage)) {
+      recordForMarkdown = {
+        ...record,
+        metadata: {
+          ...record.metadata || {},
+          transcriptOnly: true,
+          webpageMediaType: "audio_video",
+          conversionStatus: "success"
+        }
+      };
+    } else if (recordType === "voice") {
       recordForMarkdown = await this.writeVoiceAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === "file") {
       recordForMarkdown = await this.writeFileAttachment(record, rootDir, dateFolder, title, binding, progress);
     } else if (recordType === "webpage" || linkAsWebpage || textAsWebpage) {
       this.showSyncProgress({ ...progress, stage: "processing", title: progressTitle });
-      recordForMarkdown = await this.hydrateWebpageMarkdown(
-        linkAsWebpage || textAsWebpage ? {
+      if (cloudFallbackCompleted) {
+        recordForMarkdown = {
           ...record,
           type: "webpage",
           metadata: {
             ...record.metadata || {},
-            url: textAsWebpage ? textWebpageUrl : record.metadata && record.metadata.url || record.content || "",
-            ...textAsWebpage ? {
-              shareText: record.metadata && record.metadata.shareText || record.content || "",
-              automaticWebpageExtraction: true
-            } : {},
-            conversionStatus: record.metadata && record.metadata.conversionStatus || "pending"
+            url: record.metadata && record.metadata.url || record.content || "",
+            transcriptOnly: true,
+            webpageMediaType: "audio_video",
+            conversionStatus: "success"
           }
-        } : record,
-        rootDir,
-        dateFolder,
-        title,
-        binding,
-        { signal, onVerifiedArticle: /* @__PURE__ */ __name((url, article) => {
-          verifiedArticleLease = { url, article };
-        }, "onVerifiedArticle") }
-      );
-      throwIfAborted(signal);
-      if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
-        const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(textWebpageUrl) ? this.lastXiaohongshuBrowserDiagnostic : null;
-        throw createAutomaticWebpageExtractionError(
-          textWebpageUrl,
-          buildAutomaticWebpageFailureDiagnostic(
-            textWebpageUrl,
-            recordForMarkdown,
-            xiaohongshuBrowserDiagnostic
-          )
+        };
+      } else {
+        recordForMarkdown = await this.hydrateWebpageMarkdown(
+          linkAsWebpage || textAsWebpage ? {
+            ...record,
+            type: "webpage",
+            metadata: {
+              ...record.metadata || {},
+              url: textAsWebpage ? textWebpageUrl : record.metadata && record.metadata.url || record.content || "",
+              ...textAsWebpage ? {
+                shareText: record.metadata && record.metadata.shareText || record.content || "",
+                automaticWebpageExtraction: true
+              } : {},
+              conversionStatus: record.metadata && record.metadata.conversionStatus || "pending"
+            }
+          } : record,
+          rootDir,
+          dateFolder,
+          title,
+          binding,
+          { signal, onVerifiedArticle: /* @__PURE__ */ __name((url, article) => {
+            verifiedArticleLease = { url, article };
+          }, "onVerifiedArticle") }
         );
+        throwIfAborted(signal);
+        if (textAsWebpage && !isAutomaticWebpageHydrationSuccessful(recordForMarkdown)) {
+          const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(textWebpageUrl) ? this.lastXiaohongshuBrowserDiagnostic : null;
+          throw createAutomaticWebpageExtractionError(
+            textWebpageUrl,
+            buildAutomaticWebpageFailureDiagnostic(
+              textWebpageUrl,
+              recordForMarkdown,
+              xiaohongshuBrowserDiagnostic
+            )
+          );
+        }
       }
       recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
       title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
@@ -42136,6 +44879,9 @@ ${finalized.markdown}
       const retryKey = `completion:${this.getAutoSyncRecordKey(binding, item.recordId)}`;
       if (this.backgroundSyncActive && this.autoSyncController && !this.autoSyncController.canRetry(retryKey)) continue;
       try {
+        if (item.stage === "cloud-fallback") {
+          continue;
+        }
         if (item.stage === "committed") {
           await this.reportSyncRecordCompletion(item.recordId, item.noteTitle || "", binding, {
             enabled: true,
@@ -42176,7 +44922,11 @@ ${finalized.markdown}
       const data = payload && payload.data && typeof payload.data === "object" ? payload.data : payload && typeof payload === "object" ? payload : {};
       const attemptId = String(data.attemptId || data.syncAttemptId || "").trim();
       if (!attemptId) throw new Error("sync processing claim is missing an attempt id");
-      return { enabled: true, attemptId };
+      return {
+        enabled: true,
+        attemptId,
+        leaseUntil: String(data.leaseUntil || data.processingLeaseUntil || "").trim()
+      };
     } catch (error) {
       if (isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
       if (isSyncRecordBusyError(error)) return { enabled: true, conflict: true };
@@ -42249,9 +44999,15 @@ ${finalized.markdown}
     this.ensureSerializedSaveData();
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
     await this.replayPendingSyncLifecycleAttempts(binding);
+    try {
+      await this.flushCloudFallbackAcks(binding);
+    } catch (_) {
+    }
     this.showSyncProgress({ bindingLabel, stage: "fetching" });
     const payload = await this.requestJson("/records?status=pending", "GET", {}, binding);
-    const records = payload.data || [];
+    let records = payload.data || [];
+    const cloudFallbackPoll = await this.pollCloudFallbackJobs(binding, records);
+    records = cloudFallbackPoll.records;
     const pendingReview = normalizePendingReviewSummary(payload && payload.meta && payload.meta.pendingReview);
     const syncSnapshot = normalizeSyncRecordDiagnosticSnapshot(payload && payload.meta && payload.meta.syncSnapshot);
     const lifecycleAdvertised = Boolean(payload && payload.meta && payload.meta.syncLifecycleStatus === true);
@@ -42273,9 +45029,11 @@ ${finalized.markdown}
       if (this.backgroundSyncActive && !this.getAutoSyncBindings().some((item) => item.token === binding.token)) break;
       const record = records[index];
       const recordId = getRecordId(record);
+      const cloudFallbackPending2 = isCloudFallbackPendingRecord(record);
+      const cloudFallbackCompleted = isCloudFallbackCompletedRecord(record);
       const autoRetryKey = this.getAutoSyncRecordKey(binding, recordId);
       const previousFailure = this.getRecentSyncFailures().find((item) => item.recordId === recordId && item.bindingToken === normalizeBindCodeInput(binding.token));
-      if (previousFailure && (Number(record.retryCount) || 0) <= previousFailure.retryCount && !this.findCompletedSyncReceipt(binding, recordId)) {
+      if (previousFailure && !cloudFallbackCompleted && (Number(record.retryCount) || 0) <= previousFailure.retryCount && !this.findCompletedSyncReceipt(binding, recordId)) {
         skipped.push({ recordId, reason: "failed-awaiting-manual-retry" });
         continue;
       }
@@ -42284,11 +45042,11 @@ ${finalized.markdown}
         this.autoSyncController.succeeded(`completion:${autoRetryKey}`);
       }
       const pendingAttempt = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts).find((item) => item.recordId === recordId && item.bindingFingerprint === getSyncLifecycleBindingFingerprint(binding.token) && item.stage !== "committed");
-      if (pendingAttempt && String(record.syncAttemptId || "") === pendingAttempt.attemptId) {
+      if (pendingAttempt && !cloudFallbackPending2 && !cloudFallbackCompleted && String(record.syncAttemptId || "") === pendingAttempt.attemptId) {
         skipped.push({ recordId, reason: "failure-report-pending" });
         continue;
       }
-      if (this.backgroundSyncActive && ((this.settings.autoSyncStoppedRecords || []).includes(autoRetryKey) || this.autoSyncController && (!this.autoSyncController.canRetry(autoRetryKey) || !this.autoSyncController.canRetry(`completion:${autoRetryKey}`)))) {
+      if (!cloudFallbackCompleted && this.backgroundSyncActive && ((this.settings.autoSyncStoppedRecords || []).includes(autoRetryKey) || this.autoSyncController && (!this.autoSyncController.canRetry(autoRetryKey) || !this.autoSyncController.canRetry(`completion:${autoRetryKey}`)))) {
         skipped.push({ recordId, reason: "automatic-retry-deferred" });
         continue;
       }
@@ -42304,6 +45062,26 @@ ${finalized.markdown}
         skipped.push({
           recordId,
           reason: "locally-quarantined-unrecoverable"
+        });
+        continue;
+      }
+      if (cloudFallbackPending2) {
+        skipped.push({
+          recordId,
+          reason: "cloud-fallback-processing",
+          jobId: record.metadata && record.metadata.cloudFallbackJobId
+        });
+        if (!this.backgroundSyncActive) {
+          this.showSyncProgress({ ...progress, stage: "processing", title: `${buildRecordTitleBase(record)} 云端兜底中` });
+        }
+        continue;
+      }
+      if (isCloudFallbackTerminalRecord(record)) {
+        skipped.push({
+          recordId,
+          reason: "cloud-fallback-terminal",
+          jobId: record.metadata && record.metadata.cloudFallbackJobId,
+          status: record.metadata && (record.metadata.cloudFallbackStatus || record.metadata.transcriptionStatus)
         });
         continue;
       }
@@ -42336,12 +45114,15 @@ ${finalized.markdown}
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
-        lifecycle = await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        lifecycle = getActiveCloudFallbackLifecycle(record) || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
         if (lifecycle.conflict) {
           skipped.push({ recordId, reason: "record-busy" });
           continue;
         }
-        if (this.currentProcessingContext && this.currentProcessingContext.recordId === recordId) this.currentProcessingContext.attemptId = lifecycle.attemptId || "";
+        if (this.currentProcessingContext && this.currentProcessingContext.recordId === recordId) {
+          this.currentProcessingContext.attemptId = lifecycle.attemptId || "";
+          this.currentProcessingContext.leaseUntil = lifecycle.leaseUntil || "";
+        }
         diagnosticId = createDiagnosticId({
           binding,
           syncRecordId: recordId,
@@ -42401,6 +45182,8 @@ ${finalized.markdown}
             const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
             if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
+          await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {
+          });
           continue;
         }
         if (existingFilePath) {
@@ -42438,6 +45221,8 @@ ${finalized.markdown}
             const clearWarning = await this.clearPendingSyncLifecycleAttemptBestEffort(binding, recordId);
             if (clearWarning) completionWarnings.push({ recordId, ...clearWarning });
           }
+          await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {
+          });
           continue;
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -42450,6 +45235,8 @@ ${finalized.markdown}
         localCommitFact = item;
         if (this.autoSyncController) this.autoSyncController.succeeded(autoRetryKey);
         written.push(item);
+        await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {
+        });
         if (item.conversionWarning) {
           conversionWarnings.push(item.conversionWarning);
         }
@@ -42487,6 +45274,32 @@ ${finalized.markdown}
             code: "POST_COMMIT_RECOVERY_FAILED",
             message: "local note is saved; post-commit recovery will retry without marking sync failed"
           });
+          continue;
+        }
+        if (error && error.code === "CLOUD_FALLBACK_QUEUED") {
+          const queuedJob = error.cloudFallbackJob && normalizeCloudFallbackJob(error.cloudFallbackJob);
+          if (queuedJob) {
+            try {
+              await this.attachCloudFallbackRecordContext(queuedJob, record, binding, lifecycle);
+              if (lifecycle.enabled && lifecycle.attemptId) {
+                await this.upsertPendingSyncLifecycleAttempt(binding, {
+                  recordId,
+                  attemptId: lifecycle.attemptId,
+                  stage: "cloud-fallback",
+                  code: `CLOUD_FALLBACK_${queuedJob.jobId}`
+                });
+              }
+            } catch (persistError) {
+            }
+          }
+          skipped.push({
+            recordId,
+            reason: "cloud-fallback-processing",
+            jobId: queuedJob && queuedJob.jobId || ""
+          });
+          if (!this.backgroundSyncActive) {
+            this.showSyncProgress({ ...progress, stage: "processing", title: `${processingTitle} 云端兜底中` });
+          }
           continue;
         }
         const message = error.message || String(error);
@@ -42601,7 +45414,8 @@ ${finalized.markdown}
         }
       }
     }
-    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot };
+    const cloudFallbackPending = skipped.filter((item) => item.reason === "cloud-fallback-processing").length;
+    return { written, failed, skipped, conversionWarnings, completionWarnings, pendingReview, syncSnapshot, cloudFallbackPending };
   }
   async syncInbox(showNotice = true, options = {}) {
     if (this.autoSyncDisposed) return { pollFailed: false, written: 0 };
@@ -42647,6 +45461,7 @@ ${finalized.markdown}
       const recentFailureEntries = [];
       const recentResolvedEntries = [];
       let pollFailed = false;
+      let cloudFallbackPending = 0;
       this.syncProgressNotice = null;
       this.showSyncProgress({ stage: "fetching" });
       for (const binding of bindings) {
@@ -42700,6 +45515,7 @@ ${finalized.markdown}
           if (result.syncSnapshot) {
             syncSnapshots.push(result.syncSnapshot);
           }
+          cloudFallbackPending += Math.max(0, Number(result.cloudFallbackPending) || 0);
         } catch (error) {
           const message = error.message || String(error);
           pollFailed = true;
@@ -42859,7 +45675,7 @@ ${finalized.markdown}
       if (this.backgroundSyncActive && !this.autoSyncDisposed && this.syncStatusBar && typeof this.syncStatusBar.setText === "function" && (failed.length || conversionWarnings.length)) {
         this.syncStatusBar.setText("自动同步有未完成内容，可在小程序“同步记录”中查看并重试");
       }
-      return { pollFailed, written: written.length, failed: failed.filter((item) => !item.setupRequired).length, pendingSetup: Math.max(pendingSetupEntries.length, failed.filter((item) => item.setupRequired).length) };
+      return { pollFailed, written: written.length, failed: failed.filter((item) => !item.setupRequired).length, pendingSetup: Math.max(pendingSetupEntries.length, failed.filter((item) => item.setupRequired).length), cloudFallbackPending };
     } catch (error) {
       this.lastSyncDiagnostic = {
         status: "failed",
@@ -43025,6 +45841,12 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         }
       });
     }, "renderBindingSetting");
+    new Setting(containerEl).setName("输入短期连接码").setDesc("小程序生成的 CNT-XXXX-XXXX-XXXX 连接码，通常 10 分钟内有效；消费后会直接保存绑定凭据，不会清除已有绑定。").addText((text) => text.setPlaceholder("例如 CNT-ABCD-EFGH-JKLM").setValue(this.plugin.settings.pendingConnectionTicket || "").onChange(async (value) => {
+      await this.plugin.saveSettings({ ...this.plugin.settings, pendingConnectionTicket: value });
+    })).addButton((button) => button.setButtonText("连接").setCta().onClick(async () => {
+      await this.plugin.connectWithConnectionTicket();
+      this.display();
+    }));
     new Setting(containerEl).setName("输入绑定码").setDesc(primaryBinding ? "绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级功能里增加设备。" : "基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。").addText((text) => text.setPlaceholder("例如 ABC-123").setValue(primaryBinding ? primaryBinding.token : this.plugin.settings.pendingBindCode || "").setDisabled(Boolean(primaryBinding)).onChange(async (value) => {
       await this.plugin.saveSettings({ ...this.plugin.settings, pendingBindCode: value });
     })).addButton((button) => {
@@ -43074,6 +45896,33 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     new Setting(containerEl).setName("自动同步").setDesc("默认开启。保持 Obsidian 运行，小程序收集的新内容会自动进入当前知识库。关闭后不再接收新任务，正在处理的这一条会继续完成。").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoSyncEnabled !== false).onChange(async (value) => {
       await this.plugin.saveSettings({ ...this.plugin.settings, autoSyncEnabled: value });
     }));
+    new Setting(containerEl).setName("云端兜底转写").setDesc("Pro 用户可用。默认关闭；开启后，本地转写或抖音媒体获取失败时，插件会按当前兜底路径将原始抖音链接或受控云端音频文件交给云端处理；不会上传 Cookie。").addToggle((toggle) => toggle.setValue(this.plugin.settings.cloudFallbackEnabled === true).onChange(async (value) => {
+      await this.plugin.saveSettings({ ...this.plugin.settings, cloudFallbackEnabled: value });
+    }));
+    const pendingCloudFallbackJobs = normalizeCloudFallbackJobs(this.plugin.settings.cloudFallbackJobs).filter((job) => isCloudFallbackJobPending(job));
+    if (pendingCloudFallbackJobs.length) {
+      const bindingByFingerprint = new Map(this.plugin.getActiveBindings().map((binding) => [
+        getSyncLifecycleBindingFingerprint(binding.token),
+        binding
+      ]));
+      new Setting(containerEl).setName("正在处理的云端兜底任务").setDesc("任务会在后台轮询；如果不再需要，可取消对应任务。");
+      pendingCloudFallbackJobs.forEach((job) => {
+        const binding = bindingByFingerprint.get(job.bindingFingerprint) || null;
+        const sourceLabel = job.sourceType === "douyin_url" ? "抖音链接" : "云端音频文件";
+        new Setting(containerEl).setName(`${sourceLabel} · ${job.jobId.slice(0, 12)}`).setDesc(binding ? "已提交，等待云端转写结果。" : "原绑定已不可用，无法从此处取消。").addButton((button) => button.setButtonText("取消任务").onClick(async () => {
+          if (!binding) return;
+          button.setDisabled(true);
+          try {
+            await this.plugin.cancelCloudFallbackJob(job.jobId, binding);
+            new Notice("云端兜底任务已取消");
+            this.display();
+          } catch (error) {
+            button.setDisabled(false);
+            new Notice(`取消云端兜底任务失败：${error.message || error}`);
+          }
+        }));
+      });
+    }
     new Setting(containerEl).setName("立即同步").setDesc("手动拉取云端收集箱，并写入当前 vault。").addButton((button) => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
     new Setting(containerEl).setName("公众号访问验证").setDesc("遇到微信验证时，在插件使用的会话中打开原文并完成验证。只确认实际提取到正文的文章；不会自动绕过验证。可粘贴失败文章链接，留空则使用最近一次公众号访问暂停的链接。").addText((text) => text.setPlaceholder("失败的公众号文章链接（可选）").onChange((value) => {
       this.plugin.wechatAccessRecoveryInput = value.trim();
