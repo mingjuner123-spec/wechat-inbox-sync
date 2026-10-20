@@ -145,7 +145,7 @@ assert.match(source, /\/transcriptions\/fallback\/jobs\/\$\{encodeURIComponent\(
 assert.match(source, /sourceType:\s*['"]douyin_url['"]/);
 assert.match(source, /sourceType:\s*['"]uploaded_file['"]/);
 assert.match(source, /cloudFallbackJobs/);
-assert.match(source, /cloudFallbackEnabled:\s*false/);
+assert.match(source, /cloudFallbackEnabled:\s*true/);
 assert.match(source, /delete requestBody\.cookie/);
 assert.match(source, /delete requestBody\.cookies/);
 assert.match(source, /CLOUD_FALLBACK_QUEUED/);
