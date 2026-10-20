@@ -19981,7 +19981,7 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.194";
+var PLUGIN_RUNTIME_VERSION = "1.3.195";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -20180,7 +20180,7 @@ var DEFAULT_SETTINGS = {
   deepseekBaseUrl: "https://api.deepseek.com/v1/chat/completions",
   cloudPreTranscriptionEnabled: false,
   cloudPreTranscriptionThresholdMinutes: 10,
-  cloudFallbackEnabled: false,
+  cloudFallbackEnabled: true,
   cloudFallbackJobs: [],
   cloudFallbackSubmissions: [],
   cloudFallbackPendingAcks: [],
@@ -22581,7 +22581,7 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.deepseekBaseUrl = String(merged.deepseekBaseUrl || "").trim() || DEFAULT_SETTINGS.deepseekBaseUrl;
   merged.cloudPreTranscriptionEnabled = Boolean(merged.cloudPreTranscriptionEnabled);
   merged.cloudPreTranscriptionThresholdMinutes = normalizeCloudPreTranscriptionThresholdMinutes(merged.cloudPreTranscriptionThresholdMinutes);
-  merged.cloudFallbackEnabled = merged.cloudFallbackEnabled === true;
+  merged.cloudFallbackEnabled = true;
   merged.cloudFallbackJobs = normalizeCloudFallbackJobs(merged.cloudFallbackJobs);
   merged.cloudFallbackSubmissions = normalizeCloudFallbackSubmissions(merged.cloudFallbackSubmissions);
   merged.cloudFallbackPendingAcks = normalizeCloudFallbackAcks(merged.cloudFallbackPendingAcks);
@@ -39508,6 +39508,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           throw createCloudFallbackPendingError(job, error && error.message);
         }
+        const pageSourceUrl = String(options.sourceUrl || "").trim();
+        const legacyFileId = String(options.fileID || options.audioFileID || "").trim();
+        const legacyUrlFallbackAllowed = Boolean(legacyFileId) || options.allowCloudUrlFallback === true;
+        if (legacyUrlFallbackAllowed && !isDouyinUrl(pageSourceUrl || audioUrl)) {
+          return await this.runCloudFallbackTranscription(audioUrl, {
+            ...options,
+            localError: error && error.message ? error.message : String(error || ""),
+            source: options.source || "local"
+          });
+        }
         throw error;
       } finally {
         if (retainedInputPath) {
@@ -45762,39 +45772,12 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Obsidian 内容同步助手" });
-    const setupPanel = containerEl.createDiv({ cls: "wechat-inbox-sync-setup-panel" });
-    setupPanel.createEl("h3", { text: "转写准备" });
     const setupView = setupSummary(
       this.plugin.getActiveBindings().length > 0,
       this.plugin.settings.localTranscriptionEntitlementStatus,
       this.plugin.getLocalTranscriptionComponentReadiness(),
       !!this.plugin.localComponentInstallPromise
     );
-    setupPanel.createDiv({ text: this.plugin.localComponentRestartRequired && setupView.components.some((item) => !item.ready) ? "待完成组件切换：请完全退出并重新打开 Obsidian，安装程序已确认此步骤必需。" : setupView.message });
-    for (const component of setupView.components) setupPanel.createDiv({ text: component.label + "：" + (component.ready ? "已就绪" : "未就绪") });
-    new Setting(setupPanel).setName("下一步").setDesc("会员在微信小程序领取或开通；安装完成后，在小程序同步历史中重试未完成的内容。").addButton((button) => button.setButtonText(!setupView.bound ? "前往绑定" : !setupView.active ? "刷新会员状态" : "安装／更新本地组件").setCta().onClick(async () => {
-      var _a;
-      if (!setupView.bound) {
-        const input = containerEl.querySelector('input[type="text"]');
-        if (input) {
-          input.scrollIntoView({ block: "center" });
-          input.focus();
-        }
-        return;
-      }
-      button.setDisabled(true);
-      try {
-        const status2 = await this.plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: "manual-refresh", force: true });
-        if (!isCachedProStatusActive(status2)) this.plugin.showTranscriptionSetupNotice(membershipGuidance(status2));
-        else if ((_a = status2.localComponentInstallResult) == null ? void 0 : _a.pendingRestart) new Notice("组件安装待完成切换：请完全退出并重新打开 Obsidian，然后重试。", 12e3);
-        else if (status2.localComponentInstallError) new Notice("组件准备未完成：" + status2.localComponentInstallError, 12e3);
-      } catch (error) {
-        new Notice("准备检查未完成：" + (error.message || error), 1e4);
-      } finally {
-        button.setDisabled(false);
-        this.display();
-      }
-    }));
     containerEl.createEl("h3", {
       text: "使用教程",
       cls: "wechat-inbox-sync-section-heading"
@@ -45841,12 +45824,6 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         }
       });
     }, "renderBindingSetting");
-    new Setting(containerEl).setName("输入短期连接码").setDesc("小程序生成的 CNT-XXXX-XXXX-XXXX 连接码，通常 10 分钟内有效；消费后会直接保存绑定凭据，不会清除已有绑定。").addText((text) => text.setPlaceholder("例如 CNT-ABCD-EFGH-JKLM").setValue(this.plugin.settings.pendingConnectionTicket || "").onChange(async (value) => {
-      await this.plugin.saveSettings({ ...this.plugin.settings, pendingConnectionTicket: value });
-    })).addButton((button) => button.setButtonText("连接").setCta().onClick(async () => {
-      await this.plugin.connectWithConnectionTicket();
-      this.display();
-    }));
     new Setting(containerEl).setName("输入绑定码").setDesc(primaryBinding ? "绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级功能里增加设备。" : "基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。").addText((text) => text.setPlaceholder("例如 ABC-123").setValue(primaryBinding ? primaryBinding.token : this.plugin.settings.pendingBindCode || "").setDisabled(Boolean(primaryBinding)).onChange(async (value) => {
       await this.plugin.saveSettings({ ...this.plugin.settings, pendingBindCode: value });
     })).addButton((button) => {
@@ -45893,54 +45870,13 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         });
       });
     });
-    new Setting(containerEl).setName("自动同步").setDesc("默认开启。保持 Obsidian 运行，小程序收集的新内容会自动进入当前知识库。关闭后不再接收新任务，正在处理的这一条会继续完成。").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoSyncEnabled !== false).onChange(async (value) => {
-      await this.plugin.saveSettings({ ...this.plugin.settings, autoSyncEnabled: value });
-    }));
-    new Setting(containerEl).setName("云端兜底转写").setDesc("Pro 用户可用。默认关闭；开启后，本地转写或抖音媒体获取失败时，插件会按当前兜底路径将原始抖音链接或受控云端音频文件交给云端处理；不会上传 Cookie。").addToggle((toggle) => toggle.setValue(this.plugin.settings.cloudFallbackEnabled === true).onChange(async (value) => {
-      await this.plugin.saveSettings({ ...this.plugin.settings, cloudFallbackEnabled: value });
-    }));
-    const pendingCloudFallbackJobs = normalizeCloudFallbackJobs(this.plugin.settings.cloudFallbackJobs).filter((job) => isCloudFallbackJobPending(job));
-    if (pendingCloudFallbackJobs.length) {
-      const bindingByFingerprint = new Map(this.plugin.getActiveBindings().map((binding) => [
-        getSyncLifecycleBindingFingerprint(binding.token),
-        binding
-      ]));
-      new Setting(containerEl).setName("正在处理的云端兜底任务").setDesc("任务会在后台轮询；如果不再需要，可取消对应任务。");
-      pendingCloudFallbackJobs.forEach((job) => {
-        const binding = bindingByFingerprint.get(job.bindingFingerprint) || null;
-        const sourceLabel = job.sourceType === "douyin_url" ? "抖音链接" : "云端音频文件";
-        new Setting(containerEl).setName(`${sourceLabel} · ${job.jobId.slice(0, 12)}`).setDesc(binding ? "已提交，等待云端转写结果。" : "原绑定已不可用，无法从此处取消。").addButton((button) => button.setButtonText("取消任务").onClick(async () => {
-          if (!binding) return;
-          button.setDisabled(true);
-          try {
-            await this.plugin.cancelCloudFallbackJob(job.jobId, binding);
-            new Notice("云端兜底任务已取消");
-            this.display();
-          } catch (error) {
-            button.setDisabled(false);
-            new Notice(`取消云端兜底任务失败：${error.message || error}`);
-          }
-        }));
-      });
-    }
     new Setting(containerEl).setName("立即同步").setDesc("手动拉取云端收集箱，并写入当前 vault。").addButton((button) => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
-    new Setting(containerEl).setName("公众号访问验证").setDesc("遇到微信验证时，在插件使用的会话中打开原文并完成验证。只确认实际提取到正文的文章；不会自动绕过验证。可粘贴失败文章链接，留空则使用最近一次公众号访问暂停的链接。").addText((text) => text.setPlaceholder("失败的公众号文章链接（可选）").onChange((value) => {
-      this.plugin.wechatAccessRecoveryInput = value.trim();
-    })).addButton((button) => button.setButtonText("打开原文验证").onClick(() => this.plugin.verifyWechatArticleAccess(this.plugin.wechatAccessRecoveryInput || "")));
-    new Setting(containerEl).setName("同步失败记录").setDesc("失败内容保留在小程序“同步记录”中，不会自动重试或反复提醒。可在近 7 天的记录中点击“重试”，重新加入同步队列。");
-    new Setting(containerEl).setName("同步/安装失败诊断").setDesc("默认复制本次失败摘要；需要历史和详细日志时，可复制完整诊断。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
-      try {
-        await this.plugin.copyCompactSyncDiagnosticText();
-        new Notice("失败摘要已复制");
-      } catch (error) {
-        new Notice(`复制失败摘要失败：${error.message || error}`);
-      }
-    })).addButton((button) => button.setButtonText("复制完整诊断").onClick(async () => {
+    new Setting(containerEl).setName("同步/安装失败诊断").setDesc("复制诊断信息，便于反馈和排查问题。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
       try {
         await this.plugin.copySyncDiagnosticText({ detailed: true });
-        new Notice("完整诊断信息已复制");
+        new Notice("诊断信息已复制");
       } catch (error) {
-        new Notice(`复制完整诊断失败：${error.message || error}`);
+        new Notice(`复制诊断信息失败：${error.message || error}`);
       }
     }));
     containerEl.createEl("h3", {
