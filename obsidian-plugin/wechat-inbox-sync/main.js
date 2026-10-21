@@ -5907,6 +5907,26 @@ var require_compact_sync_diagnostic = __commonJS({
       return result;
     }
     __name(takeUtf8, "takeUtf8");
+    function describeCause(diagnostic) {
+      if (!diagnostic || typeof diagnostic !== "object") return "";
+      const cause = diagnostic.cause && typeof diagnostic.cause === "object" ? diagnostic.cause : diagnostic;
+      if (cause.source !== "platform-article") return "";
+      const parts = [];
+      if (cause.platform) parts.push(`平台 ${cause.platform}`);
+      if (cause.stage) parts.push(`阶段 ${cause.stage}`);
+      if (cause.reason) parts.push(cause.reason);
+      const hidden = cause.hiddenBrowser;
+      if (hidden && typeof hidden === "object") {
+        const flags = [hidden.ok ? "成功" : "失败", hidden.blocked ? "被拒绝" : "", hidden.needsLogin ? "需登录" : ""].filter(Boolean);
+        parts.push(`隐藏浏览器 ${flags.join("/")}`);
+      }
+      const http2 = cause.http;
+      if (http2 && typeof http2 === "object") {
+        parts.push(http2.status ? `HTTP ${http2.status}` : String(http2.transport || ""));
+      }
+      return parts.filter(Boolean).join("；").slice(0, 300);
+    }
+    __name(describeCause, "describeCause");
     function formatCompactSyncDiagnostic2({ failure, version, system, installStatus, maxBytes = MAX_COMPACT_DIAGNOSTIC_BYTES } = {}) {
       if (failure && failure.status === "running") {
         return "WeChat Inbox Sync 单次失败诊断\n尚无本次失败记录；转写仍进行中。";
@@ -5915,6 +5935,7 @@ var require_compact_sync_diagnostic = __commonJS({
         return "WeChat Inbox Sync 单次失败诊断\n当前没有失败中的同步记录。";
       }
       const diagnosticId = failure.diagnosticId || failure.diagnostic && failure.diagnostic.id || "";
+      const cause = describeCause(failure.diagnostic);
       const fields = [
         "WeChat Inbox Sync 单次失败诊断",
         `插件版本：${version || "未知"}`,
@@ -5925,6 +5946,7 @@ var require_compact_sync_diagnostic = __commonJS({
         `记录 ID：${failure.recordId || "未知"}`,
         diagnosticId ? `诊断 ID：${diagnosticId}` : "",
         `错误摘要：${failure.error || failure.message || "未提供错误摘要"}`,
+        cause ? `失败原因：${cause}` : "",
         `原始分享链接：${failure.sourceUrl || "未记录"}`
       ].filter(Boolean);
       const full = fields.join("\n");
@@ -16416,6 +16438,281 @@ var require_wechat_article_pipeline = __commonJS({
   }
 });
 
+// src/platform-article-utils.js
+var require_platform_article_utils = __commonJS({
+  "src/platform-article-utils.js"(exports2, module2) {
+    "use strict";
+    var ZHIHU_ROOTS = ["zhihu.com"];
+    var TOUTIAO_ROOTS = ["toutiao.com"];
+    var TRACKING_PARAM = /^(?:utm_[a-z0-9_]+|share_[a-z0-9_]+|from|source|spm|tt_from|traffic_source|isappinstalled|wxshare_count|scene|share_token|share_source|s_r|s_c|share_medium|share_plat|share_tag|timestamp|utm)$/i;
+    function cleanHost(value) {
+      return String(value || "").toLowerCase().replace(/\.$/, "");
+    }
+    __name(cleanHost, "cleanHost");
+    function getHttpHostname(url) {
+      try {
+        const parsed = new URL(String(url || "").trim());
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+        if (parsed.username || parsed.password) return "";
+        return cleanHost(parsed.hostname);
+      } catch (error) {
+        return "";
+      }
+    }
+    __name(getHttpHostname, "getHttpHostname");
+    function isHostWithin(url, roots) {
+      const hostname = getHttpHostname(url);
+      if (!hostname) return false;
+      return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
+    }
+    __name(isHostWithin, "isHostWithin");
+    function isZhihuUrl(url) {
+      return isHostWithin(url, ZHIHU_ROOTS);
+    }
+    __name(isZhihuUrl, "isZhihuUrl");
+    function isToutiaoUrl(url) {
+      return isHostWithin(url, TOUTIAO_ROOTS);
+    }
+    __name(isToutiaoUrl, "isToutiaoUrl");
+    function isPlatformArticleUrl2(url) {
+      return isZhihuUrl(url) || isToutiaoUrl(url);
+    }
+    __name(isPlatformArticleUrl2, "isPlatformArticleUrl");
+    function getPlatformArticleKind2(url) {
+      if (isZhihuUrl(url)) return "zhihu";
+      if (isToutiaoUrl(url)) return "toutiao";
+      return "";
+    }
+    __name(getPlatformArticleKind2, "getPlatformArticleKind");
+    function getPlatformArticleLabel2(url) {
+      const kind = getPlatformArticleKind2(url);
+      if (kind === "zhihu") return "知乎";
+      if (kind === "toutiao") return "今日头条";
+      return "";
+    }
+    __name(getPlatformArticleLabel2, "getPlatformArticleLabel");
+    function getPlatformArticleReferer2(url) {
+      if (isZhihuUrl(url)) return "https://www.zhihu.com/";
+      if (isToutiaoUrl(url)) return "https://www.toutiao.com/";
+      return "";
+    }
+    __name(getPlatformArticleReferer2, "getPlatformArticleReferer");
+    var PLATFORM_ARTICLE_NAVIGATION_ROOTS = {
+      zhihu: ZHIHU_ROOTS,
+      toutiao: TOUTIAO_ROOTS
+    };
+    function isAllowedPlatformArticleNavigation2(url, platform) {
+      const roots = PLATFORM_ARTICLE_NAVIGATION_ROOTS[platform];
+      if (!roots) return false;
+      let parsed;
+      try {
+        parsed = new URL(String(url || "").trim());
+      } catch (error) {
+        return false;
+      }
+      if (parsed.protocol !== "https:") return false;
+      if (parsed.username || parsed.password) return false;
+      if (parsed.port && parsed.port !== "443") return false;
+      const hostname = cleanHost(parsed.hostname);
+      return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
+    }
+    __name(isAllowedPlatformArticleNavigation2, "isAllowedPlatformArticleNavigation");
+    function unwrapZhihuRedirect(parsed) {
+      if (!isHostWithin(parsed.toString(), ZHIHU_ROOTS)) return null;
+      if (cleanHost(parsed.hostname) !== "link.zhihu.com") return null;
+      let current = parsed;
+      for (let index = 0; index < 3; index += 1) {
+        const target = current.searchParams.get("target");
+        if (!target) break;
+        let next;
+        try {
+          next = new URL(target);
+        } catch (error) {
+          break;
+        }
+        if (!["http:", "https:"].includes(next.protocol)) break;
+        if (next.hostname.endsWith(".")) break;
+        current = next;
+      }
+      return current === parsed ? null : current;
+    }
+    __name(unwrapZhihuRedirect, "unwrapZhihuRedirect");
+    var ZHIHU_CANONICAL_PATH = /\/(?:p|answer)\/\d+\/?$|\/question\/\d+\/answer\/\d+\/?$|\/question\/\d+\/?$/i;
+    var TOUTIAO_CANONICAL_PATH = /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i;
+    function normalizePlatformArticleUrl2(url) {
+      const source = String(url || "").trim();
+      if (!isPlatformArticleUrl2(source)) return source;
+      let parsed;
+      try {
+        parsed = new URL(source);
+      } catch (error) {
+        return source;
+      }
+      const unwrapped = unwrapZhihuRedirect(parsed);
+      if (unwrapped) parsed = unwrapped;
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return source;
+      if (parsed.username || parsed.password) return source;
+      const hostname = cleanHost(parsed.hostname);
+      const kind = isZhihuUrl(parsed.toString()) ? "zhihu" : isToutiaoUrl(parsed.toString()) ? "toutiao" : "";
+      if (!kind) return source;
+      const canonicalPath = kind === "zhihu" ? ZHIHU_CANONICAL_PATH.test(parsed.pathname) : TOUTIAO_CANONICAL_PATH.test(parsed.pathname);
+      const result = new URL(`${parsed.protocol}//${hostname}${parsed.pathname}`);
+      if (!canonicalPath) {
+        for (const [key, value] of parsed.searchParams.entries()) {
+          if (!TRACKING_PARAM.test(key)) result.searchParams.append(key, value);
+        }
+      }
+      return result.toString();
+    }
+    __name(normalizePlatformArticleUrl2, "normalizePlatformArticleUrl");
+    function decodeRenderDataScript(raw) {
+      const value = String(raw || "").trim();
+      if (!value) return null;
+      const candidates = [value];
+      try {
+        const decoded = decodeURIComponent(value);
+        if (decoded !== value) candidates.push(decoded);
+      } catch (error) {
+      }
+      for (const candidate of candidates) {
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed && typeof parsed === "object") return parsed;
+        } catch (error) {
+        }
+      }
+      return null;
+    }
+    __name(decodeRenderDataScript, "decodeRenderDataScript");
+    function pickString(...values) {
+      for (const value of values) {
+        if (typeof value === "string" && value.trim()) return value.trim();
+      }
+      return "";
+    }
+    __name(pickString, "pickString");
+    function findArticleLikeObject(root) {
+      if (!root || typeof root !== "object") return null;
+      const queue = [root];
+      const seen = /* @__PURE__ */ new Set();
+      let best = null;
+      let visited = 0;
+      while (queue.length && visited < 2e4) {
+        const node = queue.shift();
+        if (!node || typeof node !== "object" || seen.has(node)) continue;
+        seen.add(node);
+        visited += 1;
+        if (Array.isArray(node)) {
+          for (const item of node) queue.push(item);
+          continue;
+        }
+        const content = typeof node.content === "string" ? node.content : "";
+        const title = pickString(node.title, node.article_title, node.headline);
+        if (content && content.length >= 40 && (title || node.articleInfo)) {
+          const score = content.length + (title ? 1e3 : 0);
+          if (!best || score > best.score) best = { node, content, title, score };
+        }
+        for (const value of Object.values(node)) {
+          if (value && typeof value === "object") queue.push(value);
+        }
+      }
+      return best;
+    }
+    __name(findArticleLikeObject, "findArticleLikeObject");
+    function parseToutiaoRenderData(html) {
+      const source = String(html || "");
+      const match = source.match(/<script[^>]*\bid=["']RENDER_DATA["'][^>]*>([\s\S]*?)<\/script>/i) || source.match(/<script[^>]*\bid=["']render_data["'][^>]*>([\s\S]*?)<\/script>/i);
+      if (!match) return null;
+      const data = decodeRenderDataScript(match[1]);
+      if (!data) return null;
+      const found = findArticleLikeObject(data);
+      if (!found) return null;
+      const node = found.node;
+      const mediaUser = node.media_user && typeof node.media_user === "object" ? node.media_user : {};
+      const author = pickString(
+        node.author,
+        node.source,
+        node.name,
+        mediaUser.screen_name,
+        mediaUser.name,
+        node.user_info && node.user_info.name
+      );
+      const contentHtml = String(found.content || "");
+      return {
+        title: pickString(node.title, node.article_title, node.headline),
+        author,
+        contentHtml: /<[a-z][\s\S]*>/i.test(contentHtml) ? contentHtml : "",
+        contentText: /<[a-z][\s\S]*>/i.test(contentHtml) ? "" : contentHtml,
+        publishTime: pickString(node.publish_time, node.create_time, node.datetime),
+        source: "render-data"
+      };
+    }
+    __name(parseToutiaoRenderData, "parseToutiaoRenderData");
+    function getZhihuEntityContent(entity) {
+      if (!entity || typeof entity !== "object") return "";
+      const direct = pickString(entity.content, entity.contentHtml);
+      if (direct) return direct;
+      const nested = entity.rich_text && typeof entity.rich_text === "object" ? pickString(entity.rich_text.content, entity.rich_text.contentHtml) : "";
+      return nested;
+    }
+    __name(getZhihuEntityContent, "getZhihuEntityContent");
+    function parseZhihuInitialData(html) {
+      const source = String(html || "");
+      const match = source.match(/<script[^>]*\bid=["']js-initialData["'][^>]*>([\s\S]*?)<\/script>/i);
+      if (!match) return null;
+      const raw = String(match[1] || "").trim();
+      if (!raw) return null;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        return null;
+      }
+      const initialState = parsed && parsed.initialState && typeof parsed.initialState === "object" ? parsed.initialState : parsed;
+      const entities = initialState && initialState.entities && typeof initialState.entities === "object" ? initialState.entities : {};
+      const groups = ["answers", "articles", "zvideo"];
+      for (const group of groups) {
+        const collection = entities[group];
+        if (!collection || typeof collection !== "object") continue;
+        for (const entity of Object.values(collection)) {
+          const contentHtml = getZhihuEntityContent(entity);
+          if (!contentHtml || String(contentHtml).length < 40) continue;
+          const author = entity.author && typeof entity.author === "object" ? pickString(entity.author.name, entity.author.headline) : pickString(entity.author);
+          return {
+            title: pickString(entity.title, entity.question && entity.question.title),
+            author,
+            contentHtml: String(contentHtml),
+            contentText: "",
+            publishTime: pickString(entity.created, entity.updated, entity.created_time),
+            source: "js-initial-data"
+          };
+        }
+      }
+      return null;
+    }
+    __name(parseZhihuInitialData, "parseZhihuInitialData");
+    function extractPlatformArticleFromHtml2(html, platform) {
+      if (platform === "toutiao") return parseToutiaoRenderData(html);
+      if (platform === "zhihu") return parseZhihuInitialData(html);
+      return null;
+    }
+    __name(extractPlatformArticleFromHtml2, "extractPlatformArticleFromHtml");
+    module2.exports = {
+      isZhihuUrl,
+      isToutiaoUrl,
+      isPlatformArticleUrl: isPlatformArticleUrl2,
+      getPlatformArticleKind: getPlatformArticleKind2,
+      getPlatformArticleLabel: getPlatformArticleLabel2,
+      getPlatformArticleReferer: getPlatformArticleReferer2,
+      isAllowedPlatformArticleNavigation: isAllowedPlatformArticleNavigation2,
+      normalizePlatformArticleUrl: normalizePlatformArticleUrl2,
+      parseToutiaoRenderData,
+      parseZhihuInitialData,
+      extractPlatformArticleFromHtml: extractPlatformArticleFromHtml2
+    };
+  }
+});
+
 // src/media-file-utils.js
 var require_media_file_utils = __commonJS({
   "src/media-file-utils.js"(exports2, module2) {
@@ -19883,6 +20180,15 @@ var {
   normalizeWechatArticleUrl
 } = require_wechat_article_utils();
 var {
+  extractPlatformArticleFromHtml,
+  getPlatformArticleKind,
+  getPlatformArticleLabel,
+  getPlatformArticleReferer,
+  isAllowedPlatformArticleNavigation,
+  isPlatformArticleUrl,
+  normalizePlatformArticleUrl
+} = require_platform_article_utils();
+var {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
   getAttachmentExt,
@@ -19981,8 +20287,8 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.195";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1";
+var PLUGIN_RUNTIME_VERSION = "1.3.196";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -23708,7 +24014,7 @@ function isXiaohongshuUrl(url) {
 }
 __name(isXiaohongshuUrl, "isXiaohongshuUrl");
 function isSocialArticleUrl(sourceUrl) {
-  return isWechatArticleUrl(sourceUrl) || isFeishuUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl);
+  return isWechatArticleUrl(sourceUrl) || isFeishuUrl(sourceUrl) || isXiaohongshuUrl(sourceUrl) || isPlatformArticleUrl(sourceUrl);
 }
 __name(isSocialArticleUrl, "isSocialArticleUrl");
 function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageMode) {
@@ -23933,7 +24239,7 @@ function extractWechatChannelsRequestPayload(url) {
 }
 __name(extractWechatChannelsRequestPayload, "extractWechatChannelsRequestPayload");
 function shouldHydrateLinkAsWebpage(url) {
-  return isWechatMpArticleUrl(url) || isWechatChannelsUrl(url) || isFeishuUrl(url) || isXiaohongshuUrl(url) || isDouyinUrl(url) || isBilibiliUrl(url) || isXiaoyuzhouUrl(url);
+  return isWechatMpArticleUrl(url) || isWechatChannelsUrl(url) || isFeishuUrl(url) || isXiaohongshuUrl(url) || isDouyinUrl(url) || isBilibiliUrl(url) || isXiaoyuzhouUrl(url) || isPlatformArticleUrl(url);
 }
 __name(shouldHydrateLinkAsWebpage, "shouldHydrateLinkAsWebpage");
 function isSafeAutomaticWebpageUrl(url) {
@@ -23949,7 +24255,7 @@ function isSafeAutomaticWebpageUrl(url) {
 __name(isSafeAutomaticWebpageUrl, "isSafeAutomaticWebpageUrl");
 function isTrustedAutomaticPlatformUrl(url) {
   const hostname = getHttpUrlHostname(url);
-  return isHostnameWithinDomain(hostname, "mp.weixin.qq.com") || isHostnameWithinDomain(hostname, "feishu.cn") || isHostnameWithinDomain(hostname, "feishu.net") || isHostnameWithinDomain(hostname, "larksuite.com") || isHostnameWithinDomain(hostname, "xiaohongshu.com") || isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn") || isHostnameWithinDomain(hostname, "douyin.com") || isHostnameWithinDomain(hostname, "iesdouyin.com") || isHostnameWithinDomain(hostname, "amemv.com") || isHostnameWithinDomain(hostname, "bilibili.com") || isHostnameWithinDomain(hostname, "b23.tv") || isHostnameWithinDomain(hostname, "xiaoyuzhoufm.com") || isHostnameWithinDomain(hostname, "xiaoyuzhou.com");
+  return isHostnameWithinDomain(hostname, "mp.weixin.qq.com") || isHostnameWithinDomain(hostname, "feishu.cn") || isHostnameWithinDomain(hostname, "feishu.net") || isHostnameWithinDomain(hostname, "larksuite.com") || isHostnameWithinDomain(hostname, "xiaohongshu.com") || isHostnameWithinDomain(hostname, "xhslink.com") || isHostnameWithinDomain(hostname, "xhslink.cn") || isHostnameWithinDomain(hostname, "douyin.com") || isHostnameWithinDomain(hostname, "iesdouyin.com") || isHostnameWithinDomain(hostname, "amemv.com") || isHostnameWithinDomain(hostname, "bilibili.com") || isHostnameWithinDomain(hostname, "b23.tv") || isHostnameWithinDomain(hostname, "xiaoyuzhoufm.com") || isHostnameWithinDomain(hostname, "xiaoyuzhou.com") || isHostnameWithinDomain(hostname, "zhihu.com") || isHostnameWithinDomain(hostname, "toutiao.com");
 }
 __name(isTrustedAutomaticPlatformUrl, "isTrustedAutomaticPlatformUrl");
 function extractAutomaticWebpageUrlCandidates(text) {
@@ -24158,6 +24464,7 @@ function getSocialRequestHeaders(url) {
   if (isDouyinUrl(url) || isDouyinMediaUrl(url)) headers.Referer = "https://www.douyin.com/";
   if (isXiaoyuzhouUrl(url)) headers.Referer = "https://www.xiaoyuzhoufm.com/";
   if (isWechatChannelsUrl(url) || isWechatChannelsMediaUrl(url)) headers.Referer = "https://channels.weixin.qq.com/";
+  if (isPlatformArticleUrl(url)) headers.Referer = getPlatformArticleReferer(url);
   return headers;
 }
 __name(getSocialRequestHeaders, "getSocialRequestHeaders");
@@ -24389,6 +24696,7 @@ function getWebpageSourcePrefix(url) {
   if (isDouyinUrl(url)) return "抖音";
   if (isBilibiliUrl(url)) return "B站";
   if (isXiaoyuzhouUrl(url)) return "小宇宙";
+  if (isPlatformArticleUrl(url)) return getPlatformArticleLabel(url);
   return "网页";
 }
 __name(getWebpageSourcePrefix, "getWebpageSourcePrefix");
@@ -25104,6 +25412,28 @@ function shouldBlockXiaohongshuBrowserNavigationRequest(details = {}) {
   return isNavigation && !isAllowedXiaohongshuBrowserNavigationUrl(details && details.url);
 }
 __name(shouldBlockXiaohongshuBrowserNavigationRequest, "shouldBlockXiaohongshuBrowserNavigationRequest");
+function installPlatformArticleNavigationGuards(webContents, platform, initialUrl) {
+  if (!webContents || typeof webContents.removeAllListeners !== "function" || typeof webContents.on !== "function" || typeof webContents.setWindowOpenHandler !== "function") {
+    throw new Error("无法隔离平台文章提取窗口的跳转处理");
+  }
+  if (!isAllowedPlatformArticleNavigation(initialUrl, platform)) {
+    throw new Error("平台文章提取仅允许官方 HTTPS 页面");
+  }
+  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictNavigation = /* @__PURE__ */ __name((event, navigation) => {
+    const value = typeof navigation === "string" ? navigation : navigation && navigation.url || event && event.url;
+    if (!isAllowedPlatformArticleNavigation(value, platform) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "restrictNavigation");
+  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+    webContents.on(eventName, restrictNavigation);
+  }
+  webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+}
+__name(installPlatformArticleNavigationGuards, "installPlatformArticleNavigationGuards");
 function installXiaohongshuNavigationGuards(webContents, options = {}) {
   if (!webContents) return;
   const preventUntrustedNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
@@ -30940,6 +31270,150 @@ async function renderUrlToMarkdownWithElectron(url) {
   }
 }
 __name(renderUrlToMarkdownWithElectron, "renderUrlToMarkdownWithElectron");
+var PLATFORM_ARTICLE_SELECTORS = {
+  zhihu: {
+    title: ["h1.Post-Title", ".QuestionHeader-title", "h1"],
+    body: [".Post-RichText", ".RichText.ztext", ".AnswerItem .RichText", ".QuestionAnswer-content .RichText"],
+    author: [".AuthorInfo-name", ".UserLink-link", ".QuestionHeader .AuthorInfo-name"],
+    // Plain 登录 also appears in the site header of a fully readable article, so
+    // the marker has to name an actual sign-in wall.
+    loginMarker: /扫码登录|请先登录|登录后(?:查看|阅读)|登录以(?:继续|查看)|安全验证|访问过于频繁|验证码/,
+    // Zhihu answers an unauthenticated request from a flagged exit IP with a
+    // JSON error page instead of the article. That is a network problem the
+    // user can fix by switching networks, not a missing login.
+    blockMarker: /请求存在异常|系统监测到您的网络环境存在异常|"code"\s*:\s*40362|40362/
+  },
+  toutiao: {
+    title: ["h1.article-title", ".article-title", "h1"],
+    body: [".article-content", ".syl-article-base", "article", ".article"],
+    author: [".article-sub", ".user-info .name", ".name"],
+    loginMarker: /扫码登录|请先登录|登录后(?:查看|阅读)|登录以(?:继续|查看)|安全验证|访问过于频繁|验证码/,
+    blockMarker: /请求存在异常|访问过于频繁|安全验证/,
+    // Share short links sometimes only resolve inside the Toutiao app. That page
+    // has no article body, so say so instead of reporting a generic failure.
+    appWallMarker: /打开今日头条\s*(?:App|APP|app)|下载今日头条|打开\s*APP\s*查看|请在\s*APP\s*内打开/
+  }
+};
+async function renderPlatformArticleWithElectron(url) {
+  const platform = getPlatformArticleKind(url);
+  if (!platform) throw new Error("不是支持的平台文章链接");
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error("当前 Obsidian 环境不支持隐藏浏览器渲染");
+  }
+  const session = getWechatSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: session || void 0,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  try {
+    installPlatformArticleNavigationGuards(win.webContents, platform, url);
+    const loaded = waitForWebContents(win.webContents);
+    let loadFailure = null;
+    const loadPromise = win.loadURL(url).catch((error) => {
+      loadFailure = error;
+    });
+    await Promise.race([
+      loadPromise,
+      new Promise((resolve) => window.setTimeout(resolve, 2e4))
+    ]);
+    await loaded;
+    const selectors = PLATFORM_ARTICLE_SELECTORS[platform] || PLATFORM_ARTICLE_SELECTORS.zhihu;
+    const result = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (value) => String(value || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+\\n/g, '\\n')
+          .replace(/\\n{3,}/g, '\\n\\n')
+          .trim();
+        const selectors = ${JSON.stringify(selectors)};
+        const loginMarker = new RegExp(${JSON.stringify(selectors.loginMarker.source)}, 'i');
+        const blockSource = ${JSON.stringify(selectors.blockMarker ? selectors.blockMarker.source : "")};
+        const isBlocked = (text) => Boolean(blockSource) && new RegExp(blockSource, 'i').test(text);
+        const appWallSource = ${JSON.stringify(selectors.appWallMarker ? selectors.appWallMarker.source : "")};
+        const isAppWall = (text) => Boolean(appWallSource) && new RegExp(appWallSource, 'i').test(text);
+        const pick = (list) => {
+          for (const selector of list) {
+            let node = null;
+            try { node = document.querySelector(selector); } catch (error) { node = null; }
+            if (node) return node;
+          }
+          return null;
+        };
+        const promoteLazyImages = (root) => {
+          root.querySelectorAll('img').forEach((image) => {
+            const lazy = image.getAttribute('data-src') || image.getAttribute('data-original') || image.getAttribute('data-lazy-src');
+            if (lazy && !image.getAttribute('src')) image.setAttribute('src', lazy);
+          });
+        };
+        let body = null;
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          body = pick(selectors.body);
+          if (body && clean(body.innerText || body.textContent).replace(/\\s+/g, '').length >= 80) break;
+          window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+          await sleep(500);
+        }
+        const pageText = clean(document.body ? (document.body.innerText || document.body.textContent) : '');
+        if (!body) {
+          return {
+            title: clean(document.title || ''),
+            author: '',
+            html: '',
+            assets: [],
+            needsLogin: loginMarker.test(pageText),
+            blocked: isBlocked(pageText),
+            appWall: isAppWall(pageText),
+            stateText: pageText.slice(0, 600),
+          };
+        }
+        promoteLazyImages(body);
+        const clone = body.cloneNode(true);
+        clone.querySelectorAll('script,style,noscript,iframe,form,.RichContent-actions,.ContentItem-actions,.Recommendations,.Post-Sub,.Post-topics,.comment,.comments').forEach((node) => node.remove());
+        const assets = (${prepareBrowserArticleImages.toString()})(clone, location.href);
+        const titleNode = pick(selectors.title);
+        const authorNode = pick(selectors.author);
+        return {
+          title: clean(titleNode && (titleNode.innerText || titleNode.textContent) || document.title || ''),
+          author: clean(authorNode && (authorNode.innerText || authorNode.textContent) || '').slice(0, 80),
+          html: clone.outerHTML,
+          assets,
+          needsLogin: false,
+          blocked: isBlocked(pageText),
+          appWall: false,
+          stateText: pageText.slice(0, 600),
+          bodyTextChars: clean(body.innerText || body.textContent).replace(/\\s+/g, '').length,
+          imageCount: assets.length,
+        };
+      })()
+    `);
+    if (result && result.html) {
+      try {
+        result.markdown = htmlToMarkdown(result.html);
+      } catch (error) {
+        result.conversionError = error.message;
+      }
+    }
+    result.platform = platform;
+    result.finalUrl = win.webContents && typeof win.webContents.getURL === "function" ? win.webContents.getURL() : url;
+    if (loadFailure) {
+      result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || "").slice(0, 160);
+    }
+    return result;
+  } finally {
+    if (win && typeof win.destroy === "function") {
+      win.destroy();
+    }
+  }
+}
+__name(renderPlatformArticleWithElectron, "renderPlatformArticleWithElectron");
 async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -40976,7 +41450,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (isSocialArticleUrl(sourceUrl) && socialArticleImageStorageMode === "remote") {
       return markdown;
     }
-    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl);
+    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl) || isPlatformArticleUrl(sourceUrl);
     const stats = options.stats && typeof options.stats === "object" ? options.stats : null;
     const reportError = /* @__PURE__ */ __name((asset, error) => {
       if (stats) {
@@ -41098,10 +41572,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     const isFeishuSource = isFeishuUrl(sourceUrl);
+    const isPlatformArticleSource = isPlatformArticleUrl(sourceUrl);
     const socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
       options.socialArticleImageStorageMode || this.settings && this.settings.socialArticleImageStorageMode
     );
-    const isSessionBackedSource = isFeishuSource || isWechatArticleSource;
+    const isSessionBackedSource = isFeishuSource || isWechatArticleSource || isPlatformArticleSource;
     let nextMarkdown = isXiaohongshuSource ? sanitizeXiaohongshuMarkdownImages(String(markdown)) : String(markdown);
     if (isSocialArticleUrl(sourceUrl) && socialArticleImageStorageMode === "remote") return nextMarkdown;
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
@@ -41130,7 +41605,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       const imageUrl = String(match[2] || "").trim();
       if (!imageUrl || downloadedByUrl.has(imageUrl)) continue;
       try {
-        const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(sourceUrl) : isWechatArticleSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : isFeishuSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : {};
+        const imageHeaders = isXiaohongshuSource ? await getXiaohongshuRequestHeaders(sourceUrl) : isWechatArticleSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : isFeishuSource ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl } : isPlatformArticleSource ? getSocialRequestHeaders(sourceUrl) : {};
         let arrayBuffer;
         try {
           arrayBuffer = await this.downloadArrayBuffer(imageUrl, imageHeaders);
@@ -43668,6 +44143,163 @@ ${finalized.markdown}
           }
         };
       }
+      if (isPlatformArticleUrl(url)) {
+        const platformUrl = normalizePlatformArticleUrl(url);
+        const platformKind = getPlatformArticleKind(platformUrl);
+        const platformLabel = getPlatformArticleLabel(platformUrl);
+        let platformResult = null;
+        let platformStage = "";
+        let platformError = null;
+        let platformHiddenBrowserDiagnostic = null;
+        let platformHttpDiagnostic = null;
+        try {
+          platformResult = await renderPlatformArticleWithElectron(platformUrl);
+          platformHiddenBrowserDiagnostic = {
+            ok: Boolean(platformResult && String(platformResult.markdown || "").trim()),
+            needsLogin: Boolean(platformResult && platformResult.needsLogin),
+            blocked: Boolean(platformResult && platformResult.blocked),
+            appWall: Boolean(platformResult && platformResult.appWall),
+            bodyTextChars: Number(platformResult && platformResult.bodyTextChars) || 0,
+            finalHost: getSafeUrlDiagnostic(platformResult && platformResult.finalUrl || platformUrl).host || "",
+            ...platformResult && platformResult.loadError ? { loadError: platformResult.loadError } : {}
+          };
+          if (platformResult && String(platformResult.markdown || "").trim()) {
+            platformStage = "hidden-browser";
+          } else if (platformResult && platformResult.blocked) {
+            platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+          } else if (platformResult && platformResult.needsLogin) {
+            platformError = new Error("页面需要登录后才能读取正文");
+          } else if (platformResult && platformResult.appWall) {
+            platformError = new Error(`${platformLabel}要求用 App 打开此链接；请改用网页版链接（www.toutiao.com/article/…）重试`);
+          }
+        } catch (error) {
+          platformError = error;
+          platformHiddenBrowserDiagnostic = {
+            ok: false,
+            needsLogin: false,
+            blocked: false,
+            error: String(error && (error.message || error) || "").slice(0, 160)
+          };
+        }
+        if (!platformStage) {
+          let html2 = "";
+          let transportError = null;
+          try {
+            const response = await requestUrl({
+              url: platformUrl,
+              method: "GET",
+              headers: {
+                ...getSocialRequestHeaders(platformUrl),
+                Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+              }
+            });
+            html2 = String(response && response.text || "");
+            platformHttpDiagnostic = { transport: "obsidian-requestUrl", status: Number(response && response.status) || 0 };
+          } catch (error) {
+            transportError = error;
+            platformHttpDiagnostic = {
+              transport: "obsidian-requestUrl",
+              status: Number(error && (error.status || error.response && error.response.status)) || 0,
+              error: String(error && (error.message || error) || "").slice(0, 160)
+            };
+            try {
+              html2 = String(await this.downloadWebpageHtmlViaNode(platformUrl) || "");
+              platformHttpDiagnostic.transport = "node-http";
+            } catch (nodeError) {
+              platformHttpDiagnostic.transport = "node-http-failed";
+              platformHttpDiagnostic.nodeError = String(nodeError && (nodeError.message || nodeError) || "").slice(0, 160);
+              if (!platformError) {
+                platformError = new Error(`网页抓取失败：${error.message || error}；降级错误：${nodeError.message || nodeError}`);
+              }
+            }
+          }
+          const platformBlockMarker = PLATFORM_ARTICLE_SELECTORS[platformKind] && PLATFORM_ARTICLE_SELECTORS[platformKind].blockMarker;
+          if (html2 && platformBlockMarker && platformBlockMarker.test(html2)) {
+            html2 = "";
+            if (!platformError) {
+              platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+            }
+          }
+          if (html2) {
+            const embedded = extractPlatformArticleFromHtml(html2, platformKind);
+            let markdown2 = "";
+            if (embedded && embedded.contentHtml) {
+              try {
+                markdown2 = htmlToMarkdown(embedded.contentHtml);
+              } catch (error) {
+                markdown2 = "";
+              }
+            } else if (embedded && embedded.contentText) {
+              markdown2 = embedded.contentText;
+            }
+            if (!markdown2) {
+              try {
+                markdown2 = htmlToMarkdown(html2);
+              } catch (error) {
+                if (!platformError) platformError = error;
+              }
+            }
+            if (markdown2) {
+              platformResult = {
+                ...platformResult || {},
+                title: platformResult && platformResult.title || embedded && embedded.title || "",
+                author: platformResult && platformResult.author || embedded && embedded.author || "",
+                markdown: markdown2
+              };
+              platformStage = embedded ? `http-${embedded.source}` : transportError ? "node-html" : "http-html";
+            }
+          }
+        }
+        if (!platformResult || !String(platformResult.markdown || "").trim()) {
+          const error = platformError || new Error(`${platformLabel}正文提取失败`);
+          error.platformDiagnostic = redactSensitiveObject({
+            source: "platform-article",
+            platform: platformKind,
+            stage: platformStage || "hidden-browser",
+            hiddenBrowser: platformHiddenBrowserDiagnostic,
+            http: platformHttpDiagnostic,
+            reason: String(error && (error.message || error) || "").slice(0, 200)
+          });
+          throw error;
+        }
+        let platformMarkdown = String(platformResult.markdown || "").trim();
+        const pageTitle2 = metadata.title || platformResult.title || title || `${platformLabel}文章`;
+        const imageLocalizationErrors2 = [];
+        platformMarkdown = await this.saveMarkdownRemoteImageAssets(
+          platformMarkdown,
+          rootDir,
+          dateFolder,
+          pageTitle2,
+          {
+            sourceUrl: platformUrl,
+            onError: /* @__PURE__ */ __name(({ error }) => {
+              imageLocalizationErrors2.push(String(error && (error.message || error) || "unknown error"));
+            }, "onError")
+          }
+        );
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            title: pageTitle2,
+            url: platformUrl,
+            originalUrl: metadata.originalUrl || url,
+            author: metadata.author || platformResult.author || "",
+            platform: metadata.platform || platformLabel,
+            contentCategory: "图文",
+            markdown: platformMarkdown,
+            conversionStatus: "success",
+            conversionNote: platformStage === "hidden-browser" ? "" : `已通过 ${platformStage} 抓取`,
+            conversionDiagnostic: {
+              source: "platform-article",
+              platform: platformKind,
+              stage: platformStage
+            },
+            imageLocalizationFailedCount: imageLocalizationErrors2.length,
+            imageLocalizationError: imageLocalizationErrors2.slice(0, 3).join(" | ")
+          }
+        };
+      }
       if (isWechatArticleUrl(url)) {
         const requestGate = this.wechatArticleRequestGate || sharedWechatArticleGate;
         const sourceFingerprint = crypto.createHash("sha256").update(articleIdentity(url) || normalizeWechatArticleUrl(url)).digest("hex").slice(0, 24);
@@ -44223,6 +44855,29 @@ ${finalized.markdown}
           failureDiagnostic.browser = redactSensitiveObject(xiaohongshuBrowserDiagnostic);
         }
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
+      }
+      if (isPlatformArticleUrl(url)) {
+        const platformLabel = getPlatformArticleLabel(url);
+        const failureReason = String(error && (error.message || error) || "").trim();
+        const needsLogin = /登录|安全验证|验证码/.test(failureReason);
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            url: normalizePlatformArticleUrl(url),
+            platform: metadata.platform || platformLabel,
+            contentCategory: "图文",
+            markdown: [
+              `> ${needsLogin ? `${platformLabel}页面需要登录后才能读取正文。` : `${platformLabel}正文未能自动提取。`}`,
+              "> 原始链接已写入笔记属性，可稍后重新同步。",
+              "",
+              `原始链接：${normalizePlatformArticleUrl(url)}`
+            ].join("\n"),
+            conversionStatus: "link_saved",
+            conversionError: failureReason || `${platformLabel}正文提取失败`,
+            ...error && error.platformDiagnostic ? { conversionDiagnostic: error.platformDiagnostic } : {}
+          }
+        };
       }
       if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
         return {
