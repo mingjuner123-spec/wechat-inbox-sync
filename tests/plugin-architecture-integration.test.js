@@ -45,6 +45,7 @@ const expectedModules = [
   'media-file-utils',
   'note-output-plan-utils',
   'operator-media-node',
+  'platform-article-utils',
   'progress-notice-utils',
   'readable-content-utils',
   'record-body-markdown-utils',

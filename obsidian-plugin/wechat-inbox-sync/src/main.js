@@ -228,6 +228,15 @@ const {
   normalizeWechatArticleUrl,
 } = require('./wechat-article-utils');
 const {
+  extractPlatformArticleFromHtml,
+  getPlatformArticleKind,
+  getPlatformArticleLabel,
+  getPlatformArticleReferer,
+  isAllowedPlatformArticleNavigation,
+  isPlatformArticleUrl,
+  normalizePlatformArticleUrl,
+} = require('./platform-article-utils');
+const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
   getAttachmentExt,
@@ -334,8 +343,8 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
-const PLUGIN_RUNTIME_VERSION = '1.3.195';
-const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
+const PLUGIN_RUNTIME_VERSION = '1.3.196';
+const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
   'https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync',
@@ -4834,7 +4843,8 @@ function isXiaohongshuUrl(url) {
 function isSocialArticleUrl(sourceUrl) {
   return isWechatArticleUrl(sourceUrl)
     || isFeishuUrl(sourceUrl)
-    || isXiaohongshuUrl(sourceUrl);
+    || isXiaohongshuUrl(sourceUrl)
+    || isPlatformArticleUrl(sourceUrl);
 }
 
 function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageMode) {
@@ -5107,7 +5117,8 @@ function shouldHydrateLinkAsWebpage(url) {
     || isXiaohongshuUrl(url)
     || isDouyinUrl(url)
     || isBilibiliUrl(url)
-    || isXiaoyuzhouUrl(url);
+    || isXiaoyuzhouUrl(url)
+    || isPlatformArticleUrl(url);
 }
 
 function isSafeAutomaticWebpageUrl(url) {
@@ -5136,7 +5147,9 @@ function isTrustedAutomaticPlatformUrl(url) {
     || isHostnameWithinDomain(hostname, 'bilibili.com')
     || isHostnameWithinDomain(hostname, 'b23.tv')
     || isHostnameWithinDomain(hostname, 'xiaoyuzhoufm.com')
-    || isHostnameWithinDomain(hostname, 'xiaoyuzhou.com');
+    || isHostnameWithinDomain(hostname, 'xiaoyuzhou.com')
+    || isHostnameWithinDomain(hostname, 'zhihu.com')
+    || isHostnameWithinDomain(hostname, 'toutiao.com');
 }
 
 function extractAutomaticWebpageUrlCandidates(text) {
@@ -5388,6 +5401,7 @@ function getSocialRequestHeaders(url) {
   if (isDouyinUrl(url) || isDouyinMediaUrl(url)) headers.Referer = 'https://www.douyin.com/';
   if (isXiaoyuzhouUrl(url)) headers.Referer = 'https://www.xiaoyuzhoufm.com/';
   if (isWechatChannelsUrl(url) || isWechatChannelsMediaUrl(url)) headers.Referer = 'https://channels.weixin.qq.com/';
+  if (isPlatformArticleUrl(url)) headers.Referer = getPlatformArticleReferer(url);
   return headers;
 }
 
@@ -5637,6 +5651,7 @@ function getWebpageSourcePrefix(url) {
   if (isDouyinUrl(url)) return '抖音';
   if (isBilibiliUrl(url)) return 'B站';
   if (isXiaoyuzhouUrl(url)) return '小宇宙';
+  if (isPlatformArticleUrl(url)) return getPlatformArticleLabel(url);
   return '网页';
 }
 
@@ -6433,6 +6448,41 @@ function shouldBlockXiaohongshuBrowserNavigationRequest(details = {}) {
       && Number(details && details.parentFrameId) < 0
     );
   return isNavigation && !isAllowedXiaohongshuBrowserNavigationUrl(details && details.url);
+}
+
+function installPlatformArticleNavigationGuards(webContents, platform, initialUrl) {
+  // Only call on the dedicated, not-yet-loaded platform window. Obsidian installs
+  // a will-navigate listener on every web contents that cancels page redirects and
+  // forwards them to shell.openExternal. Toutiao bounces an article load through
+  // such a redirect, so the article used to open in the system browser (the visible
+  // popup) and the extraction window was left without any content.
+  if (!webContents || typeof webContents.removeAllListeners !== 'function'
+    || typeof webContents.on !== 'function' || typeof webContents.setWindowOpenHandler !== 'function') {
+    throw new Error('无法隔离平台文章提取窗口的跳转处理');
+  }
+  // Programmatic loadURL does not emit will-navigate: validate the first URL too.
+  if (!isAllowedPlatformArticleNavigation(initialUrl, platform)) {
+    throw new Error('平台文章提取仅允许官方 HTTPS 页面');
+  }
+  // Electron remote wraps returned listeners: removeListener(proxy) cannot
+  // reliably remove Obsidian's inherited callback. This window is ours and has
+  // not loaded a page, so clear these events before adding our own guards.
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictNavigation = (event, navigation) => {
+    const value = typeof navigation === 'string' ? navigation
+      : (navigation && navigation.url) || (event && event.url);
+    if (!isAllowedPlatformArticleNavigation(value, platform) && event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+  };
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.on(eventName, restrictNavigation);
+  }
+  // A child window created by page-side window.open escapes the hidden renderer
+  // and becomes visible.
+  webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }
 
 function installXiaohongshuNavigationGuards(webContents, options = {}) {
@@ -13021,6 +13071,159 @@ async function renderUrlToMarkdownWithElectron(url) {
     result.__feishuDiag = __feishuDiag;
     if (!result || !result.markdown || result.markdown.length < 20) {
       throw new Error('隐藏浏览器未读取到足够正文');
+    }
+    return result;
+  } finally {
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
+const PLATFORM_ARTICLE_SELECTORS = {
+  zhihu: {
+    title: ['h1.Post-Title', '.QuestionHeader-title', 'h1'],
+    body: ['.Post-RichText', '.RichText.ztext', '.AnswerItem .RichText', '.QuestionAnswer-content .RichText'],
+    author: ['.AuthorInfo-name', '.UserLink-link', '.QuestionHeader .AuthorInfo-name'],
+    // Plain 登录 also appears in the site header of a fully readable article, so
+    // the marker has to name an actual sign-in wall.
+    loginMarker: /扫码登录|请先登录|登录后(?:查看|阅读)|登录以(?:继续|查看)|安全验证|访问过于频繁|验证码/,
+    // Zhihu answers an unauthenticated request from a flagged exit IP with a
+    // JSON error page instead of the article. That is a network problem the
+    // user can fix by switching networks, not a missing login.
+    blockMarker: /请求存在异常|系统监测到您的网络环境存在异常|"code"\s*:\s*40362|40362/,
+  },
+  toutiao: {
+    title: ['h1.article-title', '.article-title', 'h1'],
+    body: ['.article-content', '.syl-article-base', 'article', '.article'],
+    author: ['.article-sub', '.user-info .name', '.name'],
+    loginMarker: /扫码登录|请先登录|登录后(?:查看|阅读)|登录以(?:继续|查看)|安全验证|访问过于频繁|验证码/,
+    blockMarker: /请求存在异常|访问过于频繁|安全验证/,
+    // Share short links sometimes only resolve inside the Toutiao app. That page
+    // has no article body, so say so instead of reporting a generic failure.
+    appWallMarker: /打开今日头条\s*(?:App|APP|app)|下载今日头条|打开\s*APP\s*查看|请在\s*APP\s*内打开/,
+  },
+};
+
+// Zhihu and Toutiao are read through the persistent WeChat session partition so
+// an already logged-in Obsidian never has to sign in again. The extractor only
+// clones the article body; every selector is per-platform and fails closed.
+async function renderPlatformArticleWithElectron(url) {
+  const platform = getPlatformArticleKind(url);
+  if (!platform) throw new Error('不是支持的平台文章链接');
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+  const session = getWechatSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: session || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  try {
+    installPlatformArticleNavigationGuards(win.webContents, platform, url);
+    const loaded = waitForWebContents(win.webContents);
+    // Toutiao keeps an ad/tracker request open on some networks, so did-finish-load
+    // never fires and loadURL never settles. The DOM is already usable once the main
+    // document has parsed, so cap the wait instead of hanging the whole sync.
+    let loadFailure = null;
+    const loadPromise = win.loadURL(url).catch((error) => {
+      loadFailure = error;
+    });
+    await Promise.race([
+      loadPromise,
+      new Promise((resolve) => window.setTimeout(resolve, 20000)),
+    ]);
+    await loaded;
+    const selectors = PLATFORM_ARTICLE_SELECTORS[platform] || PLATFORM_ARTICLE_SELECTORS.zhihu;
+    const result = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (value) => String(value || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+\\n/g, '\\n')
+          .replace(/\\n{3,}/g, '\\n\\n')
+          .trim();
+        const selectors = ${JSON.stringify(selectors)};
+        const loginMarker = new RegExp(${JSON.stringify(selectors.loginMarker.source)}, 'i');
+        const blockSource = ${JSON.stringify(selectors.blockMarker ? selectors.blockMarker.source : '')};
+        const isBlocked = (text) => Boolean(blockSource) && new RegExp(blockSource, 'i').test(text);
+        const appWallSource = ${JSON.stringify(selectors.appWallMarker ? selectors.appWallMarker.source : '')};
+        const isAppWall = (text) => Boolean(appWallSource) && new RegExp(appWallSource, 'i').test(text);
+        const pick = (list) => {
+          for (const selector of list) {
+            let node = null;
+            try { node = document.querySelector(selector); } catch (error) { node = null; }
+            if (node) return node;
+          }
+          return null;
+        };
+        const promoteLazyImages = (root) => {
+          root.querySelectorAll('img').forEach((image) => {
+            const lazy = image.getAttribute('data-src') || image.getAttribute('data-original') || image.getAttribute('data-lazy-src');
+            if (lazy && !image.getAttribute('src')) image.setAttribute('src', lazy);
+          });
+        };
+        let body = null;
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          body = pick(selectors.body);
+          if (body && clean(body.innerText || body.textContent).replace(/\\s+/g, '').length >= 80) break;
+          window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+          await sleep(500);
+        }
+        const pageText = clean(document.body ? (document.body.innerText || document.body.textContent) : '');
+        if (!body) {
+          return {
+            title: clean(document.title || ''),
+            author: '',
+            html: '',
+            assets: [],
+            needsLogin: loginMarker.test(pageText),
+            blocked: isBlocked(pageText),
+            appWall: isAppWall(pageText),
+            stateText: pageText.slice(0, 600),
+          };
+        }
+        promoteLazyImages(body);
+        const clone = body.cloneNode(true);
+        clone.querySelectorAll('script,style,noscript,iframe,form,.RichContent-actions,.ContentItem-actions,.Recommendations,.Post-Sub,.Post-topics,.comment,.comments').forEach((node) => node.remove());
+        const assets = (${prepareBrowserArticleImages.toString()})(clone, location.href);
+        const titleNode = pick(selectors.title);
+        const authorNode = pick(selectors.author);
+        return {
+          title: clean(titleNode && (titleNode.innerText || titleNode.textContent) || document.title || ''),
+          author: clean(authorNode && (authorNode.innerText || authorNode.textContent) || '').slice(0, 80),
+          html: clone.outerHTML,
+          assets,
+          needsLogin: false,
+          blocked: isBlocked(pageText),
+          appWall: false,
+          stateText: pageText.slice(0, 600),
+          bodyTextChars: clean(body.innerText || body.textContent).replace(/\\s+/g, '').length,
+          imageCount: assets.length,
+        };
+      })()
+    `);
+    if (result && result.html) {
+      try {
+        result.markdown = htmlToMarkdown(result.html);
+      } catch (error) {
+        result.conversionError = error.message;
+      }
+    }
+    result.platform = platform;
+    result.finalUrl = win.webContents && typeof win.webContents.getURL === 'function'
+      ? win.webContents.getURL()
+      : url;
+    if (loadFailure) {
+      result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || '').slice(0, 160);
     }
     return result;
   } finally {
@@ -23769,7 +23972,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (isSocialArticleUrl(sourceUrl) && socialArticleImageStorageMode === 'remote') {
       return markdown;
     }
-    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl);
+    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl) || isPlatformArticleUrl(sourceUrl);
     const stats = options.stats && typeof options.stats === 'object' ? options.stats : null;
     const reportError = (asset, error) => {
       if (stats) {
@@ -23916,10 +24119,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     const isFeishuSource = isFeishuUrl(sourceUrl);
+    const isPlatformArticleSource = isPlatformArticleUrl(sourceUrl);
     const socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
       options.socialArticleImageStorageMode || (this.settings && this.settings.socialArticleImageStorageMode),
     );
-    const isSessionBackedSource = isFeishuSource || isWechatArticleSource;
+    const isSessionBackedSource = isFeishuSource || isWechatArticleSource || isPlatformArticleSource;
     let nextMarkdown = isXiaohongshuSource
       ? sanitizeXiaohongshuMarkdownImages(String(markdown))
       : String(markdown);
@@ -23961,7 +24165,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
             : isFeishuSource
               ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
-            : {};
+              : isPlatformArticleSource
+                ? getSocialRequestHeaders(sourceUrl)
+                : {};
         let arrayBuffer;
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -26889,6 +27095,171 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
       }
 
+      if (isPlatformArticleUrl(url)) {
+        const platformUrl = normalizePlatformArticleUrl(url);
+        const platformKind = getPlatformArticleKind(platformUrl);
+        const platformLabel = getPlatformArticleLabel(platformUrl);
+        let platformResult = null;
+        let platformStage = '';
+        let platformError = null;
+        let platformHiddenBrowserDiagnostic = null;
+        let platformHttpDiagnostic = null;
+        try {
+          platformResult = await renderPlatformArticleWithElectron(platformUrl);
+          platformHiddenBrowserDiagnostic = {
+            ok: Boolean(platformResult && String(platformResult.markdown || '').trim()),
+            needsLogin: Boolean(platformResult && platformResult.needsLogin),
+            blocked: Boolean(platformResult && platformResult.blocked),
+            appWall: Boolean(platformResult && platformResult.appWall),
+            bodyTextChars: Number(platformResult && platformResult.bodyTextChars) || 0,
+            finalHost: getSafeUrlDiagnostic(platformResult && platformResult.finalUrl || platformUrl).host || '',
+            ...(platformResult && platformResult.loadError ? { loadError: platformResult.loadError } : {}),
+          };
+          if (platformResult && String(platformResult.markdown || '').trim()) {
+            platformStage = 'hidden-browser';
+          } else if (platformResult && platformResult.blocked) {
+            platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+          } else if (platformResult && platformResult.needsLogin) {
+            platformError = new Error('页面需要登录后才能读取正文');
+          } else if (platformResult && platformResult.appWall) {
+            platformError = new Error(`${platformLabel}要求用 App 打开此链接；请改用网页版链接（www.toutiao.com/article/…）重试`);
+          }
+        } catch (error) {
+          platformError = error;
+          platformHiddenBrowserDiagnostic = {
+            ok: false,
+            needsLogin: false,
+            blocked: false,
+            error: String(error && (error.message || error) || '').slice(0, 160),
+          };
+        }
+
+        // HTTP fallback: server-rendered payloads (Toutiao RENDER_DATA / Zhihu
+        // js-initialData) are preferred over the whole-page HTML, which carries
+        // navigation chrome that htmlToMarkdown would happily keep.
+        if (!platformStage) {
+          let html = '';
+          let transportError = null;
+          try {
+            const response = await requestUrl({
+              url: platformUrl,
+              method: 'GET',
+              headers: {
+                ...getSocialRequestHeaders(platformUrl),
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              },
+            });
+            html = String(response && response.text || '');
+            platformHttpDiagnostic = { transport: 'obsidian-requestUrl', status: Number(response && response.status) || 0 };
+          } catch (error) {
+            transportError = error;
+            platformHttpDiagnostic = {
+              transport: 'obsidian-requestUrl',
+              status: Number(error && (error.status || (error.response && error.response.status))) || 0,
+              error: String(error && (error.message || error) || '').slice(0, 160),
+            };
+            try {
+              html = String(await this.downloadWebpageHtmlViaNode(platformUrl) || '');
+              platformHttpDiagnostic.transport = 'node-http';
+            } catch (nodeError) {
+              platformHttpDiagnostic.transport = 'node-http-failed';
+              platformHttpDiagnostic.nodeError = String(nodeError && (nodeError.message || nodeError) || '').slice(0, 160);
+              if (!platformError) {
+                platformError = new Error(`网页抓取失败：${error.message || error}；降级错误：${nodeError.message || nodeError}`);
+              }
+            }
+          }
+          const platformBlockMarker = PLATFORM_ARTICLE_SELECTORS[platformKind]
+            && PLATFORM_ARTICLE_SELECTORS[platformKind].blockMarker;
+          if (html && platformBlockMarker && platformBlockMarker.test(html)) {
+            html = '';
+            if (!platformError) {
+              platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+            }
+          }
+          if (html) {
+            const embedded = extractPlatformArticleFromHtml(html, platformKind);
+            let markdown = '';
+            if (embedded && embedded.contentHtml) {
+              try {
+                markdown = htmlToMarkdown(embedded.contentHtml);
+              } catch (error) {
+                markdown = '';
+              }
+            } else if (embedded && embedded.contentText) {
+              markdown = embedded.contentText;
+            }
+            if (!markdown) {
+              try {
+                markdown = htmlToMarkdown(html);
+              } catch (error) {
+                if (!platformError) platformError = error;
+              }
+            }
+            if (markdown) {
+              platformResult = {
+                ...(platformResult || {}),
+                title: (platformResult && platformResult.title) || (embedded && embedded.title) || '',
+                author: (platformResult && platformResult.author) || (embedded && embedded.author) || '',
+                markdown,
+              };
+              platformStage = embedded ? `http-${embedded.source}` : (transportError ? 'node-html' : 'http-html');
+            }
+          }
+        }
+
+        if (!platformResult || !String(platformResult.markdown || '').trim()) {
+          const error = platformError || new Error(`${platformLabel}正文提取失败`);
+          error.platformDiagnostic = redactSensitiveObject({
+            source: 'platform-article',
+            platform: platformKind,
+            stage: platformStage || 'hidden-browser',
+            hiddenBrowser: platformHiddenBrowserDiagnostic,
+            http: platformHttpDiagnostic,
+            reason: String(error && (error.message || error) || '').slice(0, 200),
+          });
+          throw error;
+        }
+
+        let platformMarkdown = String(platformResult.markdown || '').trim();
+        const pageTitle = metadata.title || platformResult.title || title || `${platformLabel}文章`;
+        const imageLocalizationErrors = [];
+        platformMarkdown = await this.saveMarkdownRemoteImageAssets(
+          platformMarkdown,
+          rootDir,
+          dateFolder,
+          pageTitle,
+          {
+            sourceUrl: platformUrl,
+            onError: ({ error }) => {
+              imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+            },
+          },
+        );
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            title: pageTitle,
+            url: platformUrl,
+            originalUrl: metadata.originalUrl || url,
+            author: metadata.author || platformResult.author || '',
+            platform: metadata.platform || platformLabel,
+            contentCategory: '图文',
+            markdown: platformMarkdown,
+            conversionStatus: 'success',
+            conversionNote: platformStage === 'hidden-browser' ? '' : `已通过 ${platformStage} 抓取`,
+            conversionDiagnostic: {
+              source: 'platform-article',
+              platform: platformKind,
+              stage: platformStage,
+            },
+            imageLocalizationFailedCount: imageLocalizationErrors.length,
+            imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
+          },
+        };
+      }
+
       if (isWechatArticleUrl(url)) {
         const requestGate = this.wechatArticleRequestGate || sharedWechatArticleGate;
         const sourceFingerprint = crypto.createHash('sha256').update(articleIdentity(url) || normalizeWechatArticleUrl(url)).digest('hex').slice(0,24);
@@ -27482,6 +27853,30 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
       }
+      if (isPlatformArticleUrl(url)) {
+        const platformLabel = getPlatformArticleLabel(url);
+        const failureReason = String(error && (error.message || error) || '').trim();
+        const needsLogin = /登录|安全验证|验证码/.test(failureReason);
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            url: normalizePlatformArticleUrl(url),
+            platform: metadata.platform || platformLabel,
+            contentCategory: '图文',
+            markdown: [
+              `> ${needsLogin ? `${platformLabel}页面需要登录后才能读取正文。` : `${platformLabel}正文未能自动提取。`}`,
+              '> 原始链接已写入笔记属性，可稍后重新同步。',
+              '',
+              `原始链接：${normalizePlatformArticleUrl(url)}`,
+            ].join('\n'),
+            conversionStatus: 'link_saved',
+            conversionError: failureReason || `${platformLabel}正文提取失败`,
+            ...(error && error.platformDiagnostic ? { conversionDiagnostic: error.platformDiagnostic } : {}),
+          },
+        };
+      }
+
       if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
         return {
           ...record,
