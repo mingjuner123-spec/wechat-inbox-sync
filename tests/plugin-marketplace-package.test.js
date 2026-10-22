@@ -408,7 +408,7 @@ assert.ok(windowsInstaller.includes('Local ASR was already validated for the cur
 assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "whisper.zip"'));
 assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "ffmpeg.zip"'));
 assert.ok(windowsInstaller.includes('Join-Path $CacheRoot $WhisperModelFileName'));
-assert.ok(windowsInstaller.includes('$WhisperModelFileName = "ggml-large-v3-turbo-q5_0.bin"'), 'Windows installer must provision the model the plugin expects');
+assert.ok(windowsInstaller.includes('$WhisperModelFileName = "ggml-small.bin"'), 'Windows installer must provision the model the plugin expects');
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('-C - -o $OutFile'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
