@@ -60,6 +60,8 @@ const expectedModules = [
   'social-platform-content-utils',
   'sync-diagnostic-reporter',
   'sync-lifecycle-utils',
+  'transcript-media-player',
+  'transcript-segment-utils',
   'transcription-note-title-utils',
   'transcription-partial-note-utils',
   'transcription-quality-utils',

@@ -102,12 +102,13 @@ function normalizeCloudFallbackJob(value) {
   const jobId = String(value.jobId || value.id || '').trim();
   if (!jobId || jobId.length > 180) return null;
   const sourceType = String(value.sourceType || '').trim().toLowerCase();
-  if (!['douyin_url', 'uploaded_file'].includes(sourceType)) return null;
+  if (!['uploaded_file', ...CLOUD_FALLBACK_URL_SOURCE_TYPES].includes(sourceType)) return null;
   const status = normalizeCloudFallbackStatus(value.status);
   const recordId = String(value.recordId || value.syncRecordId || '').trim().slice(0, 180);
   const sourceUrl = String(value.sourceUrl || value.url || '').trim().slice(0, 4096);
   const fileID = String(value.fileID || value.audioFileID || value.fileId || '').trim().slice(0, 512);
   const transcription = String(value.transcription || '').trim().slice(0, 200000);
+  const content = normalizeCloudFallbackContent(value.content);
   const recordSnapshot = normalizeCloudFallbackRecordSnapshot(value.recordSnapshot);
   return {
     jobId,
@@ -129,6 +130,7 @@ function normalizeCloudFallbackJob(value) {
     provider: String(value.provider || '').trim().slice(0, 120),
     providerRequestId: String(value.providerRequestId || '').trim().slice(0, 180),
     ...(transcription ? { transcription } : {}),
+    ...(content ? { content } : {}),
     error: normalizeCloudFallbackError(value.error),
     clientRequestId: String(value.clientRequestId || value.idempotencyKey || '').trim().slice(0, 240),
     createdAt: String(value.createdAt || '').trim(),
@@ -227,9 +229,49 @@ function normalizeCloudFallbackAcks(value) {
   }).slice(-100);
 }
 
+const CLOUD_FALLBACK_URL_SOURCE_TYPES = ['douyin_url', 'xiaohongshu_url'];
+const MAX_CLOUD_FALLBACK_CONTENT_MARKDOWN = 400000;
+const MAX_CLOUD_FALLBACK_CONTENT_IMAGES = 60;
+const MAX_CLOUD_FALLBACK_CONTENT_TAGS = 40;
+
 function normalizeCloudFallbackSourceType(value) {
   const sourceType = String(value || '').trim().toLowerCase();
-  return ['douyin_url', 'uploaded_file'].includes(sourceType) ? sourceType : '';
+  return ['uploaded_file', ...CLOUD_FALLBACK_URL_SOURCE_TYPES].includes(sourceType) ? sourceType : '';
+}
+
+function isCloudFallbackUrlSourceType(value) {
+  return CLOUD_FALLBACK_URL_SOURCE_TYPES.includes(String(value || '').trim().toLowerCase());
+}
+
+// A graphic note has no audio.  The cloud answer for it is the extracted
+// article, carried alongside the job so the normal note-building path can
+// write it exactly like a locally extracted note.
+function normalizeCloudFallbackContent(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const markdown = String(value.markdown || '')
+    .replace(/\r\n?/g, '\n')
+    .slice(0, MAX_CLOUD_FALLBACK_CONTENT_MARKDOWN)
+    .trim();
+  const imageUrls = [];
+  (Array.isArray(value.imageUrls) ? value.imageUrls : []).forEach((item) => {
+    const url = String(item || '').trim();
+    if (!/^https?:\/\//i.test(url) || url.length > 4096 || imageUrls.includes(url)) return;
+    if (imageUrls.length < MAX_CLOUD_FALLBACK_CONTENT_IMAGES) imageUrls.push(url);
+  });
+  const tags = [];
+  (Array.isArray(value.tags) ? value.tags : []).forEach((item) => {
+    const tag = String(item || '').trim().slice(0, 60);
+    if (!tag || tags.includes(tag)) return;
+    if (tags.length < MAX_CLOUD_FALLBACK_CONTENT_TAGS) tags.push(tag);
+  });
+  if (!markdown && !imageUrls.length) return null;
+  return {
+    title: String(value.title || '').trim().slice(0, 300),
+    author: String(value.author || '').trim().slice(0, 160),
+    markdown,
+    imageUrls,
+    tags,
+  };
 }
 
 function isControlledCloudFallbackFileId(value) {
@@ -258,5 +300,7 @@ module.exports = {
   isCloudFallbackJobTerminal,
   isCloudFallbackJobPending,
   normalizeCloudFallbackSourceType,
+  isCloudFallbackUrlSourceType,
+  normalizeCloudFallbackContent,
   isControlledCloudFallbackFileId,
 };

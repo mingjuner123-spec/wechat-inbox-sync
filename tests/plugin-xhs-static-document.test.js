@@ -139,7 +139,12 @@ async function main() {
   assert.strictEqual(record.metadata.transcription, '该视频的测试口播文字');
   forceLogin = true;
   const loginTrace = h.createXiaohongshuBrowserDiagnostic();
-  await plugin.requestXiaohongshuStaticPage(noteUrl, { xiaohongshuBrowserDiagnostic: loginTrace });
+  // The login landing is refused instead of adopted as the note document, so
+  // the caller keeps the real note URL for its hidden-browser candidates.
+  await assert.rejects(
+    plugin.requestXiaohongshuStaticPage(noteUrl, { xiaohongshuBrowserDiagnostic: loginTrace }),
+    error => error.code === 'XIAOHONGSHU_LOGIN_LANDING' && error.retryable === true,
+  );
   assert.ok(loginTrace.stages.some(row => row.outcome === 'login_landing' && row.status === 200 && row.mediaCandidateCount === 0));
   externalRedirect = true;
   const blockedTrace = h.createXiaohongshuBrowserDiagnostic();

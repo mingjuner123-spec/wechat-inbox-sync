@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.32"
+$InstallerScriptVersion = "1.2.33"
 $DownloadResumeVersion = "asr-resume-v1"
 $script:DownloadEvents = @()
 $script:AuthorizedDownloadAssets = @()
@@ -28,15 +28,179 @@ $WhisperWindowsCompatibilityUrls = @($env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL) |
 $WhisperWindowsCompatibilitySha256 = '7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7'
 $FfmpegAuthorizedUrls = @($env:WECHAT_INBOX_ASR_FFMPEG_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $ModelAuthorizedUrls = @($env:WECHAT_INBOX_ASR_MODEL_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+# "small" mis-hears Chinese dialects, names and crosstalk badly. The turbo
+# large-v3 quantization is about twelve times the compute and roughly three
+# times slower than real time on a desktop CPU, which is the right trade for
+# a transcript that is then read instead of listened to.
+$WhisperModelFileName = "ggml-large-v3-turbo-q5_0.bin"
+$WhisperModelMinBytes = 500MB
+$LegacyWhisperModelFileName = "ggml-small.bin"
 $ModelFallbackUrls = @(
-  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/$WhisperModelFileName"
 )
 $ModelOfficialFallbackUrls = @(
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$WhisperModelFileName"
 )
 $WhisperWindowsFallbackUrls = @(
   "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
 )
+
+# Speaker diarization (optional, best-effort): pure-CPU sherpa-onnx runtime with
+# the pyannote segmentation-3.0 model plus a 3D-Speaker CAM++ embedding model.
+# The wheels are ordinary zip archives, so Expand-Archive can unpack them.
+$DiarizationEngineVersion = "1.13.8"
+$DiarizationBinUrls = @(
+  "https://files.pythonhosted.org/packages/38/b9/ad8cd468f0adb37f2701c5067d5b19b141bf815c6434a8749b02d688f3b9/sherpa_onnx_bin-1.13.8-py3-none-win_amd64.whl",
+  "https://pypi.tuna.tsinghua.edu.cn/packages/38/b9/ad8cd468f0adb37f2701c5067d5b19b141bf815c6434a8749b02d688f3b9/sherpa_onnx_bin-1.13.8-py3-none-win_amd64.whl"
+)
+$DiarizationBinSha256 = "9549D3C1A9EC325FB7315006407FFDE5BDEEE99F3625C03D0B7967009E869A9A"
+$DiarizationCoreUrls = @(
+  "https://files.pythonhosted.org/packages/94/38/64356ad97f68fffcf01fe7545407ad18a2ea86c1ffae5b0950f7fac73638/sherpa_onnx_core-1.13.8-py3-none-win_amd64.whl",
+  "https://pypi.tuna.tsinghua.edu.cn/packages/94/38/64356ad97f68fffcf01fe7545407ad18a2ea86c1ffae5b0950f7fac73638/sherpa_onnx_core-1.13.8-py3-none-win_amd64.whl"
+)
+$DiarizationCoreSha256 = "5579E80196D516E6DAE23C8F629292CE3142AB8869925D32B94612FD86F93733"
+$DiarizationSegmentationUrls = @(
+  "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+  "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx"
+)
+$DiarizationSegmentationSha256 = "220AD67CA923BEF2FA91F2390C786097BF305BCEB5E261D4AF67B38E938E1079"
+$DiarizationEmbeddingUrls = @(
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+)
+$DiarizationEmbeddingSha256 = "AA3CFC16963A10586A9393F5035D6D6B57E98D358B347F80C2A30BF4F00CEBA2"
+
+# Chinese punctuation restoration (optional, best-effort). whisper.cpp emits no
+# punctuation for Mandarin, so transcripts are punctuated afterwards by the
+# same sherpa-onnx runtime the diarization stage already installs. Only the
+# model file is an extra download; the runtime DLLs come from that stage.
+$PunctuationModelUrls = @(
+  "https://hf-mirror.com/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/resolve/main/model.onnx",
+  "https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/resolve/main/model.onnx"
+)
+$PunctuationModelSha256 = "E93593A6DBD69A07F8734EF269DBE861A379755F8D1C8354719432116F2C44BD"
+$PunctuationModelMinBytes = 250MB
+$PunctuationModelFileName = "punct-ct-transformer-zh-en.onnx"
+# The punctuation CLI shipped with sherpa-onnx only accepts text on its command
+# line, and Windows PowerShell hands native programs ANSI bytes, so Chinese text
+# would arrive as mojibake. This shim calls the runtime's C API directly with
+# UTF-8 buffers instead. It is generated into the install directory so the
+# transcription script can load it with Add-Type -Path.
+$PunctuationShimSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class WechatInboxSherpaPunctuation
+{
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ModelConfig
+  {
+    public IntPtr ct_transformer;
+    public int num_threads;
+    public int debug;
+    public IntPtr provider;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Config
+  {
+    public ModelConfig model;
+  }
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern bool SetDllDirectoryW(string path);
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern IntPtr LoadLibraryExW(string path, IntPtr hFile, uint flags);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern IntPtr SherpaOnnxCreateOfflinePunctuation(ref Config config);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern void SherpaOnnxDestroyOfflinePunctuation(IntPtr handle);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern IntPtr SherpaOfflinePunctuationAddPunct(IntPtr handle, IntPtr text);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern void SherpaOfflinePunctuationFreeText(IntPtr text);
+
+  private static IntPtr Utf8ToPtr(string value)
+  {
+    byte[] bytes = Encoding.UTF8.GetBytes(value);
+    IntPtr pointer = Marshal.AllocHGlobal(bytes.Length + 1);
+    Marshal.Copy(bytes, 0, pointer, bytes.Length);
+    Marshal.WriteByte(pointer, bytes.Length, 0);
+    return pointer;
+  }
+
+  private static string PtrToUtf8(IntPtr pointer)
+  {
+    if (pointer == IntPtr.Zero)
+    {
+      return string.Empty;
+    }
+    int length = 0;
+    while (Marshal.ReadByte(pointer, length) != 0)
+    {
+      length += 1;
+    }
+    byte[] bytes = new byte[length];
+    Marshal.Copy(pointer, bytes, 0, length);
+    return Encoding.UTF8.GetString(bytes);
+  }
+
+  public static bool Preload(string runtimeDir)
+  {
+    string directory = runtimeDir.TrimEnd('\\');
+    SetDllDirectoryW(directory);
+    IntPtr dependency = LoadLibraryExW(directory + "\\onnxruntime.dll", IntPtr.Zero, 8);
+    if (dependency == IntPtr.Zero)
+    {
+      return false;
+    }
+    IntPtr runtime = LoadLibraryExW(directory + "\\sherpa-onnx-c-api.dll", IntPtr.Zero, 8);
+    return runtime != IntPtr.Zero;
+  }
+
+  public static IntPtr Create(string modelPath, int threads)
+  {
+    Config config = new Config();
+    IntPtr modelPointer = Utf8ToPtr(modelPath);
+    IntPtr providerPointer = Utf8ToPtr("cpu");
+    config.model.ct_transformer = modelPointer;
+    config.model.num_threads = threads;
+    config.model.debug = 0;
+    config.model.provider = providerPointer;
+    IntPtr handle = SherpaOnnxCreateOfflinePunctuation(ref config);
+    Marshal.FreeHGlobal(modelPointer);
+    Marshal.FreeHGlobal(providerPointer);
+    return handle;
+  }
+
+  public static void Destroy(IntPtr handle)
+  {
+    if (handle != IntPtr.Zero)
+    {
+      SherpaOnnxDestroyOfflinePunctuation(handle);
+    }
+  }
+
+  public static string AddPunctuation(IntPtr handle, string text)
+  {
+    IntPtr textPointer = Utf8ToPtr(text);
+    IntPtr resultPointer = SherpaOfflinePunctuationAddPunct(handle, textPointer);
+    Marshal.FreeHGlobal(textPointer);
+    if (resultPointer == IntPtr.Zero)
+    {
+      return string.Empty;
+    }
+    string punctuated = PtrToUtf8(resultPointer);
+    SherpaOfflinePunctuationFreeText(resultPointer);
+    return punctuated;
+  }
+}
+'@
 
 function New-CleanDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -530,7 +694,7 @@ function Assert-LocalAsrInference {
   try {
     $samplePath = Join-Path $validationDir "validation.wav"
     $outputBase = Join-Path $validationDir "validation"
-    $safeModelPath = Join-Path $validationDir "ggml-small.bin"
+    $safeModelPath = Join-Path $validationDir $WhisperModelFileName
     Copy-Item -LiteralPath $ModelPath -Destination $safeModelPath -Force
     Assert-ExecutableRuns `
       -Path $FfmpegPath `
@@ -802,6 +966,143 @@ function Install-ModelPackage {
   throw $lastError
 }
 
+function Install-VerifiedAsset {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [Parameter(Mandatory = $true)][Int64]$MinBytes,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $expected = $ExpectedSha256.ToUpperInvariant()
+  if (Test-Path -LiteralPath $OutFile) {
+    if ((Get-FileSha256 -Path $OutFile) -eq $expected) {
+      Write-Host "$Label is cached; skipping download."
+      return $OutFile
+    }
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+  }
+  $lastError = $null
+  foreach ($url in $Urls) {
+    try {
+      Download-File -Url $url -OutFile $OutFile -Resume
+      Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
+      Assert-FileSha256 -Path $OutFile -ExpectedSha256 $expected -Label $Label
+      return $OutFile
+    } catch {
+      $lastError = $_
+      Write-Host "$Label source failed: $url"
+      Write-Host ($_.Exception.Message)
+    }
+  }
+  throw $lastError
+}
+
+function Install-DiarizationPackage {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot,
+    [Parameter(Mandatory = $true)][string]$TempRoot
+  )
+  $destinationDir = Join-Path $InstallRoot "diarization"
+  $modelDir = Join-Path $destinationDir "models"
+  $exePath = Join-Path $destinationDir "sherpa-onnx-offline-speaker-diarization.exe"
+  $segmentationPath = Join-Path $modelDir "segmentation-3.0.onnx"
+  $embeddingPath = Join-Path $modelDir "campplus-zh-en-16k.onnx"
+  if ((Test-Path -LiteralPath $exePath) -and
+      (Test-Path -LiteralPath $segmentationPath) -and
+      (Test-Path -LiteralPath $embeddingPath)) {
+    Assert-ExecutableRuns -Path $exePath -Arguments @("--help") -Label "speaker diarization" -TryInstallVcRuntime | Out-Null
+    Write-Host "Existing speaker diarization is usable; skipping download."
+    return
+  }
+
+  $binZip = Join-Path $CacheRoot ("sherpa-onnx-bin-" + $DiarizationEngineVersion + ".zip")
+  $coreZip = Join-Path $CacheRoot ("sherpa-onnx-core-" + $DiarizationEngineVersion + ".zip")
+  Install-VerifiedAsset -Urls $DiarizationBinUrls -OutFile $binZip -MinBytes 15MB -ExpectedSha256 $DiarizationBinSha256 -Label "speaker diarization engine" | Out-Null
+  Install-VerifiedAsset -Urls $DiarizationCoreUrls -OutFile $coreZip -MinBytes 15MB -ExpectedSha256 $DiarizationCoreSha256 -Label "speaker diarization runtime" | Out-Null
+
+  $stageDir = Join-Path $TempRoot "diarization"
+  New-CleanDirectory -Path $stageDir
+  $binStage = Join-Path $stageDir "bin"
+  $coreStage = Join-Path $stageDir "core"
+  New-Item -ItemType Directory -Force -Path $binStage | Out-Null
+  New-Item -ItemType Directory -Force -Path $coreStage | Out-Null
+  Expand-Archive -LiteralPath $binZip -DestinationPath $binStage -Force
+  Expand-Archive -LiteralPath $coreZip -DestinationPath $coreStage -Force
+
+  $sourceExe = Find-InstalledFile -Root $binStage -Names @("sherpa-onnx-offline-speaker-diarization.exe")
+  if (-not $sourceExe) {
+    throw "speaker diarization engine package is missing the CLI executable."
+  }
+  $runtimeNames = @("onnxruntime.dll", "sherpa-onnx-c-api.dll", "sherpa-onnx-cxx-api.dll")
+  $runtimeFiles = @()
+  foreach ($name in $runtimeNames) {
+    $file = Find-InstalledFile -Root $coreStage -Names @($name)
+    if (-not $file) {
+      throw "speaker diarization runtime package is missing $name."
+    }
+    $runtimeFiles += $file
+  }
+
+  $segmentationCache = Join-Path $CacheRoot "sherpa-segmentation-3.0.onnx"
+  Install-VerifiedAsset -Urls $DiarizationSegmentationUrls -OutFile $segmentationCache -MinBytes 5MB -ExpectedSha256 $DiarizationSegmentationSha256 -Label "speaker segmentation model" | Out-Null
+  $embeddingCache = Join-Path $CacheRoot "sherpa-campplus-zh-en-16k.onnx"
+  Install-VerifiedAsset -Urls $DiarizationEmbeddingUrls -OutFile $embeddingCache -MinBytes 25MB -ExpectedSha256 $DiarizationEmbeddingSha256 -Label "speaker embedding model" | Out-Null
+
+  New-CleanDirectory -Path $destinationDir
+  New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+  Copy-FileWithRetry -SourcePath $sourceExe.FullName -DestinationPath $exePath | Out-Null
+  foreach ($file in $runtimeFiles) {
+    Copy-FileWithRetry -SourcePath $file.FullName -DestinationPath (Join-Path $destinationDir $file.Name) | Out-Null
+  }
+  Copy-FileWithRetry -SourcePath $segmentationCache -DestinationPath $segmentationPath | Out-Null
+  Copy-FileWithRetry -SourcePath $embeddingCache -DestinationPath $embeddingPath | Out-Null
+
+  Assert-ExecutableRuns -Path $exePath -Arguments @("--help") -Label "speaker diarization" -TryInstallVcRuntime | Out-Null
+  Write-Host "Speaker diarization installed to: $destinationDir"
+}
+
+function Install-PunctuationModel {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot
+  )
+  $runtimeDir = Join-Path $InstallRoot "diarization"
+  $destinationDir = Join-Path $runtimeDir "models"
+  $modelPath = Join-Path $destinationDir $PunctuationModelFileName
+  $shimPath = Join-Path $runtimeDir "punctuation-shim.cs"
+  # The shim is a few kilobytes, so refresh it before any early return: a repair
+  # run must be able to restore it without re-downloading the model.
+  if ((Test-Path -LiteralPath $runtimeDir) -and (Test-Path -LiteralPath $shimPath)) {
+    $existingShim = [System.IO.File]::ReadAllText($shimPath)
+    if ($existingShim -ne $PunctuationShimSource) {
+      [System.IO.File]::WriteAllText($shimPath, $PunctuationShimSource, (New-Object System.Text.UTF8Encoding($false)))
+    }
+  } elseif (-not (Test-Path -LiteralPath $runtimeDir)) {
+    Write-Host "Punctuation runtime is missing; skipping the Chinese punctuation shim."
+    return
+  } else {
+    [System.IO.File]::WriteAllText($shimPath, $PunctuationShimSource, (New-Object System.Text.UTF8Encoding($false)))
+  }
+  # Punctuation reuses the diarization runtime; without its DLLs the model file
+  # alone cannot do anything, so skip instead of downloading 294 MB for nothing.
+  foreach ($name in @("onnxruntime.dll", "sherpa-onnx-c-api.dll")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $runtimeDir $name))) {
+      Write-Host "Punctuation runtime is missing; skipping the Chinese punctuation model."
+      return
+    }
+  }
+  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -ge $PunctuationModelMinBytes)) {
+    Write-Host "Existing Chinese punctuation model is usable; skipping download."
+    return
+  }
+  $cachePath = Join-Path $CacheRoot $PunctuationModelFileName
+  Install-VerifiedAsset -Urls $PunctuationModelUrls -OutFile $cachePath -MinBytes $PunctuationModelMinBytes -ExpectedSha256 $PunctuationModelSha256 -Label "Chinese punctuation model" | Out-Null
+  New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+  Copy-FileWithRetry -SourcePath $cachePath -DestinationPath $modelPath | Out-Null
+  Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
+  Write-Host "Chinese punctuation model installed to: $modelPath"
+}
+
 function Get-LatestWhisperWindowsAsset {
   try {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers
@@ -867,6 +1168,18 @@ function Assert-TranscribeScriptCandidate {
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
     '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
     '$NativeProcessRunnerVersion = "diagnostics-process-v2"',
+    '$SpeakerDiarizationVersion = "speaker-diarization-v1"',
+    '$ChinesePunctuationVersion = "chinese-punctuation-v1"',
+    'Set-SegmentSpeakers',
+    'WechatInboxSherpaPunctuation',
+    'Add-UnitPunctuation',
+    'Optimize-PunctuationText',
+    'PunctuationStatus',
+    'Find-SilenceCutPoints',
+    'Get-WavDurationSeconds',
+    'ChunkStartSeconds',
+    '-segment_times',
+    'ChunkOffsetMs',
     'System.Diagnostics.ProcessStartInfo',
     'ReadToEndAsync',
     '$null = $process.Handle',
@@ -1064,18 +1377,24 @@ try {
     Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
   }
 
-  $modelPath = Join-Path $ModelDir "ggml-small.bin"
-  $cachedModelPath = Join-Path $CacheRoot "ggml-small.bin"
-  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
+  $modelPath = Join-Path $ModelDir $WhisperModelFileName
+  $cachedModelPath = Join-Path $CacheRoot $WhisperModelFileName
+  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt $WhisperModelMinBytes)) {
     Remove-Item -LiteralPath $modelPath -Force
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
     # Retain partial model cache; Download-File resumes only a matching asset identity.
-    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes $WhisperModelMinBytes -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
-  Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+  Assert-DownloadedFile -Path $modelPath -MinBytes $WhisperModelMinBytes -Label "Whisper model" | Out-Null
+  # The previous "small" model is no longer used; it would otherwise keep
+  # half a gigabyte of dead weights around after the upgrade.
+  $legacyModelPath = Join-Path $ModelDir $LegacyWhisperModelFileName
+  if ((Test-Path -LiteralPath $legacyModelPath) -and $LegacyWhisperModelFileName -ne $WhisperModelFileName) {
+    Remove-Item -LiteralPath $legacyModelPath -Force -ErrorAction SilentlyContinue
+  }
 
   try {
     Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
@@ -1108,6 +1427,24 @@ try {
   }
   Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue
 
+  # Optional stage: transcription must keep working when these assets cannot be
+  # downloaded on this machine or network.
+  $diarizationInstalled = $false
+  try {
+    Install-DiarizationPackage -InstallRoot $InstallRoot -TempRoot $TempRoot
+    $diarizationInstalled = $true
+  } catch {
+    Write-Host "Speaker diarization is unavailable; transcription continues without speaker labels."
+    Write-Host ($_.Exception.Message)
+  }
+
+  try {
+    Install-PunctuationModel -InstallRoot $InstallRoot
+  } catch {
+    Write-Host "Chinese punctuation is unavailable; transcripts continue without punctuation."
+    Write-Host ($_.Exception.Message)
+  }
+
 # BEGIN_TRANSCRIBE_TEMPLATE
   $embeddedTranscribeTemplate = @'
 param(
@@ -1132,10 +1469,38 @@ if (-not $Ffmpeg) {
   throw "ffmpeg.exe not found. Please rerun install-local-asr.ps1."
 }
 
-$Model = Join-Path $Root "models\ggml-small.bin"
+$ModelFileName = "ggml-large-v3-turbo-q5_0.bin"
+$Model = Join-Path $Root "models\$ModelFileName"
+# whisper.cpp defaults to four threads on every machine. The large model makes
+# transcription the slowest stage of a sync, so use the cores that are there.
+$WhisperThreads = [Math]::Max(4, [Math]::Min(16, [Environment]::ProcessorCount))
 if (-not (Test-Path -LiteralPath $Model)) {
   throw "Whisper model not found: $Model"
 }
+
+# Speaker diarization is optional. Old installs simply have no diarization
+# folder and produce transcripts without speaker labels.
+$DiarizationExe = $null
+$DiarizationSegmentationModel = Join-Path $Root "diarization\models\segmentation-3.0.onnx"
+$DiarizationEmbeddingModel = Join-Path $Root "diarization\models\campplus-zh-en-16k.onnx"
+$DiarizationDir = Join-Path $Root "diarization"
+if (Test-Path -LiteralPath $DiarizationDir) {
+  $DiarizationExe = Get-ChildItem -LiteralPath $DiarizationDir -Recurse -File -Filter "sherpa-onnx-offline-speaker-diarization.exe" | Select-Object -First 1
+}
+$DiarizationReady = [bool]($DiarizationExe -and
+  (Test-Path -LiteralPath $DiarizationSegmentationModel) -and
+  (Test-Path -LiteralPath $DiarizationEmbeddingModel))
+
+# Chinese punctuation is optional as well. It needs the sherpa-onnx runtime the
+# diarization stage installs, the CT-Transformer model, and the small C# shim
+# that bridges to the runtime's C API.
+$PunctuationModel = Join-Path $DiarizationDir "models\punct-ct-transformer-zh-en.onnx"
+$PunctuationShimPath = Join-Path $DiarizationDir "punctuation-shim.cs"
+$PunctuationReady = [bool](
+  (Test-Path -LiteralPath $PunctuationModel) -and
+  (Test-Path -LiteralPath $PunctuationShimPath) -and
+  (Test-Path -LiteralPath (Join-Path $DiarizationDir "onnxruntime.dll")) -and
+  (Test-Path -LiteralPath (Join-Path $DiarizationDir "sherpa-onnx-c-api.dll")))
 
 $OutputDir = Split-Path -Parent $OutputPath
 if ($OutputDir) {
@@ -1153,6 +1518,8 @@ $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $TranscriptQualityGuardVersion = "repeat-guard-v2"
 $TranscriptPartialRecoveryVersion = "partial-recovery-v1"
+$SpeakerDiarizationVersion = "speaker-diarization-v1"
+$ChinesePunctuationVersion = "chinese-punctuation-v1"
 $NativeProcessRunnerVersion = "diagnostics-process-v2"
 @(
   "time=$(Get-Date -Format o)"
@@ -1442,7 +1809,10 @@ function Trim-RepeatedTranscriptTailLegacy {
   while ($prefixLines.Count -gt 0) {
     $last = $prefixLines[$prefixLines.Count - 1].Trim()
     $looksLikeNoise = $last.Length -lt 3 -or
-      $last -match "^(?:字幕|本字幕|谢谢观看|请不吝点赞|www\\.|https?://)" -or
+      # CJK is written as .NET regex escapes on purpose: this installer is
+      # stored as UTF-8 without a BOM and Windows PowerShell 5.1 decodes it
+      # with the ANSI code page, so literal CJK here would arrive as mojibake.
+      $last -match "^(?:\u5b57\u5e55|\u672c\u5b57\u5e55|\u8c22\u8c22\u89c2\u770b|\u8bf7\u4e0d\u541d\u70b9\u8d5e|www\\.|https?://)" -or
       $last -match "^[A-Za-z\s\.,!?-]{1,8}$"
     if (-not $looksLikeNoise) {
       break
@@ -1540,12 +1910,470 @@ function Invoke-WhisperChunk {
   $arguments = @(
     "-m", (& $PathForNative $attemptModelPath),
     "-f", (& $PathForNative $ChunkPath),
+    "-t", [string]$WhisperThreads,
     "-l", "zh"
   ) + $ExtraArguments + @(
     "-otxt",
+    "-oj",
     "-of", (& $PathForNative $ChunkBase)
   )
   return Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments $arguments -ReportProgress -ProgressStage "transcribing" -ProgressCurrent $ProgressCurrent -ProgressTotal $ProgressTotal
+}
+
+function Read-WhisperChunkSegments {
+  param(
+    [Parameter(Mandatory = $true)][string]$ChunkBase,
+    [Parameter(Mandatory = $true)][int64]$ChunkOffsetMs
+  )
+  $jsonPath = "$ChunkBase.json"
+  if (-not (Test-Path -LiteralPath $jsonPath)) {
+    return @()
+  }
+  try {
+    $payload = [System.IO.File]::ReadAllText($jsonPath, $Utf8NoBom) | ConvertFrom-Json
+  } catch {
+    return @()
+  }
+  if (-not $payload -or -not $payload.transcription) {
+    return @()
+  }
+  $offsetMs = $ChunkOffsetMs
+  $segments = New-Object System.Collections.Generic.List[object]
+  foreach ($item in @($payload.transcription)) {
+    if (-not $item) { continue }
+    $text = (ConvertTo-SimplifiedChinese ([string]$item.text)).Trim()
+    if (-not $text) { continue }
+    $fromMs = [int64]0
+    $toMs = [int64]0
+    if ($item.offsets) {
+      $fromMs = [int64]$item.offsets.from
+      $toMs = [int64]$item.offsets.to
+    }
+    if ($toMs -lt $fromMs) { $toMs = $fromMs }
+    $segments.Add([PSCustomObject]@{
+      startMs = $offsetMs + $fromMs
+      endMs = $offsetMs + $toMs
+      text = $text
+      speaker = ""
+    })
+  }
+  return $segments.ToArray()
+}
+
+function Convert-AudioToNormalizedWav {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][string]$OutputPath,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  return Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-i", (& $PathForNative $AudioPath),
+    "-vn",
+    "-ar", "16000",
+    "-ac", "1",
+    "-c:a", "pcm_s16le",
+    "-f", "wav",
+    (& $PathForNative $OutputPath)
+  ) -ReportProgress -ProgressStage "diarizing"
+}
+
+function Read-DiarizationTurns {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  # One whole-file pass: the clustering step is global, so running this per
+  # chunk would give each chunk its own speaker ids and produce labels that
+  # contradict each other across chunk boundaries.
+  $result = Invoke-NativeProcess -FilePath $DiarizationExe.FullName -Arguments @(
+    ("--segmentation.pyannote-model=" + (& $PathForNative $DiarizationSegmentationModel)),
+    ("--embedding.model=" + (& $PathForNative $DiarizationEmbeddingModel)),
+    (& $PathForNative $AudioPath)
+  ) -ReportProgress -ProgressStage "diarizing"
+  $turns = New-Object System.Collections.Generic.List[object]
+  foreach ($line in ([string]$result.Output -split "`r?`n")) {
+    $match = [regex]::Match($line, '^\s*(\d+(?:\.\d+)?)\s*--\s*(\d+(?:\.\d+)?)\s+(speaker_\d+)\s*$')
+    if (-not $match.Success) { continue }
+    $startSeconds = [double]$match.Groups[1].Value
+    $endSeconds = [double]$match.Groups[2].Value
+    if ($endSeconds -le $startSeconds) { continue }
+    $turns.Add([PSCustomObject]@{
+      StartMs = [int64][math]::Round($startSeconds * 1000)
+      EndMs = [int64][math]::Round($endSeconds * 1000)
+      Speaker = [string]$match.Groups[3].Value
+    })
+  }
+  return [PSCustomObject]@{
+    ExitCode = $result.ExitCode
+    Turns = $turns
+    Output = $result.Output
+  }
+}
+
+function Set-SegmentSpeakers {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Segments,
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Turns
+  )
+  if ($Segments.Count -eq 0 -or $Turns.Count -eq 0) { return 0 }
+  # Speaker ids from sherpa-onnx are sparse (speaker_00, speaker_07...);
+  # renumber by first appearance so the note reads speaker 1, speaker 2, ...
+  # The CJK label prefix is built from code points on purpose: this installer
+  # is stored as UTF-8 without a BOM and Windows PowerShell 5.1 decodes that
+  # with the ANSI code page, so a literal here would arrive as mojibake.
+  $speakerPrefix = [string]([char]0x8BF4) + [string]([char]0x8BDD) + [string]([char]0x4EBA)
+  $labels = @{}
+  $speakerCount = 0
+  foreach ($turn in $Turns) {
+    if (-not $labels.ContainsKey($turn.Speaker)) {
+      $speakerCount += 1
+      $labels[$turn.Speaker] = $speakerPrefix + [string]$speakerCount
+    }
+  }
+  foreach ($segment in $Segments) {
+    $segmentStart = [double]$segment.startMs
+    $segmentEnd = [double]$segment.endMs
+    $segmentMiddle = ($segmentStart + $segmentEnd) / 2
+    $bestSpeaker = $null
+    $bestOverlap = 0.0
+    $nearestSpeaker = $null
+    $nearestDistance = [double]::MaxValue
+    foreach ($turn in $Turns) {
+      $overlap = [math]::Min($segmentEnd, [double]$turn.EndMs) - [math]::Max($segmentStart, [double]$turn.StartMs)
+      if ($overlap -gt $bestOverlap) {
+        $bestOverlap = $overlap
+        $bestSpeaker = $turn.Speaker
+      }
+      $turnMiddle = ([double]$turn.StartMs + [double]$turn.EndMs) / 2
+      $distance = [math]::Abs($turnMiddle - $segmentMiddle)
+      if ($distance -lt $nearestDistance) {
+        $nearestDistance = $distance
+        $nearestSpeaker = $turn.Speaker
+      }
+    }
+    $speaker = if ($bestSpeaker) { $bestSpeaker } else { $nearestSpeaker }
+    if ($speaker -and $labels.ContainsKey($speaker)) {
+      $segment.speaker = $labels[$speaker]
+    }
+  }
+  return $speakerCount
+}
+
+# whisper.cpp produces no punctuation for Mandarin, so transcripts are
+# punctuated afterwards by the sherpa-onnx CT-Transformer model. The model only
+# inserts punctuation and keeps every other character, which is what makes the
+# mapping back onto timed segments possible.
+function Test-PunctuationFillerCharacter {
+  param([char]$Character)
+  return ([char]::IsWhiteSpace($Character) -or
+    [char]::IsPunctuation($Character) -or
+    [char]::IsSymbol($Character))
+}
+
+function Get-PunctuationCoreText {
+  param([string]$Text)
+  $builder = New-Object System.Text.StringBuilder
+  foreach ($character in ([string]$Text).ToCharArray()) {
+    if (Test-PunctuationFillerCharacter $character) { continue }
+    [void]$builder.Append($character)
+  }
+  return $builder.ToString()
+}
+
+function Test-CjkCharacter {
+  param([char]$Character)
+  $code = [int]$Character
+  return (($code -ge 0x3400 -and $code -le 0x4DBF) -or
+    ($code -ge 0x4E00 -and $code -le 0x9FFF) -or
+    ($code -ge 0xF900 -and $code -le 0xFAFF) -or
+    ($code -ge 0xFF00 -and $code -le 0xFFEF) -or
+    ($code -ge 0x3000 -and $code -le 0x303F))
+}
+
+function Test-SentenceEndPunctuation {
+  param([char]$Character)
+  $code = [int]$Character
+  return ($code -eq 0x3002 -or $code -eq 0xFF01 -or $code -eq 0xFF1F)
+}
+
+function Test-ClausePunctuation {
+  param([char]$Character)
+  $code = [int]$Character
+  return ($code -eq 0xFF0C -or $code -eq 0x3001 -or $code -eq 0xFF1B -or $code -eq 0xFF1A)
+}
+
+function Get-FullWidthPunctuation {
+  param([char]$Character)
+  switch ([int]$Character) {
+    0x2C { return [char]0xFF0C }
+    0x3F { return [char]0xFF1F }
+    0x21 { return [char]0xFF01 }
+    0x3B { return [char]0xFF1B }
+    0x3A { return [char]0xFF1A }
+    0x2E { return [char]0x3002 }
+  }
+  return $Character
+}
+
+# The model mixes half-width and full-width marks and occasionally emits a
+# comma right after a sentence end. Normalize both so notes read evenly.
+# Half-width marks only become full width after a Chinese character, which
+# keeps English text such as "ChatGPT, GPT-4" untouched.
+function Optimize-PunctuationText {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  $source = $Text.ToCharArray()
+  $builder = New-Object System.Text.StringBuilder
+  $lastAppended = [char]0
+  $previousCore = [char]0
+  for ($index = 0; $index -lt $source.Length; $index += 1) {
+    $character = $source[$index]
+    if ([char]::IsWhiteSpace($character)) { continue }
+    $mapped = $character
+    if (Test-CjkCharacter $previousCore) {
+      $mapped = Get-FullWidthPunctuation $character
+    }
+    if ((Test-ClausePunctuation $mapped) -and (Test-SentenceEndPunctuation $lastAppended)) {
+      continue
+    }
+    if (Test-SentenceEndPunctuation $mapped) {
+      if (Test-SentenceEndPunctuation $lastAppended) {
+        continue
+      }
+      if ($builder.Length -gt 0 -and (Test-ClausePunctuation $lastAppended)) {
+        $builder.Length = $builder.Length - 1
+      }
+    }
+    [void]$builder.Append($mapped)
+    if (-not (Test-PunctuationFillerCharacter $mapped)) {
+      $previousCore = $mapped
+    }
+    $lastAppended = $mapped
+  }
+  return $builder.ToString()
+}
+
+function Initialize-PunctuationEngine {
+  if ($script:PunctuationInitialized) { return }
+  $script:PunctuationInitialized = $true
+  $script:PunctuationHandle = [IntPtr]::Zero
+  if (-not $PunctuationReady) { return }
+  try {
+    Add-Type -Path $PunctuationShimPath -ErrorAction Stop
+    if (-not [WechatInboxSherpaPunctuation]::Preload($DiarizationDir)) {
+      throw "the sherpa-onnx punctuation runtime failed to load"
+    }
+    $threads = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount))
+    $script:PunctuationHandle = [WechatInboxSherpaPunctuation]::Create($PunctuationModel, $threads)
+    if ($script:PunctuationHandle -eq [IntPtr]::Zero) {
+      throw "the punctuation model failed to open"
+    }
+    Write-Host "[punctuation] engine ready"
+  } catch {
+    $script:PunctuationHandle = [IntPtr]::Zero
+    Write-Host ("[punctuation] unavailable: " + $_.Exception.Message)
+  }
+}
+
+function Add-TextPunctuation {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  Initialize-PunctuationEngine
+  if ($script:PunctuationHandle -eq [IntPtr]::Zero) { return "" }
+  try {
+    return [WechatInboxSherpaPunctuation]::AddPunctuation($script:PunctuationHandle, $Text)
+  } catch {
+    $script:PunctuationHandle = [IntPtr]::Zero
+    Write-Host ("[punctuation] model call failed: " + $_.Exception.Message)
+    return ""
+  }
+}
+
+function Set-PunctuationUnitText {
+  param([AllowEmptyCollection()][object[]]$Units)
+  if ($Units.Count -eq 0) { return 0 }
+  $flat = New-Object System.Text.StringBuilder
+  foreach ($unit in $Units) { [void]$flat.Append([string]$unit.text) }
+  $flatText = $flat.ToString()
+  $punctuated = Add-TextPunctuation $flatText
+  if (-not $punctuated) { return 0 }
+  $punctuated = Optimize-PunctuationText $punctuated
+  # Guard: the model must only add punctuation. If it rewrote characters the
+  # result cannot be mapped back onto timings, so keep the original text.
+  if ((Get-PunctuationCoreText $flatText) -ne (Get-PunctuationCoreText $punctuated)) {
+    Write-Host "[punctuation] block skipped: the model altered characters"
+    return 0
+  }
+  $owners = New-Object System.Collections.Generic.List[int]
+  for ($index = 0; $index -lt $Units.Count; $index += 1) {
+    $coreLength = (Get-PunctuationCoreText ([string]$Units[$index].text)).Length
+    for ($k = 0; $k -lt $coreLength; $k += 1) { $owners.Add($index) }
+  }
+  if ($owners.Count -eq 0) { return 0 }
+  $buffers = @()
+  for ($index = 0; $index -lt $Units.Count; $index += 1) {
+    $buffers += (New-Object System.Text.StringBuilder)
+  }
+  $coreIndex = 0
+  foreach ($character in $punctuated.ToCharArray()) {
+    if ([char]::IsWhiteSpace($character)) { continue }
+    if (Test-PunctuationFillerCharacter $character) {
+      $owner = if ($coreIndex -eq 0) { 0 } else { $owners[$coreIndex - 1] }
+    } else {
+      if ($coreIndex -ge $owners.Count) { break }
+      $owner = $owners[$coreIndex]
+      $coreIndex += 1
+    }
+    if ($owner -ge 0 -and $owner -lt $buffers.Count) {
+      [void]$buffers[$owner].Append($character)
+    }
+  }
+  $changed = 0
+  for ($index = 0; $index -lt $Units.Count; $index += 1) {
+    $updated = $buffers[$index].ToString().Trim()
+    if (-not $updated) { continue }
+    if ($updated -ne [string]$Units[$index].text) {
+      $Units[$index].text = $updated
+      $changed += 1
+    }
+  }
+  return $changed
+}
+
+function Add-UnitPunctuation {
+  param(
+    [AllowEmptyCollection()][object[]]$Units,
+    [int]$MaxCoreCharacters = 1600
+  )
+  if (-not $PunctuationReady) { return 0 }
+  if ($Units.Count -eq 0) { return 0 }
+  $changed = 0
+  $batch = New-Object System.Collections.Generic.List[object]
+  $batchCoreLength = 0
+  foreach ($unit in $Units) {
+    if (-not $unit) { continue }
+    $text = [string]$unit.text
+    if (-not $text) { continue }
+    $batch.Add($unit)
+    $batchCoreLength += (Get-PunctuationCoreText $text).Length
+    if ($batchCoreLength -lt $MaxCoreCharacters) { continue }
+    $changed += (Set-PunctuationUnitText -Units @($batch.ToArray()))
+    $batch = New-Object System.Collections.Generic.List[object]
+    $batchCoreLength = 0
+  }
+  if ($batch.Count -gt 0) {
+    $changed += (Set-PunctuationUnitText -Units @($batch.ToArray()))
+  }
+  return $changed
+}
+
+function Get-WavDurationSeconds {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+  $stream = $null
+  $reader = $null
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    if ($stream.Length -lt 44) { return 0.0 }
+    $reader = New-Object System.IO.BinaryReader($stream)
+    $header = $reader.ReadBytes(12)
+    if ($header.Length -lt 12) { return 0.0 }
+    $ascii = [System.Text.Encoding]::ASCII
+    if (($ascii.GetString($header, 0, 4)) -ne "RIFF") { return 0.0 }
+    if (($ascii.GetString($header, 8, 4)) -ne "WAVE") { return 0.0 }
+    $position = [int64]12
+    while (($position + 8) -le $stream.Length) {
+      $stream.Position = $position
+      $chunkId = $ascii.GetString($reader.ReadBytes(4))
+      $chunkSize = [int64]$reader.ReadInt32()
+      if ($chunkSize -lt 0) { break }
+      if ($chunkId -eq "data") {
+        # Chunks are written as 16 kHz mono 16-bit PCM: 32000 bytes a second.
+        return ([double]$chunkSize / 32000.0)
+      }
+      $position = $position + 8 + $chunkSize
+      if (($chunkSize % 2) -ne 0) { $position = $position + 1 }
+    }
+    return 0.0
+  } catch {
+    return 0.0
+  } finally {
+    if ($reader) { $reader.Dispose() }
+    if ($stream) { $stream.Dispose() }
+  }
+}
+
+function Find-SilenceCutPoints {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][int]$TargetSeconds,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  $result = [PSCustomObject]@{
+    Cuts = @()
+    DurationSeconds = 0.0
+  }
+  # Default log level on purpose: silencedetect reports on stderr at info level,
+  # together with the Duration line this pass needs anyway.
+  $probe = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+    "-hide_banner", "-nostats",
+    "-i", (& $PathForNative $AudioPath),
+    "-af", "silencedetect=noise=-32dB:d=0.7",
+    "-f", "null", "-"
+  )
+  if ($probe.ExitCode -ne 0) {
+    return $result
+  }
+  $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+  $durationSeconds = 0.0
+  $durationMatch = [regex]::Match([string]$probe.Output, "Duration:\s*(\d+):(\d+):([0-9.]+)")
+  if ($durationMatch.Success) {
+    $durationSeconds = ([double]$durationMatch.Groups[1].Value * 3600.0) +
+      ([double]$durationMatch.Groups[2].Value * 60.0) +
+      [double]::Parse($durationMatch.Groups[3].Value, $invariant)
+  }
+  $result.DurationSeconds = $durationSeconds
+  if ($durationSeconds -le [double]$TargetSeconds) {
+    return $result
+  }
+  # The end of a pause, not its start. A chunk that opens on silence makes the
+  # model guess its first words, and it guesses whatever it just heard.
+  $silences = New-Object System.Collections.Generic.List[double]
+  foreach ($line in ([string]$probe.Output -split "`r?`n")) {
+    $match = [regex]::Match($line, "silence_end:\s*(-?[0-9.]+)")
+    if (-not $match.Success) { continue }
+    $value = [double]::Parse($match.Groups[1].Value, $invariant)
+    if ($value -ge 0) { $silences.Add($value) }
+  }
+  # A cut through a spoken word loses or repeats it, so each boundary slides to
+  # the nearest quiet moment. When nothing is quiet nearby the clock wins.
+  $window = [Math]::Max(6.0, [double]$TargetSeconds * 0.08)
+  $cuts = New-Object System.Collections.Generic.List[double]
+  $previous = 0.0
+  $boundary = [double]$TargetSeconds
+  while ($boundary -lt ($durationSeconds - 10.0)) {
+    $chosen = $boundary
+    $bestDistance = $window + 1.0
+    foreach ($silence in $silences) {
+      $distance = [Math]::Abs($silence - $boundary)
+      if ($distance -le $window -and $distance -lt $bestDistance) {
+        $chosen = $silence
+        $bestDistance = $distance
+      }
+    }
+    # A cut too close to the previous one would leave a stub chunk.
+    if (($chosen - $previous) -ge 20.0) {
+      $cuts.Add($chosen)
+      $previous = $chosen
+    } else {
+      $previous = $boundary
+    }
+    $boundary = $boundary + [double]$TargetSeconds
+  }
+  $result.Cuts = $cuts.ToArray()
+  return $result
 }
 
 function Split-AudioToChunks {
@@ -1553,26 +2381,53 @@ function Split-AudioToChunks {
     [Parameter(Mandatory = $true)][string]$AudioPath,
     [Parameter(Mandatory = $true)][string]$OutputDir,
     [Parameter(Mandatory = $true)][int]$SegmentSeconds,
-    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative,
+    [switch]$PreferSilence
   )
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
   $pattern = Join-Path $OutputDir "chunk-%03d.wav"
-  $result = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+  $cutSeconds = @()
+  if ($PreferSilence) {
+    try {
+      $analysis = Find-SilenceCutPoints -AudioPath $AudioPath -TargetSeconds $SegmentSeconds -PathForNative $PathForNative
+      if ($analysis -and $analysis.Cuts) {
+        $cutSeconds = @($analysis.Cuts)
+      }
+    } catch {
+      $cutSeconds = @()
+    }
+  }
+  $arguments = @(
     "-hide_banner", "-loglevel", "error", "-y",
     "-i", (& $PathForNative $AudioPath),
     "-ar", "16000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
-    "-f", "segment",
-    "-segment_time", [string]$SegmentSeconds,
-    "-reset_timestamps", "1",
-    $pattern
-  ) -ReportProgress -ProgressStage "segmenting"
+    "-f", "segment"
+  )
+  if ($cutSeconds.Count -gt 0) {
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $cutList = ($cutSeconds | ForEach-Object { ([double]$_).ToString("0.000", $invariant) }) -join ","
+    $arguments += @("-segment_times", $cutList)
+  } else {
+    $arguments += @("-segment_time", [string]$SegmentSeconds)
+  }
+  $arguments += @("-reset_timestamps", "1", $pattern)
+  $result = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments $arguments -ReportProgress -ProgressStage "segmenting"
   $chunks = @(Get-ChildItem -LiteralPath $OutputDir -Filter "chunk-*.wav" | Sort-Object Name)
+  # Chunks are not exactly SegmentSeconds long, so timestamps are built from the
+  # real start of each chunk instead of assuming a fixed stride.
+  $chunkStartSeconds = New-Object System.Collections.Generic.List[double]
+  $elapsed = 0.0
+  foreach ($chunk in $chunks) {
+    $chunkStartSeconds.Add($elapsed)
+    $elapsed = $elapsed + (Get-WavDurationSeconds -Path $chunk.FullName)
+  }
   return [PSCustomObject]@{
     FfmpegResult = $result
     ChunkFiles = $chunks
     ChunkPattern = $pattern
+    ChunkStartSeconds = $chunkStartSeconds.ToArray()
   }
 }
 
@@ -1637,7 +2492,7 @@ function Invoke-TranscribeAttempt {
     $safeTempRoot = New-SafeTempDirectory
     $tempWorkDir = Join-Path $safeTempRoot "chunks"
     $attemptInputPath = Join-Path $safeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
-    $attemptModelPath = Join-Path $safeTempRoot "ggml-small.bin"
+    $attemptModelPath = Join-Path $safeTempRoot $ModelFileName
     Copy-Item -LiteralPath $InputPath -Destination $attemptInputPath -Force
     Copy-Item -LiteralPath $Model -Destination $attemptModelPath -Force
   } else {
@@ -1664,18 +2519,51 @@ function Invoke-TranscribeAttempt {
     Text = ""
     Error = ""
   }
+  $punctuationStatus = "pending"
 
   try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
+  $diarizationTurns = @()
+  $diarizationStatus = if ($DiarizationReady) { "pending" } else { "unavailable" }
+  $diarizationLog = ""
+  $splitSourcePath = $attemptInputPath
+  if ($DiarizationReady) {
+    $normalizedAudioPath = Join-Path $TempWorkDir "normalized.wav"
+    try {
+      $normalizeResult = Convert-AudioToNormalizedWav -AudioPath $attemptInputPath -OutputPath $normalizedAudioPath -PathForNative $pathForNative
+      if ($normalizeResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $normalizedAudioPath)) {
+        throw "ffmpeg normalize failed with exit code $($normalizeResult.ExitCode)"
+      }
+      # Chunking reuses this decode instead of re-reading the source.
+      $splitSourcePath = $normalizedAudioPath
+      if ((Get-Item -LiteralPath $normalizedAudioPath).Length -gt 460MB) {
+        $diarizationStatus = "too-long"
+      } else {
+        $diarizationResult = Read-DiarizationTurns -AudioPath $normalizedAudioPath -PathForNative $pathForNative
+        $diarizationTurns = @($diarizationResult.Turns.ToArray())
+        $diarizationStatus = if ($diarizationTurns.Count -gt 0) { "ok" } else { "empty" }
+        $diarizationLog = $diarizationResult.Output
+      }
+    } catch {
+      $diarizationStatus = "failed"
+      $diarizationTurns = @()
+      $diarizationLog = ($_ | Out-String)
+    }
+  }
   Write-ProgressLog -Stage "segmenting" -Current 0 -Total 0
-  $split = Split-AudioToChunks -AudioPath $attemptInputPath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative
+  $split = Split-AudioToChunks -AudioPath $splitSourcePath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative -PreferSilence
+  if ($splitSourcePath -ne $attemptInputPath) {
+    Remove-Item -LiteralPath $splitSourcePath -Force -ErrorAction SilentlyContinue
+  }
   $ffmpegOutput = $split.FfmpegResult.Output
   $ffmpegExit = $split.FfmpegResult.ExitCode
   $chunkFiles = @($split.ChunkFiles)
+  $chunkStartSeconds = @($split.ChunkStartSeconds)
   $result.ChunkCount = $chunkFiles.Count
   Write-ProgressLog -Stage "transcribing" -Current 0 -Total $chunkFiles.Count
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
+  $mergedSegments = New-Object System.Collections.Generic.List[object]
   $whisperExit = 0
   $chunkIndex = 0
   $recoveryTriggered = 0
@@ -1729,19 +2617,64 @@ function Invoke-TranscribeAttempt {
           }
         }
         $mergedText.Add($normalizedText)
+        # Timestamps come from the original chunk output. Repeat-hallucination
+        # recovery may trim the text slightly; segment timing stays the trusted
+        # first-pass alignment.
+        $chunkOffsetMs = [int64]0
+        if ($chunkIndex -lt $chunkStartSeconds.Count) {
+          $chunkOffsetMs = [int64][Math]::Round([double]$chunkStartSeconds[$chunkIndex] * 1000.0)
+        }
+        foreach ($segment in @(Read-WhisperChunkSegments -ChunkBase $chunkBase -ChunkOffsetMs $chunkOffsetMs)) {
+          $mergedSegments.Add($segment)
+        }
       }
     }
     $chunkIndex += 1
     Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count
   }
 
+    $detectedSpeakers = 0
+    if ($diarizationTurns.Count -gt 0 -and $mergedSegments.Count -gt 0) {
+      $detectedSpeakers = Set-SegmentSpeakers -Segments @($mergedSegments.ToArray()) -Turns $diarizationTurns
+    }
+
+    # Punctuation is best effort: any failure leaves the raw transcript intact.
+    $punctuationStatus = if ($PunctuationReady) { "skipped" } else { "unavailable" }
+    if ($PunctuationReady -and $mergedSegments.Count -gt 0) {
+      try {
+        $punctuatedSegments = Add-UnitPunctuation -Units @($mergedSegments.ToArray())
+        $punctuationStatus = if ($punctuatedSegments -gt 0) { "ok" } else { "unchanged" }
+      } catch {
+        $punctuationStatus = "failed"
+        Write-Host ("[punctuation] segment step failed: " + $_.Exception.Message)
+      }
+    }
+    if ($PunctuationReady -and $mergedText.Count -gt 0) {
+      try {
+        $textUnits = @()
+        foreach ($chunkText in $mergedText) {
+          $textUnits += [PSCustomObject]@{ text = [string]$chunkText }
+        }
+        [void](Add-UnitPunctuation -Units $textUnits)
+        $mergedText = New-Object System.Collections.Generic.List[string]
+        foreach ($textUnit in $textUnits) { $mergedText.Add([string]$textUnit.text) }
+      } catch {
+        Write-Host ("[punctuation] text step failed: " + $_.Exception.Message)
+      }
+    }
+
     $result.FfmpegOutput = $ffmpegOutput
     $result.FfmpegExit = $ffmpegExit
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
+    $result | Add-Member -NotePropertyName Segments -NotePropertyValue @($mergedSegments.ToArray()) -Force
     $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
     $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
+    $result | Add-Member -NotePropertyName DiarizationStatus -NotePropertyValue $diarizationStatus -Force
+    $result | Add-Member -NotePropertyName DiarizationSpeakers -NotePropertyValue $detectedSpeakers -Force
+    $result | Add-Member -NotePropertyName DiarizationLog -NotePropertyValue $diarizationLog -Force
+    $result | Add-Member -NotePropertyName PunctuationStatus -NotePropertyValue $punctuationStatus -Force
     return $result
   } catch {
     $result.FfmpegOutput = $ffmpegOutput
@@ -1749,8 +2682,13 @@ function Invoke-TranscribeAttempt {
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Error = ($_ | Out-String)
+    $result | Add-Member -NotePropertyName Segments -NotePropertyValue @($mergedSegments.ToArray()) -Force
     $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
     $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
+    $result | Add-Member -NotePropertyName DiarizationStatus -NotePropertyValue $diarizationStatus -Force
+    $result | Add-Member -NotePropertyName DiarizationSpeakers -NotePropertyValue 0 -Force
+    $result | Add-Member -NotePropertyName DiarizationLog -NotePropertyValue $diarizationLog -Force
+    $result | Add-Member -NotePropertyName PunctuationStatus -NotePropertyValue $punctuationStatus -Force
     return $result
   } finally {
     if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {
@@ -1778,6 +2716,9 @@ function Write-AttemptLog {
     "chunkCount=$($Attempt.ChunkCount)"
     "recoveryTriggered=$($Attempt.RecoveryTriggered)"
     "skippedRepeatChunks=$($Attempt.SkippedRepeatChunks)"
+    "diarization=$($Attempt.DiarizationStatus)"
+    "diarizationSpeakers=$($Attempt.DiarizationSpeakers)"
+    "punctuation=$($Attempt.PunctuationStatus)"
     "ffmpeg=$($Ffmpeg.FullName)"
     "ffmpegExit=$($Attempt.FfmpegExit)"
     "--- ffmpeg output ---"
@@ -1796,6 +2737,8 @@ function Write-AttemptLog {
       "safeModelPath=$($FallbackAttempt.ModelPath)"
       "chunkCount=$($FallbackAttempt.ChunkCount)"
       "skippedRepeatChunks=$($FallbackAttempt.SkippedRepeatChunks)"
+      "diarization=$($FallbackAttempt.DiarizationStatus)"
+      "diarizationSpeakers=$($FallbackAttempt.DiarizationSpeakers)"
       "ffmpegExit=$($FallbackAttempt.FfmpegExit)"
       "--- fallback ffmpeg output ---"
       $FallbackAttempt.FfmpegOutput
@@ -1839,6 +2782,29 @@ try {
 
   $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
+  $segmentsPath = [System.IO.Path]::ChangeExtension($OutputPath, ".segments.json")
+  $finalSegments = @()
+  if ($finalAttempt.Segments) {
+    $finalSegments = @($finalAttempt.Segments)
+  }
+  if ($finalSegments.Count -gt 0) {
+    $speakerCount = 0
+    if ($finalAttempt.DiarizationSpeakers) {
+      $speakerCount = [int]$finalAttempt.DiarizationSpeakers
+    }
+    $segmentsPayload = [PSCustomObject]@{
+      version = 1
+      language = "zh"
+      chunkSeconds = $ChunkSeconds
+      speakers = $speakerCount
+      segments = $finalSegments
+    }
+    $segmentsJson = $segmentsPayload | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($segmentsPath, $segmentsJson, $Utf8NoBom)
+  } elseif (Test-Path -LiteralPath $segmentsPath) {
+    # A previous run may leave a stale sidecar; the text no longer matches it.
+    Remove-Item -LiteralPath $segmentsPath -Force -ErrorAction SilentlyContinue
+  }
   Write-ProgressLog -Stage "done" -Current $finalAttempt.ChunkCount -Total $finalAttempt.ChunkCount
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)
@@ -1864,6 +2830,7 @@ try {
   Write-Host "whisper: $($installedWhisper.FullName)"
   Write-Host "ffmpeg: $($installedFfmpeg.FullName)"
   Write-Host "model: $modelPath"
+  Write-Host "speaker diarization: $(if ($diarizationInstalled) { 'installed' } else { 'unavailable' })"
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"

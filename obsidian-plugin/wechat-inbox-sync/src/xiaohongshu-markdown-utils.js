@@ -171,7 +171,7 @@ function sanitizeXiaohongshuCommentResult(input = {}) {
     replyRequestCount: count(input.replyRequestCount),
     invalidPayloadCount: count(input.invalidPayloadCount),
     stopReason: token(input.stopReason),
-    errorCode: /^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|TIMEOUT|REQUEST_FAILED|INVALID_RESPONSE|SECURITY_RESTRICTION|BROWSER_UNAVAILABLE|TARGET_IDENTITY_MISSING|TARGET_IDENTITY_MISMATCH|TARGET_IDENTITY_UNCONFIRMED|PAGE_ACCESS_WALL|PAGE_UNAVAILABLE)$/.test(input.errorCode || '') ? input.errorCode : '',
+    errorCode: /^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|TIMEOUT|REQUEST_FAILED|INVALID_RESPONSE|SECURITY_RESTRICTION|RATE_LIMITED|BROWSER_UNAVAILABLE|TARGET_IDENTITY_MISSING|TARGET_IDENTITY_MISMATCH|TARGET_IDENTITY_UNCONFIRMED|PAGE_ACCESS_WALL|PAGE_UNAVAILABLE)$/.test(input.errorCode || '') ? input.errorCode : '',
   };
 }
 
@@ -179,6 +179,9 @@ function getXiaohongshuCommentErrorCode(error) {
   const message = String(error && (error.code || error.message) || error || '');
   if (/^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|INVALID_RESPONSE)$/i.test(message)) return message.toUpperCase();
   if (/timeout|timed?\s*out|AbortError/i.test(message)) return 'TIMEOUT';
+  // 300013 is Xiaohongshu's explicit "too many requests" wall; keep it distinct
+  // from a generic security restriction so diagnostics can tell them apart.
+  if (/XIAOHONGSHU_RATE_LIMITED|rate[_\s-]?limited|300013/i.test(message)) return 'RATE_LIMITED';
   if (/security_restriction|300011/i.test(message)) return 'SECURITY_RESTRICTION';
   return 'REQUEST_FAILED';
 }
@@ -197,7 +200,8 @@ function formatXiaohongshuCommentResult(input, diagnostic = false) {
           : '小红书评论未提取：登录预检未通过，尚不能确定是登录失效还是检测失败',
     captured: `小红书评论已提取 ${count} 条（主评论 ${result.rootCount} 条，回复 ${result.replyCount} 条）`,
     partial: `小红书评论可能不完整：已提取 ${count} 条（主评论 ${result.rootCount} 条，回复 ${result.replyCount} 条）`,
-    failed: result.stopReason === 'target_identity_missing' ? '小红书评论未提取：未能识别目标笔记编号'
+    failed: result.errorCode === 'RATE_LIMITED' ? '小红书评论未提取：平台提示请求过于频繁，本次已暂停访问小红书，请稍后重试'
+      : result.stopReason === 'target_identity_missing' ? '小红书评论未提取：未能识别目标笔记编号'
       : result.stopReason === 'target_identity_mismatch' ? '小红书评论未提取：打开的页面与目标笔记不一致'
       : result.stopReason === 'target_identity_unconfirmed' ? '小红书评论未提取：网页尚未显示可确认的目标笔记'
       : result.stopReason === 'page_access_wall' ? '小红书评论未提取：目标页面要求登录或安全验证，请在插件内打开小红书完成验证'

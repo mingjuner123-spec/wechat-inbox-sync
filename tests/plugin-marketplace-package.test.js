@@ -98,9 +98,16 @@ assert.strictEqual(
   false,
   'marketplace OCR markdown generation must not restore per-image headings',
 );
+// OCR follows the note, not the share intent: the mini program tags every
+// xhslink.com/a/ share as audio_video, so intent alone cannot rule out images.
+// Only a resolved video is real evidence that the note has no images to OCR.
 assert.ok(
-  pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'),
-  'known Xiaohongshu video intent must bypass image OCR before late media resolution',
+  pluginMainSource.includes('if (shouldRunXiaohongshuImageOcr({'),
+  'marketplace Xiaohongshu OCR must go through the per-note OCR decision',
+);
+assert.ok(
+  pluginMainSource.includes('return !mediaUrl && !(extracted && extracted.videoUrl);'),
+  'a resolved Xiaohongshu video must skip image OCR',
 );
 
 assert.ok(readme.includes('## Privacy'));
@@ -349,7 +356,7 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.32"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.33"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'));
 assert.ok(windowsInstaller.includes('$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsAuthorizedUrls = @($env:WECHAT_INBOX_ASR_WHISPER_URL)'));
@@ -400,11 +407,12 @@ assert.ok(windowsInstaller.includes('function Invoke-LocalAsrValidation'));
 assert.ok(windowsInstaller.includes('Local ASR was already validated for the current files; skipping full inference validation.'));
 assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "whisper.zip"'));
 assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "ffmpeg.zip"'));
-assert.ok(windowsInstaller.includes('Join-Path $CacheRoot "ggml-small.bin"'));
+assert.ok(windowsInstaller.includes('Join-Path $CacheRoot $WhisperModelFileName'));
+assert.ok(windowsInstaller.includes('$WhisperModelFileName = "ggml-large-v3-turbo-q5_0.bin"'), 'Windows installer must provision the model the plugin expects');
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('-C - -o $OutFile'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.32"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.33"'));
 assert.strictEqual(windowsInstaller.includes('tcloudbaseapp.com'), false, 'Windows ASR must never embed the public CloudBase static domain');
 assert.ok(windowsInstaller.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
 assert.strictEqual(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'), false);
@@ -666,6 +674,18 @@ function runWindowsAsrCandidateValidationProbe(source) {
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
     '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
     '$NativeProcessRunnerVersion = "diagnostics-process-v2"',
+    '$SpeakerDiarizationVersion = "speaker-diarization-v1"',
+    '$ChinesePunctuationVersion = "chinese-punctuation-v1"',
+    'Set-SegmentSpeakers',
+    'WechatInboxSherpaPunctuation',
+    'Add-UnitPunctuation',
+    'Optimize-PunctuationText',
+    'PunctuationStatus',
+    'Find-SilenceCutPoints',
+    'Get-WavDurationSeconds',
+    'ChunkStartSeconds',
+    '-segment_times',
+    'ChunkOffsetMs',
     'function Invoke-NativeProcess { $info = New-Object System.Diagnostics.ProcessStartInfo; $process = New-Object System.Diagnostics.Process; $null = $process.Handle; $task = $process.StandardOutput.ReadToEndAsync() }',
     '$progressHeartbeatAt="now"',
     '$progressPid=1',

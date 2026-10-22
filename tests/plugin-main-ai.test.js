@@ -588,10 +588,10 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.32"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.33"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.32"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.33"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
@@ -621,7 +621,7 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource,
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(nonTransactionalWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(copyModelWindowsAsrInstallerSource, false), false);
-assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.32"'));
+assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.33"'));
 assert.ok(windowsAsrInstallerSource.includes('$env:WECHAT_INBOX_ASR_MODEL_URL'));
 assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $FfmpegAuthorizedUrls -FallbackUrls @('));
 assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
@@ -1275,7 +1275,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -2874,8 +2874,8 @@ assert.strictEqual(pluginMainSource.includes(".setName('启用 AI 简介与关�
 assert.ok(pluginMainSource.includes('AI 简介与关键词自动生成：已默认开启'));
 assert.strictEqual(pluginMainSource.includes(".setName('启用小红书图片 OCR')"), true);
 assert.ok(pluginMainSource.includes('小红书图片 OCR 默认关闭，按需手动开启'));
-assert.ok(pluginMainSource.includes('const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);'));
-assert.ok(pluginMainSource.includes('if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {'));
+assert.ok(pluginMainSource.includes('if (shouldRunXiaohongshuImageOcr({'));
+assert.ok(pluginMainSource.includes('return !mediaUrl && !(extracted && extracted.videoUrl);'));
 assert.strictEqual(pluginMainSource.includes('图片文字识别组件安装（测试版）'), false);
 assert.strictEqual(pluginMainSource.includes('图片文字识别 OCR 模块'), false);
 assert.ok(pluginMainSource.includes('getLocalOcrInstallStatus'));
@@ -2985,12 +2985,13 @@ assert.ok(pluginMainSource.includes('showSyncProgress'));
 assert.ok(pluginMainSource.includes('syncStatusBar'));
 assert.ok(pluginMainSource.includes('setText(message)'));
 assert.ok(pluginMainSource.includes('lastSyncDiagnostic'));
-assert.ok(pluginMainSource.includes("setButtonText('复制诊断信息')"));
+assert.ok(pluginMainSource.includes("setButtonText('复制本次失败')"));
+assert.ok(pluginMainSource.includes("setButtonText('复制完整诊断')"));
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制同步诊断')"), false);
 assert.ok(pluginMainSource.includes('同步/安装失败诊断'));
 assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), false);
-assert.ok(pluginMainSource.includes('复制诊断信息，便于反馈和排查问题。'));
-assert.strictEqual(pluginMainSource.includes("setButtonText('复制完整诊断')"), false);
+assert.ok(pluginMainSource.includes('默认只复制本次失败的摘要；排查组件安装问题时再复制完整诊断。'));
+assert.strictEqual(pluginMainSource.includes("setButtonText('复制诊断信息')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('输入短期连接码')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('云端兜底转写')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('自动同步')"), false);
@@ -2999,7 +3000,7 @@ assert.strictEqual(pluginMainSource.includes(".setName('同步失败记录')"), 
 assert.strictEqual(pluginMainSource.includes(".setName('清理最近同步失败的内容')"), false);
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制详细诊断')"), false);
 assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
-assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制诊断信息」'));
+assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制完整诊断」'));
 assert.strictEqual(
   helpers.formatLocalComponentInstallFailureReason([
     '% Total % Received % Xferd Average Speed Time Time Time Current',
@@ -3854,7 +3855,7 @@ assert.deepStrictEqual(
     transcribeScript: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
     whisperPath: '',
     ffmpegPath: '',
-    modelPath: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
+    modelPath: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-large-v3-turbo-q5_0.bin',
     hasTranscribeScript: true,
     scriptVersion: 'unknown',
     scriptOutdated: false,
@@ -3895,7 +3896,7 @@ const completeWindowsAsrStatus = helpers.getLocalAsrInstallStatus('C:\\Users\\de
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe',
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe',
-  'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
+  'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-large-v3-turbo-q5_0.bin',
 ].includes(filePath), 'win32');
 assert.strictEqual(completeWindowsAsrStatus.whisperPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe');
 assert.strictEqual(completeWindowsAsrStatus.ffmpegPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe');
@@ -3908,7 +3909,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'whisper', 'Release', 'main.exe'), '');
   fs.writeFileSync(path.join(tempAsrRoot, 'whisper', 'Release', 'whisper-cli.exe'), '');
   fs.writeFileSync(path.join(tempAsrRoot, 'ffmpeg', 'bin', 'ffmpeg.exe'), '');
-  fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
+  fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
     currentWindowsAsrScriptSource,
@@ -3979,18 +3980,32 @@ assert.deepStrictEqual(
     compatibilityMode: 'legacy-start-process',
   },
 );
-for (const damagedOfficialSource of [
-  `${historicalWindowsAsrScriptSource}\nfunction Broken-LegacyScript {`,
-  `${currentWindowsAsrScriptSource}\nfunction Broken-CurrentScript {`,
-]) {
-  assert.strictEqual(
-    helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
-      existsSync: () => true,
-      readFileSync: () => damagedOfficialSource,
-    }).scriptOutdated,
-    true,
-  );
-}
+// The legacy start-process script is still identified by its published bytes, so
+// a local edit to it invalidates the signature.
+assert.strictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => `${historicalWindowsAsrScriptSource}\nfunction Broken-LegacyScript {`,
+  }).scriptOutdated,
+  true,
+);
+// The current diagnostics-process script is judged by its protocol markers, not
+// by its hash: a locally extended copy keeps working and must not be reported as
+// outdated, while dropping a marker does make it outdated.
+assert.strictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => `${currentWindowsAsrScriptSource}\nfunction LocalHelperExtension {`,
+  }).scriptOutdated,
+  false,
+);
+assert.strictEqual(
+  helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
+    existsSync: () => true,
+    readFileSync: () => currentWindowsAsrScriptSource.split('Split-AudioToChunks').join('SplitAudio'),
+  }).scriptOutdated,
+  true,
+);
 for (const unreadableSource of ['', 'this is not a transcription script']) {
   assert.deepStrictEqual(
     helpers.getLocalAsrScriptVersionStatus('C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1', {
@@ -4022,7 +4037,7 @@ assert.deepStrictEqual(
   fs.mkdirSync(path.join(tempLegacyAsrRoot, 'models'), { recursive: true });
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'whisper', 'whisper-cli.exe'), '');
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
-  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'models', 'ggml-small.bin'), '');
+  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), '');
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
   const legacyStatus = helpers.getLocalAsrInstallStatus(
     tempLegacyAsrRoot,
@@ -4043,7 +4058,7 @@ assert.deepStrictEqual(
   fs.mkdirSync(path.join(tempPreviousAsrRoot, 'models'), { recursive: true });
   fs.writeFileSync(path.join(tempPreviousAsrRoot, 'whisper', 'whisper-cli.exe'), '');
   fs.writeFileSync(path.join(tempPreviousAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
-  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'models', 'ggml-small.bin'), '');
+  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), '');
   fs.writeFileSync(path.join(tempPreviousAsrRoot, 'transcribe.ps1'), previousDiagnosticsWindowsAsrScriptSource, 'utf8');
   const previousStatus = helpers.getLocalAsrInstallStatus(
     tempPreviousAsrRoot,
@@ -8479,8 +8494,9 @@ async function runAsyncHydrationTests() {
       content: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145',
       metadata: { url: 'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d145' },
     }, '', '', '小红书视频'),
-    (error) => error && error.code === 'TRANSCRIPTION_PENDING'
-      && error.message === '转写未执行：Pro 已到期，请续期后重试。',
+    (error) => error && error.code === 'XIAOHONGSHU_PRO_REQUIRED'
+      && error.retryable === true
+      && error.message === '小红书视频解析需要 Pro 权益，当前未开通或已到期。续期后重新同步即可。',
   );
 
   const targetGraphicNoteId = '6a4ccf88000000001101d144';
@@ -9564,8 +9580,8 @@ async function runAsyncHydrationTests() {
   const freeVideoCapability = await runXiaohongshuVideoCapabilityCase(false);
   assert.strictEqual(freeVideoCapability.transcriptionCalls, 0);
   assert.strictEqual(freeVideoCapability.record, null);
-  assert.strictEqual(freeVideoCapability.error && freeVideoCapability.error.code, 'TRANSCRIPTION_PENDING');
-  assert.strictEqual(freeVideoCapability.error && freeVideoCapability.error.message, '转写未执行：Pro 已到期，请续期后重试。');
+  assert.strictEqual(freeVideoCapability.error && freeVideoCapability.error.code, 'XIAOHONGSHU_PRO_REQUIRED');
+  assert.strictEqual(freeVideoCapability.error && freeVideoCapability.error.message, '小红书视频解析需要 Pro 权益，当前未开通或已到期。续期后重新同步即可。');
 
   const proVideoCapability = await runXiaohongshuVideoCapabilityCase(true);
   assert.strictEqual(proVideoCapability.transcriptionCalls, 1);
@@ -9966,7 +9982,7 @@ async function runAsyncHydrationTests() {
       text: JSON.stringify({
         success: true,
         data: {
-          transcription: '小红书云端兜底文案',
+          transcription: '云端兜底文案',
           provider: 'doubao',
           requestId: 'cloud-url-1',
           usedSeconds: 60,
@@ -9976,13 +9992,13 @@ async function runAsyncHydrationTests() {
     };
   };
   try {
-    const webMediaFallbackResult = await webMediaFallbackPlugin.runConfiguredTranscription('https://video.example.com/xhs.mp4', {
+    const webMediaFallbackResult = await webMediaFallbackPlugin.runConfiguredTranscription('https://www.douyin.com/video/7644238277092174409', {
       allowCloudUrlFallback: true,
-      title: '小红书口播',
+      title: '抖音口播',
       source: 'video',
     });
     assert.deepStrictEqual(webMediaFallbackResult, {
-      transcription: '小红书云端兜底文案',
+      transcription: '云端兜底文案',
       source: 'local-cloud-fallback',
       cloudProvider: 'doubao',
       cloudRequestId: 'cloud-url-1',
@@ -9993,11 +10009,11 @@ async function runAsyncHydrationTests() {
       url: 'https://example.com/sync/transcriptions/cloud',
       method: 'POST',
       body: {
-        audioUrl: 'https://video.example.com/xhs.mp4',
+        audioUrl: 'https://www.douyin.com/video/7644238277092174409',
         durationSeconds: 60,
         localError: 'whisper failed with exit code -1073740791',
         source: 'video',
-        title: '小红书口播',
+        title: '抖音口播',
       },
       auth: 'Bearer PRO-123',
     }]);
@@ -11817,12 +11833,12 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   assert.deepStrictEqual(result.failed, [{
     recordId: 'xhs-content-unavailable-1',
     retryCount: 0,
-    message: '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。',
+    message: '小红书链接已失效或笔记不可见（分享链接过期、笔记被删除或设为私密）。请在手机上重新打开该笔记，点“分享 → 复制链接”后重新同步；重试原链接不会成功。',
     diagnostic: {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1',
         matchesManifest: true,
       },
       request: {
@@ -13249,7 +13265,7 @@ async function runLocalTranscriptionEntitlementTests() {
     fs.writeFileSync(path.join(asrReadyRoot, 'transcribe.ps1'), currentWindowsAsrScriptSource, 'utf8');
     fs.writeFileSync(path.join(asrReadyRoot, 'bin', 'whisper-cli.exe'), 'ready-whisper', 'utf8');
     fs.writeFileSync(path.join(asrReadyRoot, 'bin', 'ffmpeg.exe'), 'ready-ffmpeg', 'utf8');
-    fs.writeFileSync(path.join(asrReadyRoot, 'models', 'ggml-small.bin'), 'ready-model', 'utf8');
+    fs.writeFileSync(path.join(asrReadyRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), 'ready-model', 'utf8');
 
     const alreadyReadyAsrPlugin = new PluginClass();
     alreadyReadyAsrPlugin.settings = helpers.mergeSettings({
@@ -14269,13 +14285,13 @@ async function runLocalAsrRepairDecisionTests() {
   fs.writeFileSync(path.join(installedRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
   fs.writeFileSync(path.join(installedRoot, 'whisper', 'whisper-cli.exe'), 'existing-whisper', 'utf8');
   fs.writeFileSync(path.join(installedRoot, 'ffmpeg', 'ffmpeg.exe'), 'existing-ffmpeg', 'utf8');
-  fs.writeFileSync(path.join(installedRoot, 'models', 'ggml-small.bin'), 'existing-model', 'utf8');
+  fs.writeFileSync(path.join(installedRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), 'existing-model', 'utf8');
   fs.writeFileSync(bundledInstallerPath, windowsAsrInstallerSource, 'utf8');
   const installedSnapshot = [
     'transcribe.ps1',
     path.join('whisper', 'whisper-cli.exe'),
     path.join('ffmpeg', 'ffmpeg.exe'),
-    path.join('models', 'ggml-small.bin'),
+    path.join('models', 'ggml-large-v3-turbo-q5_0.bin'),
   ].map((relativePath) => [relativePath, fs.readFileSync(path.join(installedRoot, relativePath), 'utf8')]);
   const installerMatrixPlugin = new PluginClass();
   installerMatrixPlugin.settings = helpers.mergeSettings({

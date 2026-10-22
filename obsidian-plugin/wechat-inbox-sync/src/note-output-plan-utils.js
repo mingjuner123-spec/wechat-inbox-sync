@@ -3,6 +3,8 @@ const { formatTranscriptForReading } = require('./readable-content-utils');
 
 const { toSimplifiedChinese } = require('./transcription-quality-utils');
 
+const { buildTranscriptSegmentsMarkdown, transcriptSegmentsCoverText } = require('./transcript-segment-utils');
+
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
     throw new TypeError(`note output dependency is required: ${name}`);
@@ -188,7 +190,20 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
       const errorText = metadata.transcriptionError || metadata.aiError || '';
       const transcription = formatTranscriptForReading(toSimplifiedChinese(metadata.transcription || ''))
         || (metadata.transcriptionStatus === 'failed' ? `语音转写失败。${errorText}` : '未开启语音转写。');
-      body = ['## 转写全文', '', transcription, '', '## 录音文件', '', `![[${audioFileName}]]`, ''].join('\n');
+      const segmentsMarkdown = buildTranscriptSegmentsMarkdown(metadata.transcriptionSegments || []);
+      const hasFullSegments = segmentsMarkdown
+        && transcriptSegmentsCoverText(metadata.transcriptionSegments || [], metadata.transcription || '');
+      body = [
+        hasFullSegments ? '' : '## 转写全文',
+        '',
+        hasFullSegments ? '' : transcription,
+        '',
+        segmentsMarkdown,
+        '## 录音文件',
+        '',
+        `![[${audioFileName}]]`,
+        '',
+      ].filter((line) => line !== '').join('\n');
     } else if (type === 'file') {
       body = helpers.buildFileMarkdownBody(record);
     } else {
