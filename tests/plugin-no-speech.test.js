@@ -77,7 +77,9 @@ async function run() {
   await assert.rejects(configured.runConfiguredTranscription(media.mediaUrl, { allowCloudUrlFallback: true }), { code: 'TRANSCRIPTION_NO_SPEECH' });
   assert.equal(cloudCalls, 0);
   configured.runLocalTranscription = async () => { throw new Error('native crash'); };
-  await configured.runConfiguredTranscription(media.mediaUrl, { allowCloudUrlFallback: true });
+  // URL fallback is a Douyin-only capability; every other platform link is
+  // refused instead of being submitted to the cloud worker.
+  await configured.runConfiguredTranscription('https://www.douyin.com/video/7644238277092174409', { allowCloudUrlFallback: true });
   assert.equal(cloudCalls, 1, 'real failures retain existing fallback');
 
   const p = fixture(); let attempts = 0;
