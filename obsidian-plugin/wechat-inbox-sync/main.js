@@ -8759,13 +8759,11 @@ $WhisperWindowsCompatibilityUrls = @($env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL) |
 $WhisperWindowsCompatibilitySha256 = '7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7'
 $FfmpegAuthorizedUrls = @($env:WECHAT_INBOX_ASR_FFMPEG_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $ModelAuthorizedUrls = @($env:WECHAT_INBOX_ASR_MODEL_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-# "small" mis-hears Chinese dialects, names and crosstalk badly. The turbo
-# large-v3 quantization is about twelve times the compute and roughly three
-# times slower than real time on a desktop CPU, which is the right trade for
-# a transcript that is then read instead of listened to.
-$WhisperModelFileName = "ggml-large-v3-turbo-q5_0.bin"
-$WhisperModelMinBytes = 500MB
-$LegacyWhisperModelFileName = "ggml-small.bin"
+# Keep the model that the cloud component catalog actually authorizes for
+# Windows. Changing this file name without also publishing the matching model
+# asset makes every fresh install fail its size check.
+$WhisperModelFileName = "ggml-small.bin"
+$WhisperModelMinBytes = 400MB
 $ModelFallbackUrls = @(
   "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/$WhisperModelFileName"
 )
@@ -10120,12 +10118,6 @@ try {
   }
 
   Assert-DownloadedFile -Path $modelPath -MinBytes $WhisperModelMinBytes -Label "Whisper model" | Out-Null
-  # The previous "small" model is no longer used; it would otherwise keep
-  # half a gigabyte of dead weights around after the upgrade.
-  $legacyModelPath = Join-Path $ModelDir $LegacyWhisperModelFileName
-  if ((Test-Path -LiteralPath $legacyModelPath) -and $LegacyWhisperModelFileName -ne $WhisperModelFileName) {
-    Remove-Item -LiteralPath $legacyModelPath -Force -ErrorAction SilentlyContinue
-  }
 
   try {
     Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
@@ -10200,10 +10192,10 @@ if (-not $Ffmpeg) {
   throw "ffmpeg.exe not found. Please rerun install-local-asr.ps1."
 }
 
-$ModelFileName = "ggml-large-v3-turbo-q5_0.bin"
+$ModelFileName = "ggml-small.bin"
 $Model = Join-Path $Root "models\\$ModelFileName"
-# whisper.cpp defaults to four threads on every machine. The large model makes
-# transcription the slowest stage of a sync, so use the cores that are there.
+# whisper.cpp defaults to four threads on every machine. Transcription is the
+# slowest stage of a sync, so use the cores that are there.
 $WhisperThreads = [Math]::Max(4, [Math]::Min(16, [Environment]::ProcessorCount))
 if (-not (Test-Path -LiteralPath $Model)) {
   throw "Whisper model not found: $Model"
@@ -22040,7 +22032,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.197";
+var PLUGIN_RUNTIME_VERSION = "1.3.198";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -22721,7 +22713,7 @@ function findFirstExistingPath(candidates, exists) {
 }
 __name(findFirstExistingPath, "findFirstExistingPath");
 var LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = "509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb";
-var WINDOWS_ASR_MODEL_FILE_NAME = "ggml-large-v3-turbo-q5_0.bin";
+var WINDOWS_ASR_MODEL_FILE_NAME = "ggml-small.bin";
 var MACOS_ASR_MODEL_FILE_NAME = "ggml-small.bin";
 function getLocalAsrModelFileName(platform = os.platform()) {
   return getLocalAsrPlatform(platform) === "darwin" ? MACOS_ASR_MODEL_FILE_NAME : WINDOWS_ASR_MODEL_FILE_NAME;

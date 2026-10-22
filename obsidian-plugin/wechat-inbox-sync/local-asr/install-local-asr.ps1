@@ -28,13 +28,11 @@ $WhisperWindowsCompatibilityUrls = @($env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL) |
 $WhisperWindowsCompatibilitySha256 = '7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7'
 $FfmpegAuthorizedUrls = @($env:WECHAT_INBOX_ASR_FFMPEG_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $ModelAuthorizedUrls = @($env:WECHAT_INBOX_ASR_MODEL_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-# "small" mis-hears Chinese dialects, names and crosstalk badly. The turbo
-# large-v3 quantization is about twelve times the compute and roughly three
-# times slower than real time on a desktop CPU, which is the right trade for
-# a transcript that is then read instead of listened to.
-$WhisperModelFileName = "ggml-large-v3-turbo-q5_0.bin"
-$WhisperModelMinBytes = 500MB
-$LegacyWhisperModelFileName = "ggml-small.bin"
+# Keep the model that the cloud component catalog actually authorizes for
+# Windows. Changing this file name without also publishing the matching model
+# asset makes every fresh install fail its size check.
+$WhisperModelFileName = "ggml-small.bin"
+$WhisperModelMinBytes = 400MB
 $ModelFallbackUrls = @(
   "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/$WhisperModelFileName"
 )
@@ -1389,12 +1387,6 @@ try {
   }
 
   Assert-DownloadedFile -Path $modelPath -MinBytes $WhisperModelMinBytes -Label "Whisper model" | Out-Null
-  # The previous "small" model is no longer used; it would otherwise keep
-  # half a gigabyte of dead weights around after the upgrade.
-  $legacyModelPath = Join-Path $ModelDir $LegacyWhisperModelFileName
-  if ((Test-Path -LiteralPath $legacyModelPath) -and $LegacyWhisperModelFileName -ne $WhisperModelFileName) {
-    Remove-Item -LiteralPath $legacyModelPath -Force -ErrorAction SilentlyContinue
-  }
 
   try {
     Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
@@ -1469,10 +1461,10 @@ if (-not $Ffmpeg) {
   throw "ffmpeg.exe not found. Please rerun install-local-asr.ps1."
 }
 
-$ModelFileName = "ggml-large-v3-turbo-q5_0.bin"
+$ModelFileName = "ggml-small.bin"
 $Model = Join-Path $Root "models\$ModelFileName"
-# whisper.cpp defaults to four threads on every machine. The large model makes
-# transcription the slowest stage of a sync, so use the cores that are there.
+# whisper.cpp defaults to four threads on every machine. Transcription is the
+# slowest stage of a sync, so use the cores that are there.
 $WhisperThreads = [Math]::Max(4, [Math]::Min(16, [Environment]::ProcessorCount))
 if (-not (Test-Path -LiteralPath $Model)) {
   throw "Whisper model not found: $Model"

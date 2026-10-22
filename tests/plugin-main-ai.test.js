@@ -3855,7 +3855,7 @@ assert.deepStrictEqual(
     transcribeScript: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
     whisperPath: '',
     ffmpegPath: '',
-    modelPath: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-large-v3-turbo-q5_0.bin',
+    modelPath: 'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
     hasTranscribeScript: true,
     scriptVersion: 'unknown',
     scriptOutdated: false,
@@ -3896,7 +3896,7 @@ const completeWindowsAsrStatus = helpers.getLocalAsrInstallStatus('C:\\Users\\de
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\transcribe.ps1',
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe',
   'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe',
-  'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-large-v3-turbo-q5_0.bin',
+  'C:\\Users\\demo\\.wechat-inbox-local-asr\\models\\ggml-small.bin',
 ].includes(filePath), 'win32');
 assert.strictEqual(completeWindowsAsrStatus.whisperPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\whisper\\whisper-cli.exe');
 assert.strictEqual(completeWindowsAsrStatus.ffmpegPath, 'C:\\Users\\demo\\.wechat-inbox-local-asr\\ffmpeg\\ffmpeg.exe');
@@ -3909,7 +3909,7 @@ assert.deepStrictEqual(completeWindowsAsrStatus.missingReasons, []);
   fs.writeFileSync(path.join(tempAsrRoot, 'whisper', 'Release', 'main.exe'), '');
   fs.writeFileSync(path.join(tempAsrRoot, 'whisper', 'Release', 'whisper-cli.exe'), '');
   fs.writeFileSync(path.join(tempAsrRoot, 'ffmpeg', 'bin', 'ffmpeg.exe'), '');
-  fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), '');
+  fs.writeFileSync(path.join(tempAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(
     path.join(tempAsrRoot, 'transcribe.ps1'),
     currentWindowsAsrScriptSource,
@@ -4037,7 +4037,7 @@ assert.deepStrictEqual(
   fs.mkdirSync(path.join(tempLegacyAsrRoot, 'models'), { recursive: true });
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'whisper', 'whisper-cli.exe'), '');
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
-  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), '');
+  fs.writeFileSync(path.join(tempLegacyAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(path.join(tempLegacyAsrRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
   const legacyStatus = helpers.getLocalAsrInstallStatus(
     tempLegacyAsrRoot,
@@ -4058,7 +4058,7 @@ assert.deepStrictEqual(
   fs.mkdirSync(path.join(tempPreviousAsrRoot, 'models'), { recursive: true });
   fs.writeFileSync(path.join(tempPreviousAsrRoot, 'whisper', 'whisper-cli.exe'), '');
   fs.writeFileSync(path.join(tempPreviousAsrRoot, 'ffmpeg', 'ffmpeg.exe'), '');
-  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), '');
+  fs.writeFileSync(path.join(tempPreviousAsrRoot, 'models', 'ggml-small.bin'), '');
   fs.writeFileSync(path.join(tempPreviousAsrRoot, 'transcribe.ps1'), previousDiagnosticsWindowsAsrScriptSource, 'utf8');
   const previousStatus = helpers.getLocalAsrInstallStatus(
     tempPreviousAsrRoot,
@@ -13265,7 +13265,7 @@ async function runLocalTranscriptionEntitlementTests() {
     fs.writeFileSync(path.join(asrReadyRoot, 'transcribe.ps1'), currentWindowsAsrScriptSource, 'utf8');
     fs.writeFileSync(path.join(asrReadyRoot, 'bin', 'whisper-cli.exe'), 'ready-whisper', 'utf8');
     fs.writeFileSync(path.join(asrReadyRoot, 'bin', 'ffmpeg.exe'), 'ready-ffmpeg', 'utf8');
-    fs.writeFileSync(path.join(asrReadyRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), 'ready-model', 'utf8');
+    fs.writeFileSync(path.join(asrReadyRoot, 'models', 'ggml-small.bin'), 'ready-model', 'utf8');
 
     const alreadyReadyAsrPlugin = new PluginClass();
     alreadyReadyAsrPlugin.settings = helpers.mergeSettings({
@@ -14285,13 +14285,13 @@ async function runLocalAsrRepairDecisionTests() {
   fs.writeFileSync(path.join(installedRoot, 'transcribe.ps1'), historicalWindowsAsrScriptSource, 'utf8');
   fs.writeFileSync(path.join(installedRoot, 'whisper', 'whisper-cli.exe'), 'existing-whisper', 'utf8');
   fs.writeFileSync(path.join(installedRoot, 'ffmpeg', 'ffmpeg.exe'), 'existing-ffmpeg', 'utf8');
-  fs.writeFileSync(path.join(installedRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), 'existing-model', 'utf8');
+  fs.writeFileSync(path.join(installedRoot, 'models', 'ggml-small.bin'), 'existing-model', 'utf8');
   fs.writeFileSync(bundledInstallerPath, windowsAsrInstallerSource, 'utf8');
   const installedSnapshot = [
     'transcribe.ps1',
     path.join('whisper', 'whisper-cli.exe'),
     path.join('ffmpeg', 'ffmpeg.exe'),
-    path.join('models', 'ggml-large-v3-turbo-q5_0.bin'),
+    path.join('models', 'ggml-small.bin'),
   ].map((relativePath) => [relativePath, fs.readFileSync(path.join(installedRoot, relativePath), 'utf8')]);
   const installerMatrixPlugin = new PluginClass();
   installerMatrixPlugin.settings = helpers.mergeSettings({

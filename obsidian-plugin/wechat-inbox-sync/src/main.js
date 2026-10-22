@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.197';
+const PLUGIN_RUNTIME_VERSION = '1.3.198';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1086,9 +1086,10 @@ function findFirstExistingPath(candidates, exists) {
 const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = 'a11f47811ac81b61b2be03276141e80ff54f5324f25517e657c146a0f0619b36';
 const PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256 = 'c8b8ddb02863428f7f0a4af1e408591d4a9533336c47df8a04f1d50d95bef3db';
 const LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = '509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb';
-// The installer moves on to a bigger Whisper model on its own schedule, so the
-// readiness check has to know which file each platform is expected to have.
-const WINDOWS_ASR_MODEL_FILE_NAME = 'ggml-large-v3-turbo-q5_0.bin';
+// The readiness check must look for the model the shipped installer writes and
+// the cloud component catalog authorizes, or every install reports a missing
+// model even when the download succeeded.
+const WINDOWS_ASR_MODEL_FILE_NAME = 'ggml-small.bin';
 const MACOS_ASR_MODEL_FILE_NAME = 'ggml-small.bin';
 
 function getLocalAsrModelFileName(platform = os.platform()) {
