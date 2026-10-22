@@ -37,13 +37,15 @@ function buildSkippedSyncNotice(skipped = []) {
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
   const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === 'locally-quarantined-unrecoverable').length;
   const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === 'deleted-expired-xhs-shortlink').length;
+  const xiaohongshuRateLimitedCount = skipped.filter((item) => item && item.reason === 'xiaohongshu-rate-limited').length;
   const otherSkippedCount = skipped.filter((item) => item
     && item.reason !== 'already-synced-local'
     && item.reason !== 'failed-awaiting-manual-retry'
     && item.reason !== 'failure-report-pending'
     && item.reason !== 'cloud-transcription-processing'
     && item.reason !== 'locally-quarantined-unrecoverable'
-    && item.reason !== 'deleted-expired-xhs-shortlink').length;
+    && item.reason !== 'deleted-expired-xhs-shortlink'
+    && item.reason !== 'xiaohongshu-rate-limited').length;
   const parts = [];
   if (cloudProcessingCount) {
     parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
@@ -53,6 +55,9 @@ function buildSkippedSyncNotice(skipped = []) {
   }
   if (deletedExpiredXiaohongshuCount) {
     parts.push(`${deletedExpiredXiaohongshuCount} 条原小红书临时链接已失效，已生成失效说明文件并删除云端旧记录；请重新复制原笔记链接后再保存`);
+  }
+  if (xiaohongshuRateLimitedCount) {
+    parts.push(`${xiaohongshuRateLimitedCount} 条小红书内容本次未同步（平台提示请求过于频繁），记录已保留，下次同步会继续尝试`);
   }
   if (otherSkippedCount) {
     parts.push(`${otherSkippedCount} 条已跳过`);

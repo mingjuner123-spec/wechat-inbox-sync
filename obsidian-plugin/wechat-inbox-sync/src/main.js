@@ -17,6 +17,7 @@ function retainedSyncFailureDiagnostic(value, settings) {
   return channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value);
 }
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
+const { createTranscriptMediaPlayer } = require('./transcript-media-player');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
 const asrTimeoutProcessGroup = require('./asr-timeout-process-group');
@@ -105,6 +106,7 @@ const {
   isCloudFallbackJobTerminal,
   isCloudFallbackJobPending,
   normalizeCloudFallbackSourceType,
+  isCloudFallbackUrlSourceType,
   isControlledCloudFallbackFileId,
 } = require('./cloud-fallback-job-utils');
 const {
@@ -228,6 +230,23 @@ const {
   normalizeWechatArticleUrl,
 } = require('./wechat-article-utils');
 const {
+  extractPlatformArticleFromHtml,
+  getPlatformArticleKind,
+  getPlatformArticleLabel,
+  getPlatformArticleReferer,
+  isAllowedPlatformArticleNavigation,
+  isPlatformArticleUrl,
+  isToutiaoUrl,
+  isZhihuUrl,
+  normalizePlatformArticleUrl,
+} = require('./platform-article-utils');
+const {
+  buildTranscriptSegmentsMarkdown,
+  extractDoubaoUtteranceSegments,
+  normalizeTranscriptSegments,
+  parseTranscriptSegmentsSidecar,
+} = require('./transcript-segment-utils');
+const {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
   getAttachmentExt,
@@ -334,6 +353,13 @@ const WECHAT_SESSION_PARTITION = 'persist:wechat-inbox-wechat';
 const WECHAT_ARTICLE_DESKTOP_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36';
 const WECHAT_ARTICLE_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
+// Xiaohongshu serves a public note to its mobile web surface. The same note URL
+// requested with a desktop Chrome UA is answered with a 302 to
+// /login?redirectPath=... whenever the caller has no Xiaohongshu cookie, which
+// made the static note request accept a login page as note content. The static
+// document request must present the mobile surface; media downloads are not
+// affected by this and keep the shared social headers.
+const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
 const PLUGIN_RUNTIME_VERSION = '1.3.195';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1';
 
@@ -528,6 +554,8 @@ const DEFAULT_SETTINGS = {
   xiaohongshuImageOcrEnabled: false,
   xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
+  transcriptTimestampsEnabled: true,
+  transcriptScreenshotEnabled: false,
   socialArticleImageStorageMode: 'remote',
   socialArticleImageStorageModeConfigured: false,
   wechatChannelsExperimentUrl: '',
@@ -1052,9 +1080,20 @@ function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || '';
 }
 
-const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = 'd2c3f1b263a31e53a8758eff8c6a14c77370736f04c51558c5bf5b0ba853f845';
-const PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256 = '53bc6ffde07cd5d3828b20020ac4d7cfa56d775d0bd9e86d2e6fa8cdf4fc2c42';
+// Published build identities, kept for reference. They are not a compatibility
+// gate: a script that still speaks the expected protocol keeps working after a
+// local update, so it is judged by its markers, not by its bytes.
+const CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = 'a11f47811ac81b61b2be03276141e80ff54f5324f25517e657c146a0f0619b36';
+const PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256 = 'c8b8ddb02863428f7f0a4af1e408591d4a9533336c47df8a04f1d50d95bef3db';
 const LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = '509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb';
+// The installer moves on to a bigger Whisper model on its own schedule, so the
+// readiness check has to know which file each platform is expected to have.
+const WINDOWS_ASR_MODEL_FILE_NAME = 'ggml-large-v3-turbo-q5_0.bin';
+const MACOS_ASR_MODEL_FILE_NAME = 'ggml-small.bin';
+
+function getLocalAsrModelFileName(platform = os.platform()) {
+  return getLocalAsrPlatform(platform) === 'darwin' ? MACOS_ASR_MODEL_FILE_NAME : WINDOWS_ASR_MODEL_FILE_NAME;
+}
 
 function getLocalAsrScriptIdentityHash(source) {
   const normalizedSource = String(source || '')
@@ -1130,12 +1169,11 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       nativeProcessRunnerVersion: 'diagnostics-process-v2',
       requireHandleInitialization: true,
     })) {
-      if (sourceIdentityHash !== CURRENT_WINDOWS_ASR_SCRIPT_SHA256) {
-        return {
-          scriptVersion: 'current-signature-mismatch',
-          scriptOutdated: true,
-        };
-      }
+      // The protocol markers above are the compatibility contract; the file
+      // hash only identifies which build it is. A script that was updated
+      // locally or extended with a new feature still speaks the same protocol,
+      // so it keeps working and must not be reported as outdated — that would
+      // push the user into a needless reinstall.
       return {
         scriptVersion: 'adaptive-chunked-diagnostics-process-v2-repeat-guard-v2-heartbeat-run-log',
         scriptOutdated: false,
@@ -1144,12 +1182,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     if (hasDiagnosticsProcessAsrRuntimeFeatures(source, {
       nativeProcessRunnerVersion: 'diagnostics-process-v1',
     })) {
-      if (sourceIdentityHash !== PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256) {
-        return {
-          scriptVersion: 'diagnostics-process-v1-signature-mismatch',
-          scriptOutdated: true,
-        };
-      }
+      // Same rule for the previous protocol: usable now, optional upgrade only.
       return {
         scriptVersion: 'adaptive-chunked-diagnostics-process-v1-repeat-guard-v2-heartbeat-run-log',
         scriptOutdated: false,
@@ -1455,7 +1488,7 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
 function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
   const isMac = getLocalAsrPlatform(platform) === 'darwin';
   const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? 'transcribe.sh' : 'transcribe.ps1');
-  const modelPath = joinLocalAsrPath(platform, installRoot, 'models', 'ggml-small.bin');
+  const modelPath = joinLocalAsrPath(platform, installRoot, 'models', getLocalAsrModelFileName(platform));
   const hasTranscribeScript = exists(transcribeScript);
   const scriptVersionStatus = exists === fs.existsSync
     ? getLocalAsrScriptVersionStatus(transcribeScript)
@@ -1845,8 +1878,8 @@ function getLocalAsrInstallProgressSnapshot(installRoot, fileSystem = fs) {
   const candidates = [
     ['cache', 'whisper.zip'],
     ['cache', 'ffmpeg.zip'],
-    ['cache', 'ggml-small.bin'],
-    ['models', 'ggml-small.bin'],
+    ['cache', WINDOWS_ASR_MODEL_FILE_NAME],
+    ['models', WINDOWS_ASR_MODEL_FILE_NAME],
     ['whisper'],
     ['ffmpeg'],
     ['transcribe.ps1'],
@@ -2950,6 +2983,21 @@ function getXiaohongshuCapabilityMatrix({
   };
 }
 
+// OCR is a per-note decision, not a per-link-intent decision. The mini program
+// tags every xhslink.com/a/ share as audio_video, so `webpageMediaType` says
+// nothing about whether this particular note is a video; a graphic note that
+// arrives with video intent still has images whose text the user asked to have
+// extracted. Only real evidence of a video (a resolved media URL) skips OCR.
+function shouldRunXiaohongshuImageOcr({
+  capabilities = {},
+  extracted = null,
+  mediaUrl = '',
+} = {}) {
+  const matrix = capabilities && typeof capabilities === 'object' ? capabilities : {};
+  if (matrix.imageOcr !== true) return false;
+  return !mediaUrl && !(extracted && extracted.videoUrl);
+}
+
 function getXiaohongshuBrowserCandidates(
   sourceUrl = '',
   targetIdentityUrl = '',
@@ -2980,11 +3028,19 @@ function isXiaohongshuShareBoilerplateOnly(extracted) {
   return hasShareInstruction && (hasShareLink || source.replace(/\s+/g, '').length <= 80);
 }
 
+function isXiaohongshuLoginLandingUrl(url) {
+  try {
+    const parsed = new URL(String(url || '').trim());
+    return isHostnameWithinDomain(parsed.hostname, 'xiaohongshu.com')
+      && /^\/login(?:\/|$)/i.test(parsed.pathname);
+  } catch (error) {
+    return false;
+  }
+}
+
 function isXiaohongshuLoginLanding(html, url = '', extracted = null) {
   const source = String(html || '');
-  try {
-    if (/^\/login(?:\/|$)/i.test(new URL(String(url || '')).pathname)) return true;
-  } catch {}
+  if (isXiaohongshuLoginLandingUrl(url)) return true;
   if (extracted && extracted.xiaohongshuPrimaryNoteMatched === true) return false;
   const title = String(extractHtmlTitle(source) || '').trim();
   const normalizedTitle = title.toLowerCase().replace(/\s+/g, '')
@@ -3078,6 +3134,7 @@ function buildXiaohongshuFailureDiagnostic({
       redirected: Boolean(source.host && final.host && source.host !== final.host),
       responseStatus: Number(responseStatus) || 0,
       pageType: classifyXiaohongshuPage({ html, resolvedUrl, extracted }),
+      loginLanding: isXiaohongshuLoginLanding(html, resolvedUrl, extracted),
       renderFailed: Boolean(renderError),
       requestFailed: Boolean(requestError),
       browserTimedOut: Boolean(
@@ -3118,8 +3175,37 @@ function buildXiaohongshuFailureDiagnostic({
   };
 }
 
+// A share link whose xsec_token expired (or a note that was deleted or made
+// private) resolves to a generic landing page: no note payload, no title, no
+// images. Retrying that exact link can never succeed, so it must not be
+// reported as a transient extraction failure the user should retry.
+function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
+  const source = diagnostic && typeof diagnostic === 'object' ? diagnostic : {};
+  const request = source.request && typeof source.request === 'object' ? source.request : {};
+  const extraction = source.extraction && typeof source.extraction === 'object' ? source.extraction : {};
+  const pageType = String(request.pageType || '');
+  const looksLikeLanding = extraction.genericLanding === true
+    || extraction.unavailablePage === true
+    || ['xiaohongshu-generic-landing', 'xiaohongshu-unavailable'].includes(pageType);
+  if (!looksLikeLanding) return false;
+  return (Number(extraction.bodyCharacterCount) || 0) <= 0
+    && (Number(extraction.imageCount) || 0) <= 0;
+}
+
+function describeXiaohongshuContentFailure(diagnostic = {}) {
+  const source = diagnostic && typeof diagnostic === 'object' ? diagnostic : {};
+  const request = source.request && typeof source.request === 'object' ? source.request : {};
+  if (request.loginLanding === true) {
+    return '小红书要求登录后才能查看这条笔记，正文没有读到。请在小红书 App 里确认该笔记可以公开访问，重新“分享 → 复制链接”后再同步。';
+  }
+  if (isExpiredXiaohongshuLinkDiagnostic(source)) {
+    return '小红书链接已失效或笔记不可见（分享链接过期、笔记被删除或设为私密）。请在手机上重新打开该笔记，点“分享 → 复制链接”后重新同步；重试原链接不会成功。';
+  }
+  return '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。';
+}
+
 function createRetryableXiaohongshuContentError(diagnostic = {}) {
-  const error = new Error('小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。');
+  const error = new Error(describeXiaohongshuContentFailure(diagnostic));
   error.retryable = true;
   error.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
   error.diagnostic = redactSensitiveObject(
@@ -3525,6 +3611,11 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1
     && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
+  // Jump-to-playback is the fastest way into a long transcript, so it is on for
+  // everyone who has not switched it off. Screenshots write files, so those stay
+  // opt-in.
+  merged.transcriptTimestampsEnabled = sourceSettings.transcriptTimestampsEnabled !== false;
+  merged.transcriptScreenshotEnabled = merged.transcriptScreenshotEnabled === true;
   const hasLegacyImageStoragePreference = Object.prototype.hasOwnProperty.call(sourceSettings, 'wechatArticleImageStorageMode');
   const hasExplicitSocialImageStoragePreference = sourceSettings.socialArticleImageStorageModeConfigured === true;
   merged.socialArticleImageStorageMode = hasExplicitSocialImageStoragePreference || hasLegacyImageStoragePreference
@@ -3751,8 +3842,8 @@ function getActiveCloudFallbackLifecycle(record) {
   return { enabled: true, attemptId, leaseUntil, resumedCloudFallback: true };
 }
 
-function createCloudFallbackPendingError(job, localError = '') {
-  const error = new Error('云端兜底任务已提交，等待转写结果');
+function createCloudFallbackPendingError(job, localError = '', message = '') {
+  const error = new Error(String(message || '').trim() || '云端兜底任务已提交，等待转写结果');
   error.code = 'CLOUD_FALLBACK_QUEUED';
   error.cloudFallbackJob = job || null;
   error.localError = String(localError || '').trim();
@@ -4834,7 +4925,8 @@ function isXiaohongshuUrl(url) {
 function isSocialArticleUrl(sourceUrl) {
   return isWechatArticleUrl(sourceUrl)
     || isFeishuUrl(sourceUrl)
-    || isXiaohongshuUrl(sourceUrl);
+    || isXiaohongshuUrl(sourceUrl)
+    || isPlatformArticleUrl(sourceUrl);
 }
 
 function shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageMode) {
@@ -4889,6 +4981,14 @@ function isTrustedXiaohongshuTransportUrl(url) {
   } catch (error) {
     return false;
   }
+}
+
+// Xiaohongshu note media is served from the xhscdn.com CDN, which is a different
+// origin from the note page. Media download recovery needs to recognise it even
+// when the note URL itself is not part of the request.
+function isXiaohongshuMediaUrl(url) {
+  const hostname = getHttpUrlHostname(url);
+  return isHostnameWithinDomain(hostname, 'xhscdn.com');
 }
 
 const {
@@ -5107,7 +5207,8 @@ function shouldHydrateLinkAsWebpage(url) {
     || isXiaohongshuUrl(url)
     || isDouyinUrl(url)
     || isBilibiliUrl(url)
-    || isXiaoyuzhouUrl(url);
+    || isXiaoyuzhouUrl(url)
+    || isPlatformArticleUrl(url);
 }
 
 function isSafeAutomaticWebpageUrl(url) {
@@ -5136,7 +5237,9 @@ function isTrustedAutomaticPlatformUrl(url) {
     || isHostnameWithinDomain(hostname, 'bilibili.com')
     || isHostnameWithinDomain(hostname, 'b23.tv')
     || isHostnameWithinDomain(hostname, 'xiaoyuzhoufm.com')
-    || isHostnameWithinDomain(hostname, 'xiaoyuzhou.com');
+    || isHostnameWithinDomain(hostname, 'xiaoyuzhou.com')
+    || isHostnameWithinDomain(hostname, 'zhihu.com')
+    || isHostnameWithinDomain(hostname, 'toutiao.com');
 }
 
 function extractAutomaticWebpageUrlCandidates(text) {
@@ -5351,6 +5454,7 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
     || null;
   const bilibiliCause = bilibiliDiagnostic.sanitize(cause);
   if (bilibiliCause) return { source: 'automatic-webpage', stage: 'hydration', cause: bilibiliCause };
+  const conversionError = String(metadata.conversionError || '').trim().slice(0, 200);
   return redactSensitiveObject({
     source: 'automatic-webpage',
     stage: 'hydration',
@@ -5359,6 +5463,7 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
     sourceHost: getSafeUrlDiagnostic(url).host || 'unknown-host',
     conversionStatus: String(metadata.conversionStatus || '').toLowerCase() || 'unknown',
     transcriptionStatus: String(metadata.transcriptionStatus || '').toLowerCase() || 'unknown',
+    ...(conversionError ? { reason: conversionError } : {}),
     ...(cause && typeof cause === 'object' ? { cause } : {}),
     ...(xiaohongshuBrowserDiagnostic && typeof xiaohongshuBrowserDiagnostic === 'object'
       ? { xiaohongshuBrowser: xiaohongshuBrowserDiagnostic }
@@ -5368,7 +5473,14 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
 
 function createAutomaticWebpageExtractionError(url, diagnostic = null) {
   const host = getSafeUrlDiagnostic(url).host || 'unknown-host';
-  const error = new Error(bilibiliDiagnostic.summary(diagnostic) || `剪切板链接网页提取失败，已保留待重试：${host}`);
+  const base = bilibiliDiagnostic.summary(diagnostic) || `剪切板链接网页提取失败，已保留待重试：${host}`;
+  // Carry the concrete cause into the failure line so the user does not have to
+  // copy a diagnostic just to learn whether this was a login wall, a network
+  // block or an unsupported page.
+  const cause = diagnostic && diagnostic.cause && typeof diagnostic.cause === 'object'
+    ? String(diagnostic.cause.reason || '').trim()
+    : String(diagnostic && diagnostic.reason || '').trim();
+  const error = new Error(cause ? `${base}（${cause.slice(0, 80)}）` : base);
   error.code = 'AUTOMATIC_WEBPAGE_EXTRACTION_FAILED';
   if (diagnostic && typeof diagnostic === 'object') {
     error.diagnostic = bilibiliDiagnostic.sanitize(diagnostic) || redactSensitiveObject(diagnostic);
@@ -5388,7 +5500,19 @@ function getSocialRequestHeaders(url) {
   if (isDouyinUrl(url) || isDouyinMediaUrl(url)) headers.Referer = 'https://www.douyin.com/';
   if (isXiaoyuzhouUrl(url)) headers.Referer = 'https://www.xiaoyuzhoufm.com/';
   if (isWechatChannelsUrl(url) || isWechatChannelsMediaUrl(url)) headers.Referer = 'https://channels.weixin.qq.com/';
+  if (isPlatformArticleUrl(url)) headers.Referer = getPlatformArticleReferer(url);
   return headers;
+}
+
+// A public note document is only readable from the Xiaohongshu mobile surface;
+// the desktop Chrome UA is redirected to the login page. This header set is for
+// the note document request only, never for media or API requests.
+function getXiaohongshuDocumentRequestHeaders(url) {
+  return {
+    ...getSocialRequestHeaders(url),
+    'User-Agent': XIAOHONGSHU_MOBILE_USER_AGENT,
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  };
 }
 
 function isHeaderProtectedMediaUrl(url) {
@@ -5637,6 +5761,7 @@ function getWebpageSourcePrefix(url) {
   if (isDouyinUrl(url)) return '抖音';
   if (isBilibiliUrl(url)) return 'B站';
   if (isXiaoyuzhouUrl(url)) return '小宇宙';
+  if (isPlatformArticleUrl(url)) return getPlatformArticleLabel(url);
   return '网页';
 }
 
@@ -6194,6 +6319,41 @@ function installDouyinExtractionNavigationGuards(webContents, initialUrl) {
   webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }
 
+function installPlatformArticleNavigationGuards(webContents, platform, initialUrl) {
+  // Only call on the dedicated, not-yet-loaded platform window. Obsidian installs
+  // a will-navigate listener on every web contents that cancels page redirects and
+  // forwards them to shell.openExternal. Toutiao bounces an article load through
+  // such a redirect, so the article used to open in the system browser (the visible
+  // popup) and the extraction window was left without any content.
+  if (!webContents || typeof webContents.removeAllListeners !== 'function'
+    || typeof webContents.on !== 'function' || typeof webContents.setWindowOpenHandler !== 'function') {
+    throw new Error('无法隔离平台文章提取窗口的跳转处理');
+  }
+  // Programmatic loadURL does not emit will-navigate: validate the first URL too.
+  if (!isAllowedPlatformArticleNavigation(initialUrl, platform)) {
+    throw new Error('平台文章提取仅允许官方 HTTPS 页面');
+  }
+  // Electron remote wraps returned listeners: removeListener(proxy) cannot
+  // reliably remove Obsidian's inherited callback. This window is ours and has
+  // not loaded a page, so clear these events before adding our own guards.
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictNavigation = (event, navigation) => {
+    const value = typeof navigation === 'string' ? navigation
+      : (navigation && navigation.url) || (event && event.url);
+    if (!isAllowedPlatformArticleNavigation(value, platform) && event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+  };
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.on(eventName, restrictNavigation);
+  }
+  // A child window created by page-side window.open escapes the hidden renderer
+  // and becomes visible.
+  webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+}
+
 function createXiaohongshuBrowserDiagnostic(record = null) {
   return {
     source: 'xiaohongshu-browser',
@@ -6283,19 +6443,102 @@ function appendXiaohongshuBrowserFailure(options = {}, stage = '', error = null)
   });
 }
 
+// Xiaohongshu answers an over-frequent batch with its security wall. Two codes
+// are documented in the live pages: 300011 (account anomaly) and 300013
+// ("Too many requests. Try again later."). The platform publishes no QPS
+// figure, so a detected wall stops Xiaohongshu traffic for the remainder of the
+// current sync run instead of guessing thresholds. Nothing here is time-based:
+// the next sync run starts clean and unfinished records stay pending.
+let xiaohongshuRunRestriction = null;
+
 function detectXiaohongshuSecurityRestriction(text = '') {
-  const source = String(text || '');
-  const hasCode = /(?:^|\D)300011(?:\D|$)/.test(source);
+  // Only rendered text counts. A normal note ships inline scripts whose string
+  // tables can contain the same English error copy without the page being
+  // limited, so drop scripts and styles before looking for the wall.
+  const source = String(text || '')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ');
+  // Require digit boundaries so view counts such as 1300013 never match.
+  const hasRateLimitCode = /(?:^|\D)300013(?:\D|$)/.test(source);
+  const hasSecurityCode = /(?:^|\D)300011(?:\D|$)/.test(source);
+  // Pair the English wall with its reminder line; a note body may legitimately
+  // quote "too many requests" without the page itself being limited.
+  const hasRateLimitWall = /too\s+many\s+requests/i.test(source)
+    && /try\s+again\s+later|please\s+try\s+again|稍后重试|稍后再试|请求(?:过于|太)频繁/i.test(source);
+  const hasChineseRateLimitWall = /(?:请求|访问)(?:过于|太)频繁/.test(source)
+    && /稍后重试|稍后再试|请稍后/.test(source);
   const hasRestrictionWall = /安全限制/.test(source)
-    && /账号异常|请稍后重试|返回首页|我要反馈/.test(source);
-  if (!hasCode && !hasRestrictionWall) return null;
+    && /账号异常|请稍后重试|返回首页|我要反馈|Too\s+many\s+requests/i.test(source);
+  if (!hasRateLimitCode && !hasSecurityCode
+    && !hasRateLimitWall && !hasChineseRateLimitWall && !hasRestrictionWall) return null;
+  const rateLimited = hasRateLimitCode || hasRateLimitWall || hasChineseRateLimitWall;
   return {
-    code: hasCode ? '300011' : '',
-    kind: 'security_restriction',
+    code: hasRateLimitCode ? '300013' : (hasSecurityCode ? '300011' : ''),
+    kind: rateLimited ? 'rate_limited' : 'security_restriction',
   };
 }
 
-function recordXiaohongshuSecurityRestriction(options = {}, text = '', stage = '') {
+function markXiaohongshuRestriction(restriction = {}) {
+  if (!restriction || typeof restriction !== 'object') return null;
+  if (!xiaohongshuRunRestriction) {
+    xiaohongshuRunRestriction = {
+      code: String(restriction.code || ''),
+      kind: String(restriction.kind || 'security_restriction'),
+    };
+  }
+  return xiaohongshuRunRestriction;
+}
+
+function getActiveXiaohongshuRestriction() {
+  return xiaohongshuRunRestriction;
+}
+
+function clearXiaohongshuRestriction() {
+  xiaohongshuRunRestriction = null;
+}
+
+function isXiaohongshuRateLimitError(error) {
+  return Boolean(error && error.code === 'XIAOHONGSHU_RATE_LIMITED');
+}
+
+function createXiaohongshuRateLimitError(restriction = {}) {
+  const code = String(restriction && restriction.code || '').trim();
+  const error = new Error(
+    `小红书拒绝了当前请求${code ? `（${code}）` : ''}：平台提示请求过于频繁或需要安全验证。`
+    + '本次同步已停止继续访问小红书，未完成的记录会保留，下次同步时再试。',
+  );
+  error.code = 'XIAOHONGSHU_RATE_LIMITED';
+  error.retryable = true;
+  error.restriction = {
+    code,
+    kind: String(restriction && restriction.kind || 'rate_limited'),
+  };
+  return error;
+}
+
+function createXiaohongshuProRequiredError() {
+  // An XHS video note needs Pro for media transcription. This is a membership
+  // state, not an extraction or transcription defect, so it must not surface as
+  // "音视频转写失败" in the mini program's failure labels.
+  const error = new Error('小红书视频解析需要 Pro 权益，当前未开通或已到期。续期后重新同步即可。');
+  error.code = 'XIAOHONGSHU_PRO_REQUIRED';
+  error.retryable = true;
+  return error;
+}
+
+function throwIfXiaohongshuRestricted(options = {}, stage = '') {
+  const restriction = getActiveXiaohongshuRestriction();
+  if (!restriction) return null;
+  appendXiaohongshuBrowserDiagnostic(options, {
+    type: 'security_restriction',
+    stage,
+    outcome: 'blocked',
+    code: restriction.code,
+  });
+  throw createXiaohongshuRateLimitError(restriction);
+}
+
+function recordXiaohongshuSecurityRestriction(options = {}, text = '', stage = '', { markBatch = true } = {}) {
   const restriction = detectXiaohongshuSecurityRestriction(text);
   if (!restriction) return null;
   appendXiaohongshuBrowserDiagnostic(options, {
@@ -6304,6 +6547,7 @@ function recordXiaohongshuSecurityRestriction(options = {}, text = '', stage = '
     outcome: 'detected',
     code: restriction.code,
   });
+  if (markBatch) markXiaohongshuRestriction(restriction);
   return restriction;
 }
 
@@ -6393,8 +6637,34 @@ function installHiddenBrowserWindowGuards(browserWindow, options = {}) {
     browserWindow.on('ready-to-show', handleReadyToShow);
     browserWindow.on('show', handleShow);
   }
+  // Hiding on the event is reactive: Electron can paint a frame before the
+  // listener runs, and any caller that asks for the window after creation would
+  // flash it on screen. Extraction windows are never allowed to become visible,
+  // so the visibility methods are neutralised for this instance instead.
+  const lockedVisibilityMethods = ['show', 'showInactive', 'focus', 'moveTop'];
+  const restoredMethods = [];
+  const lockedOptions = options && options.blockWindowVisibility !== false;
+  if (lockedOptions) {
+    for (const methodName of lockedVisibilityMethods) {
+      if (typeof browserWindow[methodName] !== 'function') continue;
+      restoredMethods.push({ methodName, original: browserWindow[methodName] });
+      try {
+        browserWindow[methodName] = (...args) => {
+          hideWindow(`blocked_${methodName}`);
+          return undefined;
+        };
+      } catch (error) {
+        // A frozen instance still keeps the event-based hiding above.
+      }
+    }
+  }
   return () => {
     cleanupChildWindows();
+    restoredMethods.splice(0).forEach(({ methodName, original }) => {
+      try {
+        browserWindow[methodName] = original;
+      } catch (error) {}
+    });
     if (typeof browserWindow.removeListener === 'function') {
       browserWindow.removeListener('ready-to-show', handleReadyToShow);
       browserWindow.removeListener('show', handleShow);
@@ -6453,6 +6723,15 @@ function installXiaohongshuNavigationGuards(webContents, options = {}) {
       });
     }
   };
+  // Obsidian attaches its own will-navigate handler to every web contents and
+  // forwards redirects to the OS browser, which can open visible tabs from a
+  // window we created hidden. Drop those inherited handlers before installing
+  // ours, exactly like the WeChat article and Douyin extraction guards.
+  if (typeof webContents.removeAllListeners === 'function') {
+    for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+      webContents.removeAllListeners(eventName);
+    }
+  }
   if (typeof webContents.on === 'function') {
     webContents.on('will-navigate', preventUntrustedNavigation);
     webContents.on('will-frame-navigate', preventUntrustedNavigation);
@@ -11592,6 +11871,18 @@ function htmlToMarkdown(html) {
   return readable;
 }
 
+async function readTranscriptSegmentsSidecar(outputPath) {
+  const output = String(outputPath || '').trim();
+  if (!output) return [];
+  const sidecarPath = output.replace(/\.txt$/i, '') + '.segments.json';
+  try {
+    const text = await fs.promises.readFile(sidecarPath, 'utf8');
+    return parseTranscriptSegmentsSidecar(text);
+  } catch (error) {
+    return [];
+  }
+}
+
 function getElectronBrowserWindow() {
   try {
     const electron = require('electron');
@@ -11730,6 +12021,45 @@ function isMediaDownloadTimeoutError(error) {
 
 function isRecoverableDouyinMediaDownloadError(error) {
   return isMediaAuthorizationError(error) || isMediaDownloadTimeoutError(error);
+}
+
+function isMediaDownloadInterruptedError(error) {
+  return /\bMEDIA_DOWNLOAD_INTERRUPTED\b/.test(
+    `${(error && error.code) || ''} ${(error && error.message) || String(error || '')}`,
+  );
+}
+
+// A Xiaohongshu CDN transfer is frequently cut mid-stream by the edge node. One
+// interrupted stream must not end the record, so the same recoverable class that
+// covers 401/403 and timeout also covers an aborted/socket-reset transfer.
+function isRecoverableXiaohongshuMediaDownloadError(error) {
+  return isRecoverableDouyinMediaDownloadError(error)
+    || isMediaDownloadInterruptedError(error)
+    || /\bECONNRESET\b|\bEPIPE\b|\bETIMEDOUT\b|\bsocket hang up\b/i.test(
+      `${(error && error.code) || ''} ${(error && error.message) || ''}`,
+    );
+}
+
+// True when the failure happened while acquiring Xiaohongshu media, not while
+// running speech recognition on it.
+function isXiaohongshuMediaFailure(error) {
+  const code = String((error && error.code) || '').toUpperCase();
+  return isRecoverableXiaohongshuMediaDownloadError(error)
+    || /^MEDIA_/.test(code)
+    || code === 'LOCAL_ASR_INPUT_UNAVAILABLE'
+    || code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
+    || Boolean(error && error.mediaStage);
+}
+
+function createXiaohongshuMediaUnavailableError(cause = null) {
+  // The media never reached the transcriber, so this is a download/content
+  // outcome. The wording must stay clear of "转写失败" for Xiaohongshu records.
+  const error = new Error('小红书音视频内容未能完整下载，已保留记录，请在小程序“同步记录”中点击“重试”。');
+  error.retryable = true;
+  error.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
+  error.mediaStage = 'download';
+  if (cause) error.cause = cause;
+  return error;
 }
 
 function mergeDouyinDetailCandidates(current, incoming) {
@@ -12053,7 +12383,9 @@ async function probeXiaohongshuLoginStatus(targetUrl = '', options = {}) {
       options.xiaohongshuBrowserDiagnostic.loginEvidence = state && state.hasAccountApiSignal ? 'account_signal'
         : state && state.hasUserSignal ? 'page_signal' : 'none';
     }
-    recordXiaohongshuSecurityRestriction(options, state && state.text, 'login_check');
+    // An explicit login check is a single user-initiated probe; it reports the
+    // wall but must not stop the running sync batch.
+    recordXiaohongshuSecurityRestriction(options, state && state.text, 'login_check', { markBatch: false });
     appendXiaohongshuBrowserDiagnostic(options, { type: 'stage', stage: 'account_probe', outcome: state && state.accountResult || 'unknown', status: state && state.accountStatus || 0 });
     if (state && (state.hasLoginWall || state.accountRejected)) return false;
     const hasCookieAfterProbe = await checkXiaohongshuLoginStatus();
@@ -12788,8 +13120,13 @@ async function renderUrlToMarkdownWithElectron(url) {
       sandbox: true,
     },
   });
+  // Extraction windows are never allowed to surface, including this generic
+  // renderer: a caller can hand it a Xiaohongshu link, and the guard also stops
+  // page-side window.open from escaping into a visible child window.
+  const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win);
   if (isXiaohongshuUrl(url)) {
     trackXiaohongshuBrowserWindow(win);
+    installXiaohongshuNavigationGuards(win.webContents);
   }
 
   try {
@@ -13021,6 +13358,160 @@ async function renderUrlToMarkdownWithElectron(url) {
     result.__feishuDiag = __feishuDiag;
     if (!result || !result.markdown || result.markdown.length < 20) {
       throw new Error('隐藏浏览器未读取到足够正文');
+    }
+    return result;
+  } finally {
+    cleanupHiddenWindowGuards();
+    if (win && typeof win.destroy === 'function') {
+      win.destroy();
+    }
+  }
+}
+
+const PLATFORM_ARTICLE_SELECTORS = {
+  zhihu: {
+    title: ['h1.Post-Title', '.QuestionHeader-title', 'h1'],
+    body: ['.Post-RichText', '.RichText.ztext', '.AnswerItem .RichText', '.QuestionAnswer-content .RichText'],
+    author: ['.AuthorInfo-name', '.UserLink-link', '.QuestionHeader .AuthorInfo-name'],
+    // Plain 登录 also appears in the site header of a fully readable article, so
+    // the marker has to name an actual sign-in wall.
+    loginMarker: /扫码登录|请先登录|登录后(?:查看|阅读)|登录以(?:继续|查看)|安全验证|访问过于频繁|验证码/,
+    // Zhihu answers an unauthenticated request from a flagged exit IP with a
+    // JSON error page instead of the article. That is a network problem the
+    // user can fix by switching networks, not a missing login.
+    blockMarker: /请求存在异常|系统监测到您的网络环境存在异常|"code"\s*:\s*40362|40362/,
+  },
+  toutiao: {
+    title: ['h1.article-title', '.article-title', 'h1'],
+    body: ['.article-content', '.syl-article-base', 'article', '.article'],
+    author: ['.article-sub', '.user-info .name', '.name'],
+    loginMarker: /扫码登录|请先登录|登录后(?:查看|阅读)|登录以(?:继续|查看)|安全验证|访问过于频繁|验证码/,
+    blockMarker: /请求存在异常|访问过于频繁|安全验证/,
+    // Share short links sometimes only resolve inside the Toutiao app. That page
+    // has no article body, so say so instead of reporting a generic failure.
+    appWallMarker: /打开今日头条\s*(?:App|APP|app)|下载今日头条|打开\s*APP\s*查看|请在\s*APP\s*内打开/,
+  },
+};
+
+// Zhihu and Toutiao are read through the persistent WeChat session partition so
+// an already logged-in Obsidian never has to sign in again. The extractor only
+// clones the article body; every selector is per-platform and fails closed.
+async function renderPlatformArticleWithElectron(url) {
+  const platform = getPlatformArticleKind(url);
+  if (!platform) throw new Error('不是支持的平台文章链接');
+  const BrowserWindow = getElectronBrowserWindow();
+  if (!BrowserWindow) {
+    throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
+  }
+  const session = getWechatSession();
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 1600,
+    show: false,
+    webPreferences: {
+      session: session || undefined,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  try {
+    installPlatformArticleNavigationGuards(win.webContents, platform, url);
+    const loaded = waitForWebContents(win.webContents);
+    // Toutiao keeps an ad/tracker request open on some networks, so did-finish-load
+    // never fires and loadURL never settles. The DOM is already usable once the main
+    // document has parsed, so cap the wait instead of hanging the whole sync.
+    let loadFailure = null;
+    const loadPromise = win.loadURL(url).catch((error) => {
+      loadFailure = error;
+    });
+    await Promise.race([
+      loadPromise,
+      new Promise((resolve) => window.setTimeout(resolve, 20000)),
+    ]);
+    await loaded;
+    const selectors = PLATFORM_ARTICLE_SELECTORS[platform] || PLATFORM_ARTICLE_SELECTORS.zhihu;
+    const result = await win.webContents.executeJavaScript(`
+      (async () => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const clean = (value) => String(value || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/[ \\t]+\\n/g, '\\n')
+          .replace(/\\n{3,}/g, '\\n\\n')
+          .trim();
+        const selectors = ${JSON.stringify(selectors)};
+        const loginMarker = new RegExp(${JSON.stringify(selectors.loginMarker.source)}, 'i');
+        const blockSource = ${JSON.stringify(selectors.blockMarker ? selectors.blockMarker.source : '')};
+        const isBlocked = (text) => Boolean(blockSource) && new RegExp(blockSource, 'i').test(text);
+        const appWallSource = ${JSON.stringify(selectors.appWallMarker ? selectors.appWallMarker.source : '')};
+        const isAppWall = (text) => Boolean(appWallSource) && new RegExp(appWallSource, 'i').test(text);
+        const pick = (list) => {
+          for (const selector of list) {
+            let node = null;
+            try { node = document.querySelector(selector); } catch (error) { node = null; }
+            if (node) return node;
+          }
+          return null;
+        };
+        const promoteLazyImages = (root) => {
+          root.querySelectorAll('img').forEach((image) => {
+            const lazy = image.getAttribute('data-src') || image.getAttribute('data-original') || image.getAttribute('data-lazy-src');
+            if (lazy && !image.getAttribute('src')) image.setAttribute('src', lazy);
+          });
+        };
+        let body = null;
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+          body = pick(selectors.body);
+          if (body && clean(body.innerText || body.textContent).replace(/\\s+/g, '').length >= 80) break;
+          window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
+          await sleep(500);
+        }
+        const pageText = clean(document.body ? (document.body.innerText || document.body.textContent) : '');
+        if (!body) {
+          return {
+            title: clean(document.title || ''),
+            author: '',
+            html: '',
+            assets: [],
+            needsLogin: loginMarker.test(pageText),
+            blocked: isBlocked(pageText),
+            appWall: isAppWall(pageText),
+            stateText: pageText.slice(0, 600),
+          };
+        }
+        promoteLazyImages(body);
+        const clone = body.cloneNode(true);
+        clone.querySelectorAll('script,style,noscript,iframe,form,.RichContent-actions,.ContentItem-actions,.Recommendations,.Post-Sub,.Post-topics,.comment,.comments').forEach((node) => node.remove());
+        const assets = (${prepareBrowserArticleImages.toString()})(clone, location.href);
+        const titleNode = pick(selectors.title);
+        const authorNode = pick(selectors.author);
+        return {
+          title: clean(titleNode && (titleNode.innerText || titleNode.textContent) || document.title || ''),
+          author: clean(authorNode && (authorNode.innerText || authorNode.textContent) || '').slice(0, 80),
+          html: clone.outerHTML,
+          assets,
+          needsLogin: false,
+          blocked: isBlocked(pageText),
+          appWall: false,
+          stateText: pageText.slice(0, 600),
+          bodyTextChars: clean(body.innerText || body.textContent).replace(/\\s+/g, '').length,
+          imageCount: assets.length,
+        };
+      })()
+    `);
+    if (result && result.html) {
+      try {
+        result.markdown = htmlToMarkdown(result.html);
+      } catch (error) {
+        result.conversionError = error.message;
+      }
+    }
+    result.platform = platform;
+    result.finalUrl = win.webContents && typeof win.webContents.getURL === 'function'
+      ? win.webContents.getURL()
+      : url;
+    if (loadFailure) {
+      result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || '').slice(0, 160);
     }
     return result;
   } finally {
@@ -13332,6 +13823,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       ...options,
       __xiaohongshuSessionLockHeld: true,
     }), options.signal);
+  }
+  if (isXiaohongshuUrl(url)) {
+    throwIfXiaohongshuRestricted(options, 'media_extraction');
   }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
@@ -13772,7 +14266,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
     }
 
     if (isXiaohongshuExtractionWindow) {
-      recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, 'media_extraction');
+      const mediaRestriction = recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, 'media_extraction');
+      if (mediaRestriction) {
+        throw createXiaohongshuRateLimitError(mediaRestriction);
+      }
       appendXiaohongshuBrowserDiagnostic(options, {
         type: 'stage',
         stage: 'media_extraction',
@@ -13989,7 +14486,10 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       );
     }
     throwIfAborted(options.signal);
-    recordXiaohongshuSecurityRestriction(options, payload && payload.html, 'content_extraction');
+    const contentRestriction = recordXiaohongshuSecurityRestriction(options, payload && payload.html, 'content_extraction');
+    if (contentRestriction) {
+      throw createXiaohongshuRateLimitError(contentRestriction);
+    }
     appendXiaohongshuBrowserDiagnostic(options, {
       type: 'stage',
       stage: 'content_extraction',
@@ -14081,6 +14581,9 @@ async function runWithXiaohongshuBrowserSessionLock(task, signal = null) {
 async function renderXiaohongshuPageWithElectron(url, options = {}) {
   return await runWithXiaohongshuBrowserSessionLock(async () => {
     throwIfAborted(options.signal);
+    // A detected platform wall must stop the rest of the batch before another
+    // hidden window is created or another note page is requested.
+    throwIfXiaohongshuRestricted(options, options.includeComments === false ? 'content_extraction' : 'comment_extraction');
     if (options.includeComments === false) {
       return await renderXiaohongshuContentWithElectron(url, options);
     }
@@ -14988,6 +15491,20 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
       stopReason: explicitBudgetStopReason
         || (hasBrowserNetworkPayload ? browserStopReason : (capturedDiagnostic.stopReason || pagedRootResult.stopReason)),
     };
+    // A comment request rejected with 300013 is the same platform limit even
+    // when the page HTML still renders normally. The record keeps its body, but
+    // the batch must stop so later records do not keep requesting Xiaohongshu.
+    const commentErrorDigits = String(commentDiagnosticDetails.errorCode || '').replace(/^BUSINESS_/i, '');
+    if (/^-?300013$/.test(commentErrorDigits)) {
+      appendXiaohongshuBrowserDiagnostic(options, {
+        type: 'security_restriction',
+        stage: 'comment_extraction',
+        outcome: 'detected',
+        code: '300013',
+      });
+      markXiaohongshuRestriction({ code: '300013', kind: 'rate_limited' });
+      commentDiagnosticDetails.errorCode = 'RATE_LIMITED';
+    }
     commentDiagnosticDetails.partial = isPartialXiaohongshuCommentResult(commentDiagnosticDetails);
     const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
     throwIfAborted(options.signal);
@@ -16760,6 +17277,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (this.syncDiagnosticReporter) this.syncDiagnosticReporter.dispose();
     });
     this.startFeishuImageDisplay();
+    this.startTranscriptMediaPlayer();
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -16954,6 +17472,21 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
 
+  startTranscriptMediaPlayer() {
+    if (typeof this.registerMarkdownPostProcessor !== 'function') return;
+    const vault = this.app && this.app.vault;
+    if (!vault) return;
+    this.transcriptMediaPlayer = createTranscriptMediaPlayer({
+      vault,
+      getSettings: () => this.settings || {},
+      notify: message => new Notice(message, 6000),
+    });
+    this.registerMarkdownPostProcessor((el, context) => {
+      if (!this.settings) return;
+      this.transcriptMediaPlayer(el, context && context.sourcePath);
+    });
+  }
+
   async loadFeishuDisplayImage({url, token, signal}) {
     const resource = parseFeishuImageUrl(url);
     if (!resource || resource.token !== token) throw new Error('invalid_image');
@@ -17053,6 +17586,13 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async checkXiaohongshuLogin(options = {}) {
     try {
+      // Sync already opens the target note when comments are collected. A
+      // separate login-probe window for every record doubles browser work in
+      // an XHS batch; the comment renderer performs its own cookie/access check.
+      if (options.skipBrowserProbe === true) {
+        throwIfAborted(options.signal);
+        return await checkXiaohongshuLoginStatus();
+      }
       return await probeXiaohongshuLoginStatus('', options);
     } catch (error) {
       if (isAbortError(error)) throw error;
@@ -18402,10 +18942,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     let sourceUrl = '';
     let fileID = '';
-    if (sourceType === 'douyin_url') {
+    if (isCloudFallbackUrlSourceType(sourceType)) {
       sourceUrl = String(options.sourceUrl || options.url || '').trim();
-      if (!/^https?:\/\//i.test(sourceUrl) || !isDouyinUrl(sourceUrl)) {
-        const error = new Error('云端兜底只接受有效的抖音原始链接');
+      const isAcceptedLink = /^https?:\/\//i.test(sourceUrl)
+        && (sourceType === 'douyin_url' ? isDouyinUrl(sourceUrl) : isXiaohongshuUrl(sourceUrl));
+      if (!isAcceptedLink) {
+        const error = new Error(sourceType === 'douyin_url'
+          ? '云端兜底只接受有效的抖音原始链接'
+          : '云端兜底只接受有效的小红书原始链接');
         error.code = 'CLOUD_FALLBACK_SOURCE_INVALID';
         throw error;
       }
@@ -18453,7 +18997,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       provider: String(options.provider || '').trim(),
     };
     if (Number(options.durationSeconds) > 0) requestBody.durationSeconds = Number(options.durationSeconds);
-    if (sourceType === 'douyin_url') {
+    if (isCloudFallbackUrlSourceType(sourceType)) {
       requestBody.sourceUrl = sourceUrl;
     } else {
       requestBody.fileID = fileID;
@@ -18706,6 +19250,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       const recordRetryCount = getCloudFallbackJobRecordRetryCount(job) === null
         ? getCloudFallbackRecordRetryCount(record)
         : getCloudFallbackJobRecordRetryCount(job);
+      // A graphic-note job answers with extracted content, not a transcript.
+      // Keeping the transcript metadata flags off it is what lets the normal
+      // graphic-note write path consume the answer unchanged.
+      const isContentJob = Boolean(job.content);
       const nextMetadata = {
         ...metadata,
         cloudFallbackJobId: job.jobId,
@@ -18718,11 +19266,32 @@ class WechatObsidianInboxPlugin extends Plugin {
         cloudFallbackSyncAttemptId: job.syncAttemptId || metadata.cloudFallbackSyncAttemptId || '',
         cloudFallbackSyncLeaseUntil: job.syncLeaseUntil || metadata.cloudFallbackSyncLeaseUntil || '',
         cloudFallbackUpdatedAt: job.updatedAt || new Date().toISOString(),
-        transcriptionSource: 'cloud-fallback',
-        webpageMediaType: 'audio_video',
-        transcriptOnly: true,
+        ...(isContentJob ? {
+          cloudFallbackResultKind: 'content',
+          contentCategory: '图文',
+          webpageMediaType: '',
+          videoUrl: '',
+          transcriptOnly: false,
+        } : {
+          transcriptionSource: 'cloud-fallback',
+          webpageMediaType: 'audio_video',
+          transcriptOnly: true,
+        }),
       };
-      if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+      if (job.status === 'succeeded' && job.content) {
+        nextMetadata.markdown = String(job.content.markdown || '').trim() || metadata.markdown || '';
+        nextMetadata.imageUrls = job.content.imageUrls.length
+          ? job.content.imageUrls
+          : (Array.isArray(metadata.imageUrls) ? metadata.imageUrls : []);
+        nextMetadata.title = metadata.title || job.content.title || '小红书笔记';
+        nextMetadata.author = metadata.author || job.content.author || '';
+        if (Array.isArray(job.content.tags) && job.content.tags.length) {
+          nextMetadata.extractedKeywords = job.content.tags;
+        }
+        nextMetadata.conversionStatus = 'success';
+        nextMetadata.conversionError = '';
+        nextMetadata.transcriptionError = '';
+      } else if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
         nextMetadata.transcription = job.transcription;
         nextMetadata.transcriptionStatus = 'success';
         nextMetadata.conversionStatus = 'success';
@@ -18753,7 +19322,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     // record snapshot with the job and resume the normal write/complete path
     // as soon as the cloud result is ready.
     refreshedJobs.forEach((job) => {
-      if (job.status !== 'succeeded' || !String(job.transcription || '').trim()) return;
+      if (job.status !== 'succeeded' || (!String(job.transcription || '').trim() && !job.content)) return;
       if (!job.recordId || existingRecordIds.has(job.recordId) || !job.recordSnapshot) return;
       const syntheticRecord = applyJobToRecord({ ...job.recordSnapshot }, job);
       nextRecords.push(syntheticRecord);
@@ -20447,6 +21016,119 @@ class WechatObsidianInboxPlugin extends Plugin {
     return { allowed: true, binding: activeBinding };
   }
 
+  /**
+   * Turns a finished content job into the record shape the normal graphic-note
+   * write path already understands. The image URLs are left as cloud links so
+   * the user's "save original images / keep links" setting still decides what
+   * lands in the vault.
+   */
+  buildCloudFallbackContentRecord(record, job, { url = '' } = {}) {
+    const content = job && job.content;
+    if (!content) return record;
+    const metadata = record && record.metadata && typeof record.metadata === 'object' ? record.metadata : {};
+    const cloudImages = Array.isArray(content.imageUrls) ? content.imageUrls : [];
+    const localImages = Array.isArray(metadata.imageUrls) ? metadata.imageUrls : [];
+    return {
+      ...record,
+      metadata: {
+        ...metadata,
+        ...(url ? { url } : {}),
+        title: metadata.title || content.title || '小红书笔记',
+        author: metadata.author || content.author || '',
+        markdown: String(content.markdown || '').trim() || metadata.markdown || '',
+        imageUrls: cloudImages.length ? cloudImages : localImages,
+        ...(Array.isArray(content.tags) && content.tags.length
+          ? { extractedKeywords: content.tags }
+          : {}),
+        platform: metadata.platform || '小红书',
+        contentCategory: '图文',
+        // Every Xiaohongshu share arrives tagged as audio_video. A note that
+        // turned out to be graphic must be untagged here, or the next sync
+        // pass sees "video without a transcript" and extracts it all over again.
+        webpageMediaType: '',
+        videoUrl: '',
+        transcriptOnly: false,
+        conversionStatus: 'success',
+        conversionError: '',
+        transcriptionError: '',
+        cloudFallbackJobId: job.jobId,
+        cloudFallbackStatus: job.status,
+        cloudFallbackUpdatedAt: job.updatedAt || new Date().toISOString(),
+        cloudFallbackResultKind: 'content',
+      },
+    };
+  }
+
+  /**
+   * Submits one Xiaohongshu record to the cloud capture queue.
+   *
+   * The chain is the Douyin chain: binding -> active Pro -> local component
+   * installed -> local capture already failed. The Douyin login and resolver
+   * checks are deliberately absent, because a Xiaohongshu failure is never a
+   * Douyin setup gap.
+   *
+   * `linkDiagnostic` carries the evidence from the failed local attempt. A link
+   * that expired, was deleted, or went private is answered by asking for a
+   * fresh share link; the paid worker is never asked to chase it. Any other
+   * failure (risk control, login wall, missing media, parse failure) is exactly
+   * what the cloud nodes exist for.
+   *
+   * Returns { record } when the cloud answer is already usable, { gateMessage }
+   * when the chain itself blocked submission, or null when nothing was
+   * attempted. A queued job throws CLOUD_FALLBACK_QUEUED so the record is kept
+   * pending instead of being reported as a local extraction defect.
+   */
+  async maybeSubmitXiaohongshuCloudFallback(record, {
+    url = '',
+    binding = null,
+    signal = null,
+    title = '',
+    localError = '',
+    linkDiagnostic = null,
+  } = {}) {
+    if (this.settings.cloudFallbackEnabled !== true) return null;
+    if (!binding || !binding.token) return null;
+    if (!isXiaohongshuUrl(url)) return null;
+    const diagnostic = linkDiagnostic && typeof linkDiagnostic === 'object' ? linkDiagnostic : null;
+    const responseStatus = Number(diagnostic && diagnostic.request && diagnostic.request.responseStatus) || 0;
+    if (isExpiredXiaohongshuLinkDiagnostic(diagnostic || {})
+      || responseStatus === 404
+      || responseStatus === 410) {
+      // A dead link stays local: the user has to copy a new share link, and no
+      // amount of cloud capture can recover the retired one.
+      return null;
+    }
+    const gate = await this.evaluateCloudFallbackUserGate({
+      binding,
+      featureName: '小红书云端兜底',
+    });
+    if (!gate.allowed) return { gateMessage: gate.message };
+    try {
+      const job = await this.submitCloudFallbackJob({
+        sourceType: 'xiaohongshu_url',
+        sourceUrl: url,
+        recordId: getRecordId(record),
+        retryCount: record && record.retryCount,
+        title: title || (record && record.metadata && record.metadata.title) || '小红书笔记',
+        localError,
+        provider: this.settings.aiProvider || '',
+        binding,
+        signal,
+      });
+      if (job.status === 'succeeded' && job.content) {
+        return { record: this.buildCloudFallbackContentRecord(record, job, { url }) };
+      }
+      throw createCloudFallbackPendingError(
+        job,
+        localError,
+        '云端兜底任务已提交，正在由云端电脑抓取小红书内容',
+      );
+    } catch (error) {
+      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
+      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+    }
+  }
+
   openTranscriptionSetupSettings() {
     const settings = this.app && this.app.setting;
     if (!settings || typeof settings.open !== 'function') return false;
@@ -20983,14 +21665,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     const reason = formatLocalComponentInstallFailureReason(error);
     const message = [
       `失败原因：${reason}`,
-      '如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。',
+      '如需协助，请点击插件设置里的「复制完整诊断」，联系开发者张张（微信：heyhmjx）。',
     ].join('\n');
     const modalResult = showLocalComponentInstallFailure(this.app, message);
     if (modalResult) {
       await modalResult;
       return;
     }
-    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。`, 12000);
+    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制完整诊断」，联系开发者张张（微信：heyhmjx）。`, 12000);
   }
 
   async doInstallLocalTranscriptionComponents(options = {}) {
@@ -21327,15 +22009,17 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!isTrustedXiaohongshuTransportUrl(sourceUrl)) {
       throw new Error('小红书静态抓取地址不是可信的官方 HTTPS 地址');
     }
+    throwIfXiaohongshuRestricted(options, 'static_content');
     appendXiaohongshuBrowserDiagnostic(options, { type: 'stage', stage: 'static_content', outcome: 'started' });
     let response;
     try {
       response = await requestPublicWebpageText(sourceUrl, {
         // Static public-note extraction never needs login cookies. Logged-in
         // comments stay inside the isolated BrowserWindow / strict API path.
-        // This is a document navigation. A wildcard Accept can negotiate a login
-        // landing page even when the exact public note is available as HTML.
-        headers: { ...getSocialRequestHeaders(sourceUrl), Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+        // The note document is only served to the mobile surface: a desktop
+        // Chrome UA without a Xiaohongshu cookie is 302'd to /login, and the
+        // login page carries no note content.
+        headers: getXiaohongshuDocumentRequestHeaders(sourceUrl),
         allowedRedirectUrl: (redirectUrl) => isTrustedXiaohongshuTransportUrl(redirectUrl),
       });
     } catch (error) {
@@ -21345,8 +22029,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!response || !isTrustedXiaohongshuCookieUrl(response.url)) {
       throw new Error('小红书正文抓取的最终地址无法确认为官方 HTTPS 内容页');
     }
+    const staticRestriction = recordXiaohongshuSecurityRestriction(options, response.text, 'static_content');
+    if (staticRestriction) {
+      throw createXiaohongshuRateLimitError(staticRestriction);
+    }
     const extracted = extractXiaohongshuMarkdownFromHtml(response.text, response.url, '', { includeComments: false });
-    const loginLanding = /^\/login(?:\/|$)/i.test(new URL(response.url).pathname);
+    const loginLanding = isXiaohongshuLoginLanding(response.text, response.url, extracted);
     appendXiaohongshuBrowserDiagnostic(options, {
       type: 'stage', stage: 'static_content',
       outcome: Number(response.status) >= 400 ? 'http_failed'
@@ -21354,6 +22042,16 @@ class WechatObsidianInboxPlugin extends Plugin {
       status: response.status,
       mediaCandidateCount: extracted.xiaohongshuPrimaryNoteMatched && extracted.videoUrl ? 1 : 0,
     });
+    if (loginLanding && extracted.xiaohongshuPrimaryNoteMatched !== true) {
+      // Refuse the login page instead of letting the caller adopt its URL as the
+      // note URL. The caller's hidden-browser candidates still receive the
+      // original note URL and can use the isolated Xiaohongshu session.
+      const error = new Error('小红书静态请求被重定向到登录页，未取到笔记正文');
+      error.code = 'XIAOHONGSHU_LOGIN_LANDING';
+      error.retryable = true;
+      error.finalUrlIsLoginLanding = true;
+      throw error;
+    }
     return response;
   }
 
@@ -21555,7 +22253,9 @@ class WechatObsidianInboxPlugin extends Plugin {
   async downloadMediaArrayBufferWithSession(url, headers = {}, options = {}) {
     const session = isDouyinUrl(url) || isDouyinMediaUrl(url)
       ? getDouyinSession()
-      : getWechatSession();
+      : (isXiaohongshuUrl(url) || isXiaohongshuMediaUrl(url)
+        ? getXiaohongshuSession()
+        : getWechatSession());
     return downloadArrayBufferViaElectronSession(url, headers, options, session);
   }
 
@@ -21930,6 +22630,133 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw error;
   }
 
+  /**
+   * Operator-node capture for a Xiaohongshu job.
+   *
+   * A graphic note has no audio, so its result is the extracted article itself;
+   * a video note returns a downloaded file and continues through the existing
+   * media -> ASR path. Nothing here depends on the user's Xiaohongshu login:
+   * that requirement exists only on the user's own machine, where a login wall
+   * is a local setup gap.
+   */
+  async acquireOperatorXiaohongshuContent(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || '').trim();
+    if (!isTrustedXiaohongshuTransportUrl(pageUrl)) {
+      const error = new Error('运营节点只接受官方小红书 HTTPS 分享链接');
+      error.code = 'OPERATOR_XIAOHONGSHU_SOURCE_INVALID';
+      throw error;
+    }
+    throwIfAborted(signal);
+    let html = '';
+    let finalUrl = pageUrl;
+    try {
+      const response = await requestPublicWebpageText(pageUrl, {
+        headers: getXiaohongshuDocumentRequestHeaders(pageUrl),
+        allowedRedirectUrl: (redirectUrl) => isTrustedXiaohongshuTransportUrl(redirectUrl),
+      });
+      html = String(response && response.text || '');
+      finalUrl = String(response && response.url || pageUrl).trim();
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw createAbortError();
+      // A logged-in hidden browser on this node is the next best attempt; a
+      // node without one reports the transport failure below.
+      html = '';
+    }
+    if (!isTrustedXiaohongshuCookieUrl(finalUrl)) {
+      const error = new Error('小红书抓取的最终地址无法确认为官方 HTTPS 内容页');
+      error.code = 'OPERATOR_XIAOHONGSHU_SOURCE_INVALID';
+      throw error;
+    }
+    if (html && isUnavailableXiaohongshuPage(html, finalUrl)) {
+      const error = new Error('小红书链接已失效或笔记不可见，请重新复制最新分享链接');
+      error.code = 'XIAOHONGSHU_LINK_UNAVAILABLE';
+      error.linkExpired = true;
+      throw error;
+    }
+    let extracted = html
+      ? extractXiaohongshuMarkdownFromHtml(html, finalUrl, '', { includeComments: false })
+      : null;
+    if ((!extracted || extracted.xiaohongshuPrimaryNoteMatched !== true)
+      && typeof this.renderXiaohongshuPage === 'function') {
+      throwIfAborted(signal);
+      try {
+        const page = await this.renderXiaohongshuPage(finalUrl, {
+          includeComments: false,
+          expectedUrl: resolveXiaohongshuIdentityUrl([finalUrl, pageUrl]),
+          signal,
+        });
+        const renderedHtml = String(page && page.html || '');
+        const renderedUrl = String(page && page.url || '').trim();
+        if (renderedHtml && isTrustedXiaohongshuCookieUrl(renderedUrl)) {
+          if (isUnavailableXiaohongshuPage(renderedHtml, renderedUrl)) {
+            const error = new Error('小红书链接已失效或笔记不可见，请重新复制最新分享链接');
+            error.code = 'XIAOHONGSHU_LINK_UNAVAILABLE';
+            error.linkExpired = true;
+            throw error;
+          }
+          html = renderedHtml;
+          finalUrl = renderedUrl;
+          extracted = extractXiaohongshuMarkdownFromHtml(renderedHtml, renderedUrl, '', { includeComments: false });
+        }
+      } catch (error) {
+        if (isAbortError(error) || signal?.aborted || error.linkExpired === true) throw error;
+        // Keep whatever the static fetch produced; the check below decides.
+      }
+    }
+    if (html && detectXiaohongshuSecurityRestriction(html)) {
+      const error = new Error('小红书拒绝了运营节点的访问（平台限流或安全验证）');
+      error.code = 'XIAOHONGSHU_RATE_LIMITED';
+      error.retryable = true;
+      throw error;
+    }
+    if (!extracted || extracted.xiaohongshuPrimaryNoteMatched !== true
+      || isXiaohongshuLoginLanding(html, finalUrl, extracted)) {
+      const error = new Error('小红书返回的页面不是笔记正文，可能需要登录环境');
+      error.code = 'OPERATOR_XIAOHONGSHU_CONTENT_MISSING';
+      error.retryable = true;
+      throw error;
+    }
+    const videoUrl = String(extracted.videoUrl || '').trim();
+    if (videoUrl) {
+      if (!isXiaohongshuMediaUrl(videoUrl)) {
+        const error = new Error('小红书视频地址不是官方 CDN 地址');
+        error.code = 'OPERATOR_XIAOHONGSHU_SOURCE_INVALID';
+        throw error;
+      }
+      throwIfAborted(signal);
+      const tempPath = await this.downloadMediaToTempFile(videoUrl, {
+        sourceUrl: pageUrl,
+        signal,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+      });
+      return { kind: 'video', tempPath, title: extracted.title || '' };
+    }
+    const markdown = String(extracted.markdown || '').trim();
+    const imageUrls = (Array.isArray(extracted.imageUrls) ? extracted.imageUrls : [])
+      .map((item) => String(item || '').trim())
+      .filter((item) => isXiaohongshuMediaUrl(item))
+      .slice(0, 60);
+    if (!markdown && !imageUrls.length) {
+      const error = new Error('运营节点未提取到小红书图文内容');
+      error.code = 'OPERATOR_XIAOHONGSHU_CONTENT_MISSING';
+      error.retryable = true;
+      throw error;
+    }
+    return {
+      kind: 'content',
+      content: {
+        title: String(extracted.title || '').trim(),
+        author: String(extracted.author || '').trim(),
+        markdown,
+        imageUrls,
+        tags: (Array.isArray(extracted.tags) ? extracted.tags : [])
+          .map((item) => String(item || '').trim())
+          .filter(Boolean)
+          .slice(0, 40),
+      },
+    };
+  }
+
   async verifyOperatorControlledMediaFile(filePath, job, { signal = null } = {}) {
     const expectedSize = Number(job && (job.mediaSize ?? job.artifactSize));
     const expectedSha256 = String(job && (job.mediaSha256 || job.artifactSha256) || '').trim().toLowerCase();
@@ -22130,12 +22957,22 @@ class WechatObsidianInboxPlugin extends Plugin {
           source: sourcePrefix ? sourcePrefix + '-local' : 'local',
           ...(normalizedResult.qualityStatus ? { transcriptionQualityStatus: normalizedResult.qualityStatus } : {}),
           ...(normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {}),
+          ...(Array.isArray(normalizedResult.transcriptionSegments) && normalizedResult.transcriptionSegments.length
+            ? { transcriptionSegments: normalizedResult.transcriptionSegments }
+            : {}),
         };
       } catch (error) {
         if ((isAbortError(error) && !isRetryableTranscriptionError(error)) || options.signal?.aborted) throw createAbortError();
         if (error.transcriptionSetupRequired
           || error.code === 'TRANSCRIPTION_NO_SPEECH'
           || isRetryableTranscriptionError(error)) throw error;
+
+        // A Xiaohongshu media failure keeps its content outcome whether or not
+        // the cloud fallback setting is on: the message must never say “转写”.
+        if (isXiaohongshuUrl(String(options.sourceUrl || '')) || isXiaohongshuMediaUrl(audioUrl)) {
+          if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
+          throw error;
+        }
 
         // A downloaded Douyin candidate is retained only for this failed local
         // attempt. Upload failure deliberately falls through to the original
@@ -22237,15 +23074,21 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           throw createCloudFallbackPendingError(job, error && error.message);
         }
-        // Non-Douyin page/media URLs keep the existing cloud URL fallback.
-        // Douyin URLs are submitted as a fallback job by the caller only after
-        // the Pro/binding/component gate passes, so they must not take this
-        // legacy path directly.
+        // Cloud transcription is a Douyin-only capability. Two sources may reach
+        // the cloud worker here:
+        //   1. a file the user uploaded (fileID) — the user's own media, not a
+        //      platform link;
+        //   2. a Douyin link, and only when the caller explicitly opts in.
+        // Every other platform link is refused: Xiaohongshu, Bilibili,
+        // Xiaoyuzhou and generic pages all serve their media from CDNs the
+        // cloud worker cannot download anonymously, so a submission could only
+        // fail and would relabel a media problem as “转写失败”.
         const pageSourceUrl = String(options.sourceUrl || '').trim();
         const legacyFileId = String(options.fileID || options.audioFileID || '').trim();
+        const isDouyinTranscriptionSource = isDouyinUrl(pageSourceUrl) || isDouyinUrl(audioUrl);
         const legacyUrlFallbackAllowed = Boolean(legacyFileId)
-          || options.allowCloudUrlFallback === true;
-        if (legacyUrlFallbackAllowed && !isDouyinUrl(pageSourceUrl || audioUrl)) {
+          || (options.allowCloudUrlFallback === true && isDouyinTranscriptionSource);
+        if (legacyUrlFallbackAllowed) {
           return await this.runCloudFallbackTranscription(audioUrl, {
             ...options,
             localError: error && error.message ? error.message : String(error || ''),
@@ -22298,9 +23141,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (this.settings.aiProvider === 'doubao') {
       try {
+        const doubaoResult = await this.runDoubaoTranscription(audioUrl, { withSegments: true });
         return {
-          transcription: await this.runDoubaoTranscription(audioUrl),
+          transcription: doubaoResult.transcription,
           source: 'doubao',
+          ...(Array.isArray(doubaoResult.transcriptionSegments) && doubaoResult.transcriptionSegments.length
+            ? { transcriptionSegments: doubaoResult.transcriptionSegments }
+            : {}),
         };
       } catch (error) {
         if (isRemoteAsrDownloadFailure(error) && this.canRunLocalTranscription()) {
@@ -22324,17 +23171,36 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (this.settings.aiProvider === 'local') {
       if (this.settings.cloudFallbackEnabled === true || options.preserveLocalMediaForCloudFallback === true) {
-        return await runLocalWithCloudFallback({ sourcePrefix: '', includeQualityDetails: false });
+        return await runLocalWithCloudFallback({ sourcePrefix: '', includeQualityDetails: true });
       }
       try {
+        const localResult = await this.runLocalTranscription(audioUrl, { ...options, includeQualityDetails: true });
+        const normalizedLocal = localResult && typeof localResult === 'object'
+          ? localResult
+          : { transcription: localResult };
         return {
-          transcription: await this.runLocalTranscription(audioUrl, options),
+          transcription: normalizedLocal.transcription,
           source: 'local',
+          ...(Array.isArray(normalizedLocal.transcriptionSegments) && normalizedLocal.transcriptionSegments.length
+            ? { transcriptionSegments: normalizedLocal.transcriptionSegments }
+            : {}),
         };
       } catch (error) {
         if ((isAbortError(error) && !isRetryableTranscriptionError(error)) || options.signal?.aborted) throw createAbortError();
         if (error.transcriptionSetupRequired || error.code === 'TRANSCRIPTION_NO_SPEECH' || isRetryableTranscriptionError(error)) throw error;
-        if (!options.fileID && !options.allowCloudUrlFallback) throw error;
+        // A Xiaohongshu CDN never serves an anonymous cloud download, so the
+        // cloud fallback cannot help it; it can only turn a media-acquisition
+        // failure into a "转写失败" label.
+        if (isXiaohongshuUrl(String(options.sourceUrl || '')) || isXiaohongshuMediaUrl(audioUrl)) {
+          if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
+          throw error;
+        }
+        // Same Douyin-only rule as the branch above; anything else surfaces the
+        // original failure instead of being submitted to /transcriptions/cloud.
+        const directFileId = String(options.fileID || options.audioFileID || '').trim();
+        const directDouyinUrlAllowed = options.allowCloudUrlFallback === true
+          && (isDouyinUrl(String(options.sourceUrl || '')) || isDouyinUrl(audioUrl));
+        if (!directFileId && !directDouyinUrlAllowed) throw error;
         return await this.runCloudFallbackTranscription(audioUrl, {
           ...options,
           localError: error && error.message ? error.message : String(error || ''),
@@ -23028,9 +23894,11 @@ class WechatObsidianInboxPlugin extends Plugin {
         stdout,
         stderr,
       });
+      const transcriptionSegments = await readTranscriptSegmentsSidecar(outputPath);
       return options.includeQualityDetails === true
         ? {
           transcription,
+          ...(transcriptionSegments.length ? { transcriptionSegments } : {}),
           ...(localResult.qualityStatus ? { qualityStatus: localResult.qualityStatus } : {}),
           ...(localResult.qualityWarning ? { qualityWarning: localResult.qualityWarning } : {}),
         }
@@ -23105,6 +23973,31 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  // Re-read the public note document to obtain a fresh signed media URL. This is
+  // a plain HTTPS document request with the mobile note UA: no BrowserWindow, no
+  // login probe, and it honours the per-run Xiaohongshu restriction.
+  async refreshXiaohongshuMediaUrls(sourceUrl) {
+    const pageUrl = String(sourceUrl || '').trim();
+    if (!isXiaohongshuUrl(pageUrl)) return [];
+    throwIfXiaohongshuRestricted({}, 'media_refresh');
+    const response = await this.requestXiaohongshuStaticPage(pageUrl, {});
+    const html = String(response && response.text || '');
+    const identityUrl = resolveXiaohongshuIdentityUrl(
+      [pageUrl, String(response && response.url || '')],
+      html,
+    );
+    const extracted = extractXiaohongshuMarkdownFromHtml(html, identityUrl, '', { includeComments: false });
+    const urls = [];
+    const addUrl = (value) => {
+      const candidate = String(value || '').trim();
+      if (/^https?:\/\//i.test(candidate) && !urls.includes(candidate)) urls.push(candidate);
+    };
+    if (extracted && extracted.xiaohongshuPrimaryNoteMatched === true) {
+      addUrl(extracted.videoUrl);
+    }
+    return urls;
+  }
+
   async downloadMediaToTempFile(audioUrl, options = {}) {
     const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl)
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
@@ -23145,10 +24038,33 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw error;
       }
     };
+    const refreshXiaohongshuMediaUrlsWithinBudget = async () => {
+      const remainingMs = mediaDownloadDeadlineAt - Date.now();
+      if (remainingMs <= 0) throw createMediaDownloadTimeoutError('total');
+      try {
+        return await waitForPromiseWithAbort(
+          runBrowserTaskWithTimeout(
+            this.refreshXiaohongshuMediaUrls(sourceUrl),
+            remainingMs,
+            'Xiaohongshu media refresh',
+          ),
+          options.signal,
+        );
+      } catch (error) {
+        if (error && error.code === 'BROWSER_TASK_TIMEOUT') {
+          throw createMediaDownloadTimeoutError('total');
+        }
+        throw error;
+      }
+    };
     const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
     const canRecoverDouyin = isDouyinUrl(sourceUrl)
       || isDouyinUrl(audioUrl)
       || isDouyinMediaUrl(resolvedUrl);
+    const canRecoverXiaohongshu = Boolean(sourceUrl)
+      && (isXiaohongshuUrl(sourceUrl)
+        || isXiaohongshuMediaUrl(resolvedUrl)
+        || isXiaohongshuMediaUrl(audioUrl));
     let downloadedUrl = resolvedUrl;
     let downloadedArrayBuffer;
     const reportDownloadAttempt = (attempt = {}) => {
@@ -23189,46 +24105,95 @@ class WechatObsidianInboxPlugin extends Plugin {
         getMediaDownloadRequestOptions(),
       ));
     } catch (error) {
-      if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
-      let lastError = error;
-      try {
-        downloadedArrayBuffer = await runDownloadAttempt('browser-session', false, () => this.downloadMediaArrayBufferWithSession(
-          resolvedUrl,
-          requestHeaders,
-          getMediaDownloadRequestOptions(),
-        ));
-      } catch (sessionError) {
-        lastError = sessionError;
-        const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
-        for (const refreshedUrl of refreshedUrls) {
-          if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
+      if (!canRecoverDouyin && canRecoverXiaohongshu && isRecoverableXiaohongshuMediaDownloadError(error)) {
+        // A Xiaohongshu CDN transfer can be cut mid-stream, and the same signed
+        // URL can be refused by a bare Node client. Recover with at most three
+        // extra attempts: the same URL on Node, the same URL through the
+        // isolated Xiaohongshu browser session, then one re-signed URL from a
+        // fresh note read. No attempt creates a browser window.
+        let lastError = error;
+        const sameUrlAttempts = [
+          ['node-http', () => this.downloadArrayBuffer(resolvedUrl, requestHeaders, getMediaDownloadRequestOptions())],
+          ['xiaohongshu-session', () => this.downloadMediaArrayBufferWithSession(resolvedUrl, requestHeaders, getMediaDownloadRequestOptions())],
+        ];
+        for (const [transport, task] of sameUrlAttempts) {
           try {
             // eslint-disable-next-line no-await-in-loop
-            downloadedArrayBuffer = await runDownloadAttempt('node-http', true, () => this.downloadArrayBuffer(
-              refreshedUrl,
-              getSocialRequestHeaders(sourceUrl || refreshedUrl),
-              getMediaDownloadRequestOptions(),
-            ));
-            downloadedUrl = refreshedUrl;
+            downloadedArrayBuffer = await runDownloadAttempt(transport, false, task);
             break;
-          } catch (refreshedError) {
-            lastError = refreshedError;
-            if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
+          } catch (attemptError) {
+            if (isAbortError(attemptError) || options.signal?.aborted) throw createAbortError();
+            lastError = attemptError;
+          }
+        }
+        if (!downloadedArrayBuffer) {
+          let refreshedUrls = [];
+          try {
+            refreshedUrls = await refreshXiaohongshuMediaUrlsWithinBudget();
+          } catch (refreshError) {
+            if (isAbortError(refreshError) || options.signal?.aborted) throw createAbortError();
+            if (isXiaohongshuRateLimitError(refreshError)) throw refreshError;
+            lastError = refreshError;
+          }
+          for (const refreshedUrl of refreshedUrls.slice(0, 2)) {
+            if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
             try {
               // eslint-disable-next-line no-await-in-loop
-              downloadedArrayBuffer = await runDownloadAttempt('browser-session', true, () => this.downloadMediaArrayBufferWithSession(
+              downloadedArrayBuffer = await runDownloadAttempt('xiaohongshu-session', true, () => this.downloadMediaArrayBufferWithSession(
                 refreshedUrl,
                 getSocialRequestHeaders(sourceUrl || refreshedUrl),
                 getMediaDownloadRequestOptions(),
               ));
               downloadedUrl = refreshedUrl;
               break;
-            } catch (refreshedSessionError) {
-              lastError = refreshedSessionError;
+            } catch (refreshedError) {
+              lastError = refreshedError;
             }
           }
         }
-        if (!downloadedArrayBuffer) throw lastError;
+        if (!downloadedArrayBuffer) throw createXiaohongshuMediaUnavailableError(lastError);
+      } else {
+        if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
+        let lastError = error;
+        try {
+          downloadedArrayBuffer = await runDownloadAttempt('browser-session', false, () => this.downloadMediaArrayBufferWithSession(
+            resolvedUrl,
+            requestHeaders,
+            getMediaDownloadRequestOptions(),
+          ));
+        } catch (sessionError) {
+          lastError = sessionError;
+          const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
+          for (const refreshedUrl of refreshedUrls) {
+            if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              downloadedArrayBuffer = await runDownloadAttempt('node-http', true, () => this.downloadArrayBuffer(
+                refreshedUrl,
+                getSocialRequestHeaders(sourceUrl || refreshedUrl),
+                getMediaDownloadRequestOptions(),
+              ));
+              downloadedUrl = refreshedUrl;
+              break;
+            } catch (refreshedError) {
+              lastError = refreshedError;
+              if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                downloadedArrayBuffer = await runDownloadAttempt('browser-session', true, () => this.downloadMediaArrayBufferWithSession(
+                  refreshedUrl,
+                  getSocialRequestHeaders(sourceUrl || refreshedUrl),
+                  getMediaDownloadRequestOptions(),
+                ));
+                downloadedUrl = refreshedUrl;
+                break;
+              } catch (refreshedSessionError) {
+                lastError = refreshedSessionError;
+              }
+            }
+          }
+          if (!downloadedArrayBuffer) throw lastError;
+        }
       }
     }
     const downloadedBuffer = Buffer.from(downloadedArrayBuffer);
@@ -23304,7 +24269,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     return transcription;
   }
 
-  async runDoubaoTranscription(audioUrl) {
+  async runDoubaoTranscription(audioUrl, options = {}) {
+    // Callers that need the timestamped utterances pass withSegments; the
+    // default stays a plain string for existing call sites.
+    const formatResult = (state) => (options.withSegments === true
+      ? { transcription: state.transcription, transcriptionSegments: state.transcriptionSegments || [] }
+      : state.transcription);
     const taskKey = getDoubaoTaskKey(audioUrl);
     const pendingTasks = this.settings.pendingDoubaoTasks || {};
     const existingTask = pendingTasks[taskKey];
@@ -23313,7 +24283,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const existingState = await this.queryDoubaoTranscription(existingTask.requestId);
         if (existingState.status === 'success') {
           await this.clearPendingDoubaoTask(taskKey);
-          return existingState.transcription;
+          return formatResult(existingState);
         }
       } catch (error) {
         await this.clearPendingDoubaoTask(taskKey);
@@ -23338,7 +24308,7 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     const submitState = parseDoubaoAsrTaskState(submitResponse);
     if (submitState.status === 'success') {
-      return submitState.transcription;
+      return formatResult(submitState);
     }
     await this.savePendingDoubaoTask(taskKey, {
       requestId,
@@ -23360,7 +24330,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       if (state.status === 'success') {
         await this.clearPendingDoubaoTask(taskKey);
-        return state.transcription;
+        return formatResult(state);
       }
     }
 
@@ -23518,6 +24488,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcriptionStatus: 'success',
           transcriptionProvider: result.source,
           transcriptionSource: 'local-fallback',
+          ...(Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length
+            ? { transcriptionSegments: result.transcriptionSegments }
+            : {}),
           cloudTranscriptionError: metadata.transcriptionError || '',
           cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || 'cloud-pretranscription',
         };
@@ -23563,6 +24536,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           transcription: result.transcription,
           transcriptionStatus: 'success',
           transcriptionProvider: result.source,
+          ...(Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length
+            ? { transcriptionSegments: result.transcriptionSegments }
+            : {}),
           cloudTranscriptionProvider: result.cloudProvider || '',
           cloudTranscriptionRequestId: result.cloudRequestId || '',
           cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || 0,
@@ -23769,7 +24745,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (isSocialArticleUrl(sourceUrl) && socialArticleImageStorageMode === 'remote') {
       return markdown;
     }
-    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl);
+    const isSessionBackedSource = isFeishuSource || isWechatArticleUrl(sourceUrl) || isPlatformArticleUrl(sourceUrl);
     const stats = options.stats && typeof options.stats === 'object' ? options.stats : null;
     const reportError = (asset, error) => {
       if (stats) {
@@ -23916,10 +24892,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     const isXiaohongshuSource = isXiaohongshuUrl(sourceUrl);
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     const isFeishuSource = isFeishuUrl(sourceUrl);
+    const isPlatformArticleSource = isPlatformArticleUrl(sourceUrl);
     const socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
       options.socialArticleImageStorageMode || (this.settings && this.settings.socialArticleImageStorageMode),
     );
-    const isSessionBackedSource = isFeishuSource || isWechatArticleSource;
+    const isSessionBackedSource = isFeishuSource || isWechatArticleSource || isPlatformArticleSource;
     let nextMarkdown = isXiaohongshuSource
       ? sanitizeXiaohongshuMarkdownImages(String(markdown))
       : String(markdown);
@@ -23961,7 +24938,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
             : isFeishuSource
               ? { ...getSocialRequestHeaders(sourceUrl), Referer: sourceUrl }
-            : {};
+              : isPlatformArticleSource
+                ? getSocialRequestHeaders(sourceUrl)
+                : {};
         let arrayBuffer;
         try {
           // eslint-disable-next-line no-await-in-loop
@@ -24344,7 +25323,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         try {
           const candidateUrl = candidate.url;
           const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || '').trim();
-          const useCloudForWebpage = platform !== '视频号' && !candidateDecryptKey && (
+          // Cloud transcription is a Douyin-only capability. A cloud
+          // pre-transcription flag on any other platform must not become a
+          // /transcriptions/cloud submission here.
+          const useCloudForWebpage = isDouyinUrl(url) && !candidateDecryptKey && (
             metadata.transcriptionMode === 'cloud'
             || metadata.cloudTranscriptionRequested === true
           );
@@ -24360,7 +25342,9 @@ class WechatObsidianInboxPlugin extends Plugin {
               onMediaDownloadDiagnostic: reportMediaDownloadAttempt,
              })
             : await this.runConfiguredTranscription(candidateUrl, {
-              allowCloudUrlFallback: platform !== '视频号',
+              // No cloud URL fallback here: the Douyin fallback is submitted by
+              // the caller gate after Pro/binding checks, and no other platform
+              // may use the cloud worker at all.
               title: metadata.title || '',
               source: source || 'media-url',
               sourceUrl: url,
@@ -24385,6 +25369,9 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrls: getCandidates().map((item) => item.url),
             subtitleUrl,
             transcription: result.transcription,
+            ...(Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length
+              ? { transcriptionSegments: result.transcriptionSegments }
+              : {}),
             transcriptionStatus: 'success',
             transcriptionSource: result.source,
             conversionStatus: 'success',
@@ -25096,6 +26083,22 @@ class WechatObsidianInboxPlugin extends Plugin {
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
+    // Once this batch has seen a Xiaohongshu wall, later Xiaohongshu records
+    // must not touch the platform again. Non-Xiaohongshu records are untouched.
+    if (isXiaohongshuUrl(url) && getActiveXiaohongshuRestriction()) {
+      // A platform wall is a capture failure, not a dead link: this record can
+      // still be captured from another network, so ask the cloud nodes before
+      // reporting the batch-level stop.
+      const queued = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+        url,
+        binding,
+        signal,
+        title: title || metadata.title || '',
+        localError: '小红书平台限制了当前网络的访问',
+      });
+      if (queued && queued.record) return queued.record;
+      throwIfXiaohongshuRestricted(options, 'batch_guard');
+    }
     const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url)
       ? createXiaohongshuBrowserDiagnostic(record)
       : null;
@@ -25180,7 +26183,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             updateCommentResult({ status: 'skipped', reason: 'pro_not_confirmed', proAccess: false });
           } else {
             updateCommentResult({ proAccess: true, stage: 'login_check' });
-            const loggedIn = await this.checkXiaohongshuLogin({ signal, ...xiaohongshuBrowserOptions });
+            const loggedIn = await this.checkXiaohongshuLogin({ signal, ...xiaohongshuBrowserOptions, skipBrowserProbe: true });
             updateCommentResult({
               loginCheck: loggedIn ? 'passed' : 'unconfirmed',
               status: loggedIn ? 'running' : 'skipped',
@@ -25628,8 +26631,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         }
         try {
-          // Compatibility marker for the release guard: const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);
-          const rendered = await this.renderFeishuDocumentWithElectron(url);
+          const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);
           const feishuTitle = metadata.title || rendered.title || '飞书链接';
           let cleanedRenderedMarkdown = cleanMarkdownForStorage(rendered.markdown, {
             dedupe: true,
@@ -25828,6 +26830,9 @@ class WechatObsidianInboxPlugin extends Plugin {
               : await requestUrl({ url: resolvedUrl, method: 'GET', headers }));
         } catch (requestError) {
           if (!isXiaohongshuUrl(url)) throw requestError;
+          // A platform wall detected by the static request must not be retried
+          // through hidden-browser candidates.
+          if (isXiaohongshuRateLimitError(requestError)) throw requestError;
           for (const candidate of xiaohongshuBrowserCandidates) {
             throwIfAborted(signal);
             try {
@@ -25862,12 +26867,25 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (!isTrustedXiaohongshuCookieUrl(responseFinalUrl)) {
             throw new Error('小红书正文响应的最终地址无法确认为官方 HTTPS 内容页');
           }
-          resolvedUrl = responseFinalUrl;
-          xiaohongshuResolvedUrl = responseFinalUrl;
+          // A /login?redirectPath=... landing is not the note. Adopting it would
+          // make every later step (browser candidates, media intent, markdown)
+          // treat the login page as the note document.
+          const responseFinalIsLoginLanding = isXiaohongshuLoginLandingUrl(responseFinalUrl);
+          if (responseFinalIsLoginLanding) {
+            appendXiaohongshuBrowserDiagnostic(xiaohongshuBrowserOptions, {
+              type: 'stage',
+              stage: 'static_content',
+              outcome: 'login_landing_url_not_adopted',
+              url: responseFinalUrl,
+            });
+          } else {
+            resolvedUrl = responseFinalUrl;
+            xiaohongshuResolvedUrl = responseFinalUrl;
+          }
           xiaohongshuBrowserCandidates = getXiaohongshuBrowserCandidates(
             url,
             targetIdentityUrl,
-            responseFinalUrl,
+            responseFinalIsLoginLanding ? '' : responseFinalUrl,
           );
           primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0]
             ? xiaohongshuBrowserCandidates[0].url
@@ -25910,6 +26928,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             xiaohongshuLoggedIn = await this.checkXiaohongshuLogin({
               signal,
               ...xiaohongshuBrowserOptions,
+              skipBrowserProbe: true,
             });
           } catch (error) {
             if (isAbortError(error)) throw error;
@@ -26492,6 +27511,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 }
               } catch (error) {
                 if (isAbortError(error)) throw error;
+                if (isXiaohongshuRateLimitError(error)) throw error;
                 renderedXiaohongshuError = error;
                 xiaohongshuBrowserAttempts.push(buildXiaohongshuBrowserAttemptDiagnostic(
                   candidate,
@@ -26542,6 +27562,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (mediaUrl) break;
               } catch (renderError) {
                 if (isAbortError(renderError)) throw renderError;
+                if (isXiaohongshuRateLimitError(renderError)) throw renderError;
                 // Keep trying the other browser candidate.
               }
             }
@@ -26633,8 +27654,11 @@ class WechatObsidianInboxPlugin extends Plugin {
               throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
             }
           }
-          const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
-          if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {
+          if (shouldRunXiaohongshuImageOcr({
+            capabilities: xiaohongshuCapabilities,
+            extracted: extractedXiaohongshu,
+            mediaUrl,
+          })) {
             extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
               pageUrl: resolvedUrl,
               binding,
@@ -26706,6 +27730,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrl = mediaUrls[0] || mediaUrl;
           } catch (renderError) {
             if (isAbortError(renderError)) throw renderError;
+            if (isXiaohongshuRateLimitError(renderError)) throw renderError;
             mediaUrl = mediaUrl || '';
           }
         } else if (!isDouyinRecord && !hasUsableDouyinMedia
@@ -26717,6 +27742,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
           } catch (renderError) {
             if (isAbortError(renderError)) throw renderError;
+            if (isXiaohongshuRateLimitError(renderError)) throw renderError;
             mediaUrl = '';
           }
         }
@@ -26726,9 +27752,13 @@ class WechatObsidianInboxPlugin extends Plugin {
             pendingXiaohongshuFailureDiagnostic.browser = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
             throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
           }
-          const error = createRetryableTranscriptionError('小红书视频未转写：未获取到可用的视频资源。请复制诊断信息；原记录保留供重试。');
-          error.diagnostic = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
-          throw error;
+          // The mini program tags every xhslink.com/a/ share as audio_video, so
+          // a plain graphic note can arrive with video intent and no media. That
+          // is a content extraction outcome, never a transcription failure:
+          // report it as such so the user is not told a transcript broke.
+          throw createRetryableXiaohongshuContentError(
+            xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings),
+          );
         }
         if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
           if (xiaohongshuBrowserDiagnostic) {
@@ -26740,7 +27770,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         if (mediaUrl) {
           if (isXiaohongshuUrl(url) && !xiaohongshuCapabilities.mediaTranscription) {
-            throw createRetryableTranscriptionError('转写未执行：Pro 已到期，请续期后重试。');
+            throw createXiaohongshuProRequiredError();
           }
           const selectedSupplementalMarkdown = isXiaohongshuUrl(url)
             && extractedXiaohongshu
@@ -26885,6 +27915,171 @@ class WechatObsidianInboxPlugin extends Plugin {
             socialMetrics: withCapturedSocialMetrics(extracted.socialMetrics, new Date().toISOString()),
             videoUrl: extracted.videoUrl || '',
             conversionStatus: 'success',
+          },
+        };
+      }
+
+      if (isPlatformArticleUrl(url)) {
+        const platformUrl = normalizePlatformArticleUrl(url);
+        const platformKind = getPlatformArticleKind(platformUrl);
+        const platformLabel = getPlatformArticleLabel(platformUrl);
+        let platformResult = null;
+        let platformStage = '';
+        let platformError = null;
+        let platformHiddenBrowserDiagnostic = null;
+        let platformHttpDiagnostic = null;
+        try {
+          platformResult = await renderPlatformArticleWithElectron(platformUrl);
+          platformHiddenBrowserDiagnostic = {
+            ok: Boolean(platformResult && String(platformResult.markdown || '').trim()),
+            needsLogin: Boolean(platformResult && platformResult.needsLogin),
+            blocked: Boolean(platformResult && platformResult.blocked),
+            appWall: Boolean(platformResult && platformResult.appWall),
+            bodyTextChars: Number(platformResult && platformResult.bodyTextChars) || 0,
+            finalHost: getSafeUrlDiagnostic(platformResult && platformResult.finalUrl || platformUrl).host || '',
+            ...(platformResult && platformResult.loadError ? { loadError: platformResult.loadError } : {}),
+          };
+          if (platformResult && String(platformResult.markdown || '').trim()) {
+            platformStage = 'hidden-browser';
+          } else if (platformResult && platformResult.blocked) {
+            platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+          } else if (platformResult && platformResult.needsLogin) {
+            platformError = new Error('页面需要登录后才能读取正文');
+          } else if (platformResult && platformResult.appWall) {
+            platformError = new Error(`${platformLabel}要求用 App 打开此链接；请改用网页版链接（www.toutiao.com/article/…）重试`);
+          }
+        } catch (error) {
+          platformError = error;
+          platformHiddenBrowserDiagnostic = {
+            ok: false,
+            needsLogin: false,
+            blocked: false,
+            error: String(error && (error.message || error) || '').slice(0, 160),
+          };
+        }
+
+        // HTTP fallback: server-rendered payloads (Toutiao RENDER_DATA / Zhihu
+        // js-initialData) are preferred over the whole-page HTML, which carries
+        // navigation chrome that htmlToMarkdown would happily keep.
+        if (!platformStage) {
+          let html = '';
+          let transportError = null;
+          try {
+            const response = await requestUrl({
+              url: platformUrl,
+              method: 'GET',
+              headers: {
+                ...getSocialRequestHeaders(platformUrl),
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              },
+            });
+            html = String(response && response.text || '');
+            platformHttpDiagnostic = { transport: 'obsidian-requestUrl', status: Number(response && response.status) || 0 };
+          } catch (error) {
+            transportError = error;
+            platformHttpDiagnostic = {
+              transport: 'obsidian-requestUrl',
+              status: Number(error && (error.status || (error.response && error.response.status))) || 0,
+              error: String(error && (error.message || error) || '').slice(0, 160),
+            };
+            try {
+              html = String(await this.downloadWebpageHtmlViaNode(platformUrl) || '');
+              platformHttpDiagnostic.transport = 'node-http';
+            } catch (nodeError) {
+              platformHttpDiagnostic.transport = 'node-http-failed';
+              platformHttpDiagnostic.nodeError = String(nodeError && (nodeError.message || nodeError) || '').slice(0, 160);
+              if (!platformError) {
+                platformError = new Error(`网页抓取失败：${error.message || error}；降级错误：${nodeError.message || nodeError}`);
+              }
+            }
+          }
+          const platformBlockMarker = PLATFORM_ARTICLE_SELECTORS[platformKind]
+            && PLATFORM_ARTICLE_SELECTORS[platformKind].blockMarker;
+          if (html && platformBlockMarker && platformBlockMarker.test(html)) {
+            html = '';
+            if (!platformError) {
+              platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+            }
+          }
+          if (html) {
+            const embedded = extractPlatformArticleFromHtml(html, platformKind);
+            let markdown = '';
+            if (embedded && embedded.contentHtml) {
+              try {
+                markdown = htmlToMarkdown(embedded.contentHtml);
+              } catch (error) {
+                markdown = '';
+              }
+            } else if (embedded && embedded.contentText) {
+              markdown = embedded.contentText;
+            }
+            if (!markdown) {
+              try {
+                markdown = htmlToMarkdown(html);
+              } catch (error) {
+                if (!platformError) platformError = error;
+              }
+            }
+            if (markdown) {
+              platformResult = {
+                ...(platformResult || {}),
+                title: (platformResult && platformResult.title) || (embedded && embedded.title) || '',
+                author: (platformResult && platformResult.author) || (embedded && embedded.author) || '',
+                markdown,
+              };
+              platformStage = embedded ? `http-${embedded.source}` : (transportError ? 'node-html' : 'http-html');
+            }
+          }
+        }
+
+        if (!platformResult || !String(platformResult.markdown || '').trim()) {
+          const error = platformError || new Error(`${platformLabel}正文提取失败`);
+          error.platformDiagnostic = redactSensitiveObject({
+            source: 'platform-article',
+            platform: platformKind,
+            stage: platformStage || 'hidden-browser',
+            hiddenBrowser: platformHiddenBrowserDiagnostic,
+            http: platformHttpDiagnostic,
+            reason: String(error && (error.message || error) || '').slice(0, 200),
+          });
+          throw error;
+        }
+
+        let platformMarkdown = String(platformResult.markdown || '').trim();
+        const pageTitle = metadata.title || platformResult.title || title || `${platformLabel}文章`;
+        const imageLocalizationErrors = [];
+        platformMarkdown = await this.saveMarkdownRemoteImageAssets(
+          platformMarkdown,
+          rootDir,
+          dateFolder,
+          pageTitle,
+          {
+            sourceUrl: platformUrl,
+            onError: ({ error }) => {
+              imageLocalizationErrors.push(String(error && (error.message || error) || 'unknown error'));
+            },
+          },
+        );
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            title: pageTitle,
+            url: platformUrl,
+            originalUrl: metadata.originalUrl || url,
+            author: metadata.author || platformResult.author || '',
+            platform: metadata.platform || platformLabel,
+            contentCategory: '图文',
+            markdown: platformMarkdown,
+            conversionStatus: 'success',
+            conversionNote: platformStage === 'hidden-browser' ? '' : `已通过 ${platformStage} 抓取`,
+            conversionDiagnostic: {
+              source: 'platform-article',
+              platform: platformKind,
+              stage: platformStage,
+            },
+            imageLocalizationFailedCount: imageLocalizationErrors.length,
+            imageLocalizationError: imageLocalizationErrors.slice(0, 3).join(' | '),
           },
         };
       }
@@ -27464,6 +28659,21 @@ class WechatObsidianInboxPlugin extends Plugin {
         updateCommentResult({ status: isAbortError(error) ? 'aborted' : 'not_attempted', reason: 'content_failed', errorCode: getXiaohongshuCommentErrorCode(error) });
       }
       if (isAbortError(error)) throw error;
+      // A platform rate limit is a network-side refusal, not a dead link, so the
+      // record is still recoverable from a different network. Hand it to the
+      // cloud nodes first; only the records that stay local keep the batch-stop
+      // code and message.
+      if (isXiaohongshuRateLimitError(error)) {
+        const rateLimitedFallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+          url,
+          binding,
+          signal,
+          title: title || metadata.title || '',
+          localError: '小红书拒绝了当前请求（平台限流或安全验证）',
+        });
+        if (rateLimitedFallback && rateLimitedFallback.record) return rateLimitedFallback.record;
+        throw error;
+      }
       if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
@@ -27480,7 +28690,44 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (xiaohongshuBrowserDiagnostic) {
           failureDiagnostic.browser = redactSensitiveObject(xiaohongshuBrowserDiagnostic);
         }
+        const cloudFallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+          url,
+          binding,
+          signal,
+          title: title || metadata.title || '',
+          localError: describeXiaohongshuContentFailure(failureDiagnostic),
+          linkDiagnostic: failureDiagnostic,
+        });
+        if (cloudFallback && cloudFallback.record) return cloudFallback.record;
+        if (cloudFallback && cloudFallback.gateMessage) {
+          const error = createRetryableXiaohongshuContentError(failureDiagnostic);
+          error.message = [error.message, cloudFallback.gateMessage].filter(Boolean).join('；');
+          throw error;
+        }
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
+      }
+      if (isPlatformArticleUrl(url)) {
+        const platformLabel = getPlatformArticleLabel(url);
+        const failureReason = String(error && (error.message || error) || '').trim();
+        const needsLogin = /登录|安全验证|验证码/.test(failureReason);
+        return {
+          ...record,
+          metadata: {
+            ...metadata,
+            url: normalizePlatformArticleUrl(url),
+            platform: metadata.platform || platformLabel,
+            contentCategory: '图文',
+            markdown: [
+              `> ${needsLogin ? `${platformLabel}页面需要登录后才能读取正文。` : `${platformLabel}正文未能自动提取。`}`,
+              '> 原始链接已写入笔记属性，可稍后重新同步。',
+              '',
+              `原始链接：${normalizePlatformArticleUrl(url)}`,
+            ].join('\n'),
+            conversionStatus: 'link_saved',
+            conversionError: failureReason || `${platformLabel}正文提取失败`,
+            ...(error && error.platformDiagnostic ? { conversionDiagnostic: error.platformDiagnostic } : {}),
+          },
+        };
       }
       if (isXiaoyuzhouUrl(url) || isBilibiliUrl(url) || isDouyinUrl(url)) {
         return {
@@ -27892,6 +29139,17 @@ class WechatObsidianInboxPlugin extends Plugin {
     }    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
+      // A Xiaohongshu record reaches this point only when the mini program
+      // tagged a share link as audio_video and no transcript could be produced.
+      // Report it as the content-extraction outcome it is, so the mini program
+      // never labels an XHS note "音视频转写失败".
+      if (isXiaohongshuUrl(getRecordUrl(recordForMarkdown))) {
+        throw createRetryableXiaohongshuContentError(
+          metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === 'object'
+            ? metadata.mediaResolutionDiagnostic
+            : { reason: 'xiaohongshu-content-incomplete' },
+        );
+      }
       const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
       const transcriptionError = channelsOutcome
         ? Object.assign(new Error(channelsOutcome.message), channelsOutcome)
@@ -28325,6 +29583,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async syncBinding(binding, shouldPrefixTitle) {
     this.ensureSerializedSaveData();
+    // Restriction state is scoped to one sync run: a wall stops the rest of
+    // this batch, and the next run starts with a clean slate.
+    clearXiaohongshuRestriction();
     const bindingLabel = binding && (binding.label || binding.token) ? (binding.label || binding.token) : '';
     await this.replayPendingSyncLifecycleAttempts(binding);
     // A previous run may have written the note but failed to release its
@@ -28440,6 +29701,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (!this.backgroundSyncActive) {
           this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端转写中` });
         }
+        continue;
+      }
+      // Once this sync run has seen a Xiaohongshu 300013 / security wall, later
+      // Xiaohongshu records must not touch the platform again. Mark them
+      // skipped (not failed) before claiming a lease so they stay pending and
+      // are picked up by the next sync run, without a manual retry. Records from
+      // every other platform keep their existing behavior.
+      const recordSourceUrl = (record && record.metadata && (record.metadata.url || record.metadata.originalUrl))
+        || (record && typeof record.content === 'string' ? record.content : '');
+      if (isXiaohongshuUrl(recordSourceUrl) && getActiveXiaohongshuRestriction()) {
+        skipped.push({ recordId, reason: 'xiaohongshu-rate-limited' });
         continue;
       }
       const processingAbortController = new AbortController();
@@ -29401,6 +30673,24 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
+      .setName('分段转写时间戳')
+      .setDesc('音视频笔记的「分段转写」里，点击 [00:00] 时间戳可让笔记内嵌播放器跳到对应位置。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.transcriptTimestampsEnabled === true)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({ ...this.plugin.settings, transcriptTimestampsEnabled: value === true });
+        }));
+
+    new Setting(containerEl)
+      .setName('播放器截图按钮')
+      .setDesc('在音视频笔记的内嵌视频下方显示「截图」按钮，手动保存当前画面到笔记附件目录。')
+      .addToggle((toggle) => toggle
+        .setValue(this.plugin.settings.transcriptScreenshotEnabled === true)
+        .onChange(async (value) => {
+          await this.plugin.saveSettings({ ...this.plugin.settings, transcriptScreenshotEnabled: value === true });
+        }));
+
+    new Setting(containerEl)
       .setName('立即同步')
       .setDesc('手动拉取云端收集箱，并写入当前 vault。')
       .addButton((button) => button
@@ -29410,13 +30700,23 @@ class WechatInboxSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('同步/安装失败诊断')
-      .setDesc('复制诊断信息，便于反馈和排查问题。')
+      .setDesc('默认只复制本次失败的摘要；排查组件安装问题时再复制完整诊断。')
       .addButton((button) => button
-        .setButtonText('复制诊断信息')
+        .setButtonText('复制本次失败')
+        .setCta()
+        .onClick(async () => {
+          try {
+            await this.plugin.copyCompactSyncDiagnosticText();
+          } catch (error) {
+            new Notice(`复制诊断信息失败：${error.message || error}`);
+          }
+        }))
+      .addButton((button) => button
+        .setButtonText('复制完整诊断')
         .onClick(async () => {
           try {
             await this.plugin.copySyncDiagnosticText({ detailed: true });
-            new Notice('诊断信息已复制');
+            new Notice('完整诊断信息已复制');
           } catch (error) {
             new Notice(`复制诊断信息失败：${error.message || error}`);
           }
@@ -29925,6 +31225,7 @@ WechatObsidianInboxPlugin.__test = {
   buildWebpageTransportDiagnostic,
   buildDouyinMediaResolutionDiagnostic,
   getXiaohongshuCapabilityMatrix,
+  shouldRunXiaohongshuImageOcr,
   runWithDouyinBrowserSessionLock,
   runWithXiaohongshuBrowserSessionLock,
   renderXiaohongshuPageWithElectron,
@@ -29937,6 +31238,18 @@ WechatObsidianInboxPlugin.__test = {
   buildXiaohongshuFailureDiagnostic,
   createRetryableXiaohongshuContentError,
   isRetryableXiaohongshuContentError,
+  isXiaohongshuLoginLandingUrl,
+  isXiaohongshuMediaUrl,
+  getXiaohongshuDocumentRequestHeaders,
+  isRecoverableXiaohongshuMediaDownloadError,
+  isXiaohongshuMediaFailure,
+  detectXiaohongshuSecurityRestriction,
+  markXiaohongshuRestriction,
+  getActiveXiaohongshuRestriction,
+  clearXiaohongshuRestriction,
+  createXiaohongshuRateLimitError,
+  createXiaohongshuProRequiredError,
+  isXiaohongshuRateLimitError,
   isPermanentlyExpiredXiaohongshuShortlinkRecord,
   isRemoteAsrDownloadFailure,
   getDoubaoTaskKey,
@@ -30015,6 +31328,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,
+  shouldGenerateAiMetadata,
   cleanMarkdownForStorage,
   resolveRedirectUrlWithDiagnostics,
   resolveRedirectUrl,

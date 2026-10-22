@@ -36,6 +36,13 @@ function categorizeSyncFailure(error) {
   if (code === 'LOCAL_COMPONENT_SETUP_REQUIRED') return 'LOCAL_COMPONENT_UNAVAILABLE';
   if (code === 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED' || code === 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED') return 'SYNC_FAILED';
   if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
+  // Xiaohongshu records are webpage extractions first. The mini program tags
+  // every xhslink.com/a/ share as audio_video, so a wall, an unavailable note or
+  // an unresolved media candidate can carry transcription-shaped wording while
+  // nothing was transcribed. Never report those as a transcription failure.
+  if (/^XIAOHONGSHU_/.test(code)) {
+    return code === 'XIAOHONGSHU_PRO_REQUIRED' ? 'SYNC_FAILED' : 'EXTRACTION_FAILED';
+  }
   if (code === 'UNSUPPORTED_PLATFORM'
     || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code)
     || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)/.test(message)
@@ -291,6 +298,11 @@ function isExistingLocalNoteDeliverable(record, markdown) {
   return meaningfulLength > 0 || hasEmbeddedAttachment;
 }
 
+function isXiaohongshuRecordSource(value) {
+  return /^https?:\/\/(?:[^/?#]*\.)?(?:xiaohongshu\.com|xhslink\.com|xhslink\.cn)(?:[/?#]|$)/i
+    .test(String(value || '').trim());
+}
+
 function getSyncLifecycleOutcomeError(record) {
   const source = record && typeof record === 'object' ? record : {};
   const metadata = source.metadata && typeof source.metadata === 'object' ? source.metadata : {};
@@ -308,7 +320,10 @@ function getSyncLifecycleOutcomeError(record) {
   const declaredError = `${metadata.conversionError || ''} ${metadata.transcriptionError || ''}`.trim();
   if (transcriptionStatus === 'no_speech' || conversionStatus === 'no_speech') {
     if (isRecognizedNoSpeechMetadata(metadata)) return null;
-    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', '无语音识别结果缺少有效证据');
+    // Same reason as below: an Xiaohongshu record is an extraction outcome.
+    return isXiaohongshuRecordSource(url)
+      ? createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '小红书内容提取失败，请重新同步')
+      : createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', '无语音识别结果缺少有效证据');
   }
   const meaningfulLength = getMeaningfulMarkdownLength(markdown);
   const hasUsableImages = hasWechatImageBody(source, markdown);
@@ -319,7 +334,13 @@ function getSyncLifecycleOutcomeError(record) {
   const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
   if (channelsOutcome && transcriptionStatus === 'failed') return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
   if (transcriptionStatus === 'failed' && !transcription) {
-    return createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
+    // Xiaohongshu shares are webpages first; the mini program tags every
+    // xhslink.com/a/ link as audio_video, so a persisted transcript failure on
+    // those records would surface as "音视频转写失败" for a note that was only
+    // ever being extracted. Report it as an extraction outcome instead.
+    return isXiaohongshuRecordSource(url)
+      ? createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '小红书内容提取失败，请重新同步')
+      : createSyncLifecycleOutcomeError('TRANSCRIPTION_FAILED', metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
   }
   if (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError)
     && (hasDeclaredFailureState || !hasUsableOutput)) {

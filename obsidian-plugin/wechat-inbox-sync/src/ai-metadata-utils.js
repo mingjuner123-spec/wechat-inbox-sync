@@ -141,6 +141,10 @@ function createAiMetadataHelpers(dependencies = {}) {
 
   function extractAiMetadataInputText(record) {
     const metadata = (record && record.metadata) || {};
+    const recordType = String((record && record.type) || '').toLowerCase();
+    // A plain text collect keeps its body in record.content; file records use
+    // content for the file name, so only the text type can contribute here.
+    const plainTextContent = recordType === 'text' ? record && record.content : '';
     const isTranscriptRecord = metadata.transcriptOnly
       || metadata.webpageMediaType === 'audio_video'
       || (
@@ -159,6 +163,8 @@ function createAiMetadataHelpers(dependencies = {}) {
       : [
         metadata.title,
         metadata.markdown,
+        metadata.convertedMarkdown,
+        plainTextContent,
         metadata.snapshot,
         metadata.contentSnapshot,
         metadata.description,

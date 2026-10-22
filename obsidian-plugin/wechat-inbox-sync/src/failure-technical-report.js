@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { diagnosticRedact, readMatchingCrashSummary } = require('./asr-recovery-utils');
 const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
 const diagnosticNativeEvidence = require('./diagnostic-native-evidence');
+const xhsDiagnostic = require('./xiaohongshu-diagnostic-utils');
 
 const MAX_REPORT_TEXT_BYTES = 128 * 1024;
 const MAX_SESSION_BYTES = 768 * 1024;
@@ -519,6 +520,90 @@ function safeAttempt(item = {}) {
     runLog: freshness === 'fresh' ? String(item.runLog || '') : '[' + freshness + ': per-attempt log omitted]',
   };
 }
+const XIAOHONGSHU_PAGE_TYPES = new Set([
+  'xiaohongshu-note',
+  'xiaohongshu-generic-landing',
+  'xiaohongshu-unavailable',
+  'unexpected-host',
+  'unknown',
+]);
+const XIAOHONGSHU_REQUEST_INPUT_KINDS = new Set([
+  'original-shortlink',
+  'source-url',
+  'resolved-url',
+  'response-final-url',
+]);
+function safeHostname(value) {
+  const host = String(value || '').trim().toLowerCase();
+  return /^[a-z0-9](?:[a-z0-9.-]{0,118}[a-z0-9])?$/.test(host) ? host : '';
+}
+// A Xiaohongshu failure diagnostic explains why the note produced no content
+// (static surface, login landing, hidden-browser attempts). Without it an
+// uploaded sync_failure report is classified as insufficient_evidence.
+function safeXiaohongshuExtractionDiagnostic(value, settings = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const request = value.request && typeof value.request === 'object' && !Array.isArray(value.request)
+    ? value.request : null;
+  const extraction = value.extraction && typeof value.extraction === 'object' && !Array.isArray(value.extraction)
+    ? value.extraction : null;
+  const browser = value.browser && typeof value.browser === 'object' && !Array.isArray(value.browser)
+    ? value.browser : null;
+  if (!request && !extraction && !browser) return null;
+
+  const result = { component: 'xiaohongshu' };
+  if (request) {
+    const safeRequest = {
+      sourceHost: safeHostname(request.sourceHost),
+      finalHost: safeHostname(request.finalHost),
+      redirected: request.redirected === true,
+      pageType: XIAOHONGSHU_PAGE_TYPES.has(request.pageType) ? request.pageType : 'unknown',
+      renderFailed: request.renderFailed === true,
+      requestFailed: request.requestFailed === true,
+      browserTimedOut: request.browserTimedOut === true,
+      usedGetFallback: request.usedGetFallback === true,
+    };
+    const status = nonnegativeInt(request.responseStatus);
+    if (status !== null) safeRequest.responseStatus = Math.min(status, 599);
+    const redirectCount = nonnegativeInt(request.redirectCount);
+    if (redirectCount !== null) safeRequest.redirectCount = Math.min(redirectCount, 10);
+    if (Array.isArray(request.redirectAttempts)) {
+      safeRequest.redirectAttempts = request.redirectAttempts.slice(0, 6).map((attempt) => ({
+        method: ['HEAD', 'GET'].includes(attempt && attempt.method) ? attempt.method : '',
+        status: Math.min(nonnegativeInt(attempt && attempt.status) || 0, 599),
+        host: safeHostname(attempt && attempt.host),
+        outcome: safeDiagnosticText(attempt && attempt.outcome, settings, 48),
+      }));
+    }
+    if (Array.isArray(request.browserAttempts)) {
+      safeRequest.browserAttempts = request.browserAttempts.slice(0, 6).flatMap((attempt) => {
+        if (!attempt || typeof attempt !== 'object') return [];
+        return [{
+          inputKind: XIAOHONGSHU_REQUEST_INPUT_KINDS.has(attempt.inputKind) ? attempt.inputKind : 'unknown',
+          attempted: attempt.attempted === true,
+          finalHost: safeHostname(attempt.finalHost),
+          pageType: XIAOHONGSHU_PAGE_TYPES.has(attempt.pageType) ? attempt.pageType : 'unknown',
+          bodyCharacterCount: Math.min(nonnegativeInt(attempt.bodyCharacterCount) || 0, 10_000_000),
+          imageCount: Math.min(nonnegativeInt(attempt.imageCount) || 0, 10_000),
+          failed: attempt.failed === true,
+          timedOut: attempt.timedOut === true,
+        }];
+      });
+    }
+    result.request = safeRequest;
+  }
+  if (extraction) {
+    result.extraction = {
+      hasUsableTitle: extraction.hasUsableTitle === true,
+      bodyCharacterCount: Math.min(nonnegativeInt(extraction.bodyCharacterCount) || 0, 10_000_000),
+      imageCount: Math.min(nonnegativeInt(extraction.imageCount) || 0, 10_000),
+      shareBoilerplateOnly: extraction.shareBoilerplateOnly === true,
+      genericLanding: extraction.genericLanding === true,
+      unavailablePage: extraction.unavailablePage === true,
+    };
+  }
+  if (browser) result.browser = xhsDiagnostic.sanitize(browser, settings);
+  return redactTree(result, settings);
+}
 function safeError(error, settings = {}) {
   const source = error && typeof error === 'object' ? error : { message: String(error || '') };
   const allFrames = String(source.stack || '').split(/\r?\n/).map(line => line.trim())
@@ -539,6 +624,8 @@ function safeError(error, settings = {}) {
   if (mediaResolutionDiagnostic) value.mediaResolutionDiagnostic = mediaResolutionDiagnostic;
   const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic, settings);
   if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
+  const xiaohongshuDiagnostic = safeXiaohongshuExtractionDiagnostic(source.diagnostic, settings);
+  if (xiaohongshuDiagnostic) value.xiaohongshuDiagnostic = xiaohongshuDiagnostic;
   return redactTree(value, settings);
 }
 function matchAsrSession(session, { recordId, attemptId, now }) {

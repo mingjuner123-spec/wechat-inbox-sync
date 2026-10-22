@@ -3,6 +3,7 @@ const { cleanTranscriptionTail, formatTranscriptForReading } = require('./readab
 
 const { toSimplifiedChinese, NO_SPEECH_SAVED_MESSAGE, isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
 const { QUALITY_NOTICE_START, QUALITY_NOTICE_END, QUALITY_PARTIAL_NOTICE } = require('./transcription-partial-note-utils');
+const { buildTranscriptSegmentsMarkdown, normalizeTranscriptSegments, transcriptSegmentsCoverText } = require('./transcript-segment-utils');
 
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
@@ -34,6 +35,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     transcriptionSource = '',
     transcriptionError = '',
     transcriptionQualityStatus = '',
+    transcriptionSegments = [],
   }) {
     url = helpers.cleanDisplayUrl(url);
     const status = String(transcriptionStatus || '').toLowerCase();
@@ -48,11 +50,23 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
         : isCloudPending
           ? '云端转写中，下次同步会自动更新。'
           : '转写处理中，或未配置可用的转写方案。');
+    const segmentsMarkdown = buildTranscriptSegmentsMarkdown(transcriptionSegments);
+    // Timed segments already contain the text, so the flat copy is only kept
+    // when the segments are missing a substantial part of the transcript. A
+    // producer that returns only segments has no flat text to fall back on;
+    // printing the placeholder above real segments would just be noise.
+    if (segmentsMarkdown && (
+      !String(transcription || '').trim()
+      || transcriptSegmentsCoverText(transcriptionSegments, transcription)
+    )) {
+      return segmentsMarkdown;
+    }
     return [
       '## 口播/音频文案',
       '',
       content,
       '',
+      segmentsMarkdown,
     ].filter((line) => line !== '').join('\n');
   }
 
@@ -103,6 +117,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     mediaUrls = [],
     subtitleUrl = '',
     transcription = '',
+    transcriptionSegments = [],
     transcriptionStatus = 'failed',
     transcriptionSource = '',
     transcriptionError = '',
@@ -129,6 +144,11 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       .map((item) => helpers.normalizeExtractedUrl(typeof item === 'string' ? item : (item && item.url)))
       .filter((item) => /^https?:\/\//i.test(item))));
     if (mediaUrl && !normalizedMediaUrls.includes(mediaUrl)) normalizedMediaUrls.unshift(mediaUrl);
+    const normalizedSegments = normalizeTranscriptSegments(
+      Array.isArray(transcriptionSegments) && transcriptionSegments.length
+        ? transcriptionSegments
+        : rest.transcriptionSegments,
+    );
     return {
       ...rest,
       title: String(sourceTitle || rest.sourceTitle || rest.title || `${sourceName}口播文案`).trim(),
@@ -144,6 +164,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       mediaUrls: normalizedMediaUrls,
       subtitleUrl,
       transcription: toSimplifiedChinese(cleanTranscriptionTail(transcription)),
+      ...(normalizedSegments.length ? { transcriptionSegments: normalizedSegments } : {}),
       transcriptionStatus,
       transcriptionSource,
       transcriptionError,
@@ -234,6 +255,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
         transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || '',
         transcriptionError: metadata.transcriptionError || metadata.conversionError || '',
         transcriptionQualityStatus: metadata.transcriptionQualityStatus || '',
+        transcriptionSegments: metadata.transcriptionSegments || [],
       });
       return [sourceMediaMarkdown, snapshot, transcriptMarkdown, trailingMarkdown, automaticShareTextMarkdown]
         .filter(Boolean)
@@ -310,15 +332,20 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       const content = transcription || (transcriptionStatus === 'failed'
         ? `转写失败。${transcriptionError || '未能提取到音视频文案。'}`
         : '转写处理中，或未配置可用的转写方案。');
+      const segmentsMarkdown = buildTranscriptSegmentsMarkdown(metadata.transcriptionSegments || []);
+      const hasFullSegments = segmentsMarkdown
+        && transcriptSegmentsCoverText(metadata.transcriptionSegments || [], metadata.transcription || '');
       return [
         `文件名：${fileName}`,
         attachmentLine,
         fileID ? `云端文件：${fileID}` : '',
         metadata.transcriptionSource ? `转写来源：${metadata.transcriptionSource}` : '',
         '',
-        '## 口播/音频文案',
+        hasFullSegments ? '' : '## 口播/音频文案',
         '',
-        content,
+        hasFullSegments ? '' : content,
+        '',
+        segmentsMarkdown,
         '',
       ].filter((line) => line !== '').join('\n');
     }

@@ -10,6 +10,9 @@ const OPERATOR_NODE_TOKEN_ENV = 'WECHAT_INBOX_OPERATOR_NODE_TOKEN';
 const OPERATOR_NODE_API_BASE_ENV = 'WECHAT_INBOX_OPERATOR_NODE_API_BASE';
 const WORKER_PROTOCOL_VERSION = 'cfb-worker/v2';
 const DEFAULT_CAPABILITIES = Object.freeze(['media_acquire', 'local_asr']);
+// Advertised only while the plugin really exposes the Xiaohongshu capture path
+// and the deployment's node registry accepted the capability.
+const XIAOHONGSHU_CAPABILITY = 'xiaohongshu';
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 // An idle node backs off to one claim per two minutes. This stays well under
 // the worker capacity TTL, so a queued job is still noticed promptly.
@@ -160,6 +163,30 @@ function isDouyinSourceUrl(value) {
   }
 }
 
+function isXiaohongshuSourceUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    return /^https?:$/.test(url.protocol)
+      && (/(^|\.)xiaohongshu\.com$/i.test(url.hostname)
+        || /(^|\.)xhslink\.com$/i.test(url.hostname)
+        || /(^|\.)xhslink\.cn$/i.test(url.hostname));
+  } catch (_) {
+    return false;
+  }
+}
+
+// A media job carries no platform field, so the pair (sourceType, sourceUrl)
+// is the only thing that decides which capture path may run. An unknown pair is
+// rejected instead of being guessed at, because claiming a job here takes it
+// away from every other node.
+function resolveMediaSourcePlatform(job) {
+  const sourceType = String(job && job.sourceType || '').trim().toLowerCase();
+  const sourceUrl = String(job && job.sourceUrl || '').trim();
+  if (sourceType === 'douyin_url' && isDouyinSourceUrl(sourceUrl)) return 'douyin';
+  if (sourceType === 'xiaohongshu_url' && isXiaohongshuSourceUrl(sourceUrl)) return 'xiaohongshu';
+  return '';
+}
+
 function createOperatorMediaNode({
   plugin = null,
   env = process.env,
@@ -254,14 +281,40 @@ function createOperatorMediaNode({
   const complete = async (job, body) => {
     return await callApi('/transcriptions/fallback/worker/complete', { ...baseForJob(job), ...body }, { signal: null });
   };
+  // Optional capabilities are negotiated, never assumed. A deployment whose
+  // node registry predates one of them rejects the whole worker request
+  // (WORKER_CAPABILITY_FORBIDDEN), which would take the node offline the moment
+  // a new plugin starts. Drop the rejected optional capability and retry, so an
+  // older server keeps receiving everything the plugin already supported.
+  const rejectedCapabilities = new Set();
   const getCapabilities = () => {
     const capabilities = ['media_acquire'];
+    if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY)
+      && plugin && typeof plugin.acquireOperatorXiaohongshuContent === 'function') {
+      capabilities.push(XIAOHONGSHU_CAPABILITY);
+    }
     try {
-      if (plugin && typeof plugin.getLocalAsrInstallStatus === 'function'
+      if (!rejectedCapabilities.has('local_asr')
+        && plugin && typeof plugin.getLocalAsrInstallStatus === 'function'
         && plugin.getLocalAsrInstallStatus().ready === true
         && (typeof plugin.isOperatorLocalAsrAvailable !== 'function' || plugin.isOperatorLocalAsrAvailable())) capabilities.push('local_asr');
     } catch (_) { /* A missing local component is not advertised as capable. */ }
     return capabilities;
+  };
+  const withCapabilityNegotiation = async (send) => {
+    for (;;) {
+      try {
+        return await send();
+      } catch (error) {
+        if (!error || error.code !== 'WORKER_CAPABILITY_FORBIDDEN') throw error;
+        const candidate = [XIAOHONGSHU_CAPABILITY, 'local_asr']
+          .find((capability) => getCapabilities().includes(capability));
+        if (!candidate) throw error;
+        rejectedCapabilities.add(candidate);
+        lastErrorCode = 'WORKER_CAPABILITY_DOWNGRADED';
+        try { logger({ type: 'capability-downgraded', capability: candidate }); } catch (_) { /* Diagnostics are advisory. */ }
+      }
+    }
   };
   const stopCapacityHeartbeat = () => {
     if (capacityHeartbeatTimer) clearInterval(capacityHeartbeatTimer);
@@ -273,22 +326,23 @@ function createOperatorMediaNode({
   const sendCapacityHeartbeat = async () => {
     if (!running) return false;
     if (capacityHeartbeatInFlight) return await capacityHeartbeatInFlight;
-    const capabilities = getCapabilities();
     const controller = new AbortController();
     capacityController = controller;
-    const body = {
-      workerId: config.workerId,
-      protocolVersion: WORKER_PROTOCOL_VERSION,
-      capabilities,
-      runtimeCapabilities: capabilities,
-      availableCapabilities: capabilities,
-      phases: ['media', 'asr'],
-      capacitySlots: 1,
-      activeSlots: activeJob ? 1 : 0,
-    };
     capacityHeartbeatInFlight = (async () => {
       try {
-        await callApi('/transcriptions/fallback/worker/capacity', body, { signal: controller.signal });
+        await withCapabilityNegotiation(() => {
+          const capabilities = getCapabilities();
+          return callApi('/transcriptions/fallback/worker/capacity', {
+            workerId: config.workerId,
+            protocolVersion: WORKER_PROTOCOL_VERSION,
+            capabilities,
+            runtimeCapabilities: capabilities,
+            availableCapabilities: capabilities,
+            phases: ['media', 'asr'],
+            capacitySlots: 1,
+            activeSlots: activeJob ? 1 : 0,
+          }, { signal: controller.signal });
+        });
         capacityReady = true;
         return true;
       } catch (error) {
@@ -320,8 +374,13 @@ function createOperatorMediaNode({
     backend: String(activeJob && activeJob.backend || '').trim() || undefined,
     error: {
       ...(shutdown ? { code: 'OPERATOR_NODE_STOPPED' } : redactError(error)),
-      message: shutdown ? '运营节点已停止，任务可由其他节点继续' : '运营节点任务处理失败',
-      retryable: true,
+      message: shutdown ? '运营节点已停止，任务可由其他节点继续'
+        : error && error.linkExpired === true && String(error.message || '').trim()
+          ? String(error.message).trim()
+          : '运营节点任务处理失败',
+      // A retired share link is answered by asking the user for a new one; every
+      // other failure may succeed on another node or a later attempt.
+      retryable: error && error.linkExpired === true ? false : true,
       stage: String(stage || '').slice(0, 64),
     },
   });
@@ -330,8 +389,21 @@ function createOperatorMediaNode({
     const base = baseForJob(job);
     if (!base.jobId || !base.attemptId || !base.leaseToken) throw nodeError('OPERATOR_JOB_INVALID', '运营节点任务租约无效');
     if (!['media', 'asr'].includes(phase)) throw nodeError('OPERATOR_JOB_PHASE_INVALID', '运营节点任务阶段无效');
-    if (phase === 'media' && (!isDouyinSourceUrl(job.sourceUrl) || String(job.sourceType || '').trim() !== 'douyin_url')) {
-      throw nodeError('OPERATOR_MEDIA_SOURCE_INVALID', '运营节点只处理受控抖音媒体任务', { retryable: false });
+    const mediaPlatform = phase === 'media' ? resolveMediaSourcePlatform(job) : '';
+    if (phase === 'media' && !mediaPlatform) {
+      // Release the lease instead of leaving it to expire: a job this node can
+      // never process would otherwise come straight back on the next claim.
+      await complete(job, {
+        phase: 'media',
+        outcome: 'failed',
+        error: {
+          code: 'OPERATOR_MEDIA_SOURCE_INVALID',
+          message: '运营节点只处理受控平台媒体任务',
+          retryable: false,
+          stage: 'acquiring',
+        },
+      });
+      return null;
     }
     if (phase === 'asr' && !/^https?:\/\//i.test(String(job.controlledMediaUrl || '').trim())) {
       throw nodeError('OPERATOR_CONTROLLED_MEDIA_REQUIRED', '运营节点 ASR 缺少受控媒体地址', { retryable: false });
@@ -343,6 +415,44 @@ function createOperatorMediaNode({
     let mediaCompletionAttempted = false;
     try {
       await heartbeat(job, 'acquiring', 5);
+      if (phase === 'media' && mediaPlatform === 'xiaohongshu') {
+        if (!plugin || typeof plugin.acquireOperatorXiaohongshuContent !== 'function' || typeof plugin.uploadWorkerMediaForJob !== 'function') {
+          throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点小红书抓取能力未就绪', { retryable: true });
+        }
+        const acquired = await plugin.acquireOperatorXiaohongshuContent(job.sourceUrl, { signal: activeController.signal });
+        // A graphic note has no audio to transcribe. Its answer is the article
+        // itself, so the media phase completes with extracted content and the
+        // job never advances to ASR.
+        if (acquired && acquired.kind === 'content') {
+          const content = acquired.content && typeof acquired.content === 'object' ? acquired.content : null;
+          const markdown = String(content && content.markdown || '').trim();
+          const imageUrls = Array.isArray(content && content.imageUrls) ? content.imageUrls : [];
+          if (!markdown && !imageUrls.length) {
+            throw nodeError('OPERATOR_XIAOHONGSHU_EMPTY', '运营节点未提取到小红书图文内容', { retryable: true });
+          }
+          activeJob.progress = 100;
+          stopHeartbeat();
+          return await complete(job, { phase: 'media', outcome: 'succeeded', content });
+        }
+        const videoPath = String(acquired && acquired.tempPath || '').trim();
+        if (!videoPath) throw nodeError('OPERATOR_XIAOHONGSHU_EMPTY', '运营节点未取得小红书视频文件', { retryable: true });
+        tempPath = videoPath;
+        activeJob.progress = 45;
+        const uploadedXiaohongshu = await plugin.uploadWorkerMediaForJob(tempPath, job, {
+          signal: activeController.signal,
+          workerConfig: config,
+          request: callApi,
+          beforeComplete: () => {
+            mediaCompletionAttempted = true;
+            stopHeartbeat();
+          },
+        });
+        activeJob.progress = 100;
+        stopHeartbeat();
+        const xiaohongshuCompletion = uploadedXiaohongshu && uploadedXiaohongshu.completion;
+        if (!xiaohongshuCompletion) throw nodeError('OPERATOR_MEDIA_COMPLETE_INVALID', '运营节点媒体上传未完成', { retryable: true });
+        return xiaohongshuCompletion;
+      }
       if (phase === 'media') {
         if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== 'function' || typeof plugin.uploadWorkerMediaForJob !== 'function') {
           throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点媒体能力未就绪', { retryable: true });
@@ -436,14 +546,14 @@ function createOperatorMediaNode({
       let claimed = false;
       try {
         if (!capacityReady && !(await sendCapacityHeartbeat())) return;
-        const response = await callApi('/transcriptions/fallback/worker/claim', {
+        const response = await withCapabilityNegotiation(() => callApi('/transcriptions/fallback/worker/claim', {
           workerId: config.workerId,
           protocolVersion: WORKER_PROTOCOL_VERSION,
           capabilities: getCapabilities(),
           capacitySlots: 1,
           activeSlots: 0,
           limit: 1,
-        }, { signal: null });
+        }, { signal: null }));
         const jobs = normalizeJobs(response).slice(0, 1);
         if (jobs.length) {
           claimed = true;
@@ -526,6 +636,10 @@ module.exports = {
   OPERATOR_NODE_API_BASE_ENV,
   WORKER_PROTOCOL_VERSION,
   DEFAULT_CAPABILITIES,
+  XIAOHONGSHU_CAPABILITY,
+  isDouyinSourceUrl,
+  isXiaohongshuSourceUrl,
+  resolveMediaSourcePlatform,
   isOperatorNodeEnabled,
   readOperatorNodeConfig,
   requestJsonViaNode,

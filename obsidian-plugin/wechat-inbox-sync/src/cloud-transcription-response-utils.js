@@ -1,6 +1,7 @@
 'use strict';
 
 const { dedupeRepeatedTranscriptionLines } = require('./transcription-quality-utils');
+const { extractDoubaoUtteranceSegments } = require('./transcript-segment-utils');
 
 function parseTencentCreateTaskResponse(payload) {
   const data = payload && payload.Response && payload.Response.Data;
@@ -148,9 +149,13 @@ function parseDoubaoAsrTaskState(response) {
   }
 
   const transcription = parseDoubaoAsrResult(response.json || response.text);
+  const transcriptionSegments = transcription
+    ? extractDoubaoUtteranceSegments(response.json || response.text)
+    : [];
   return {
     status: transcription ? 'success' : 'empty',
     transcription,
+    ...(transcriptionSegments.length ? { transcriptionSegments } : {}),
   };
 }
 
