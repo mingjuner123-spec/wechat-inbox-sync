@@ -2799,6 +2799,89 @@ var require_diagnostic_native_evidence = __commonJS({
   }
 });
 
+// src/xiaohongshu-diagnostic-utils.js
+var require_xiaohongshu_diagnostic_utils = __commonJS({
+  "src/xiaohongshu-diagnostic-utils.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var { diagnosticRedact } = require_asr_recovery_utils();
+    function recordRef(value) {
+      return value ? crypto2.createHash("sha256").update(String(value)).digest("hex").slice(0, 16) : "";
+    }
+    __name(recordRef, "recordRef");
+    function technicalText(value, settings = {}) {
+      const text = String(value || "");
+      if (text.length > 16384) return "[oversized error message omitted]";
+      return diagnosticRedact(text, settings).replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]").replace(/(["']?(?:token|bindingToken|xsec_token|access_token|refresh_token|web_session|a1|authorization|cookie|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[EMAIL REDACTED]").replace(/\s+/g, " ").slice(0, 480);
+    }
+    __name(technicalText, "technicalText");
+    function safeStage(value = {}, settings = {}) {
+      const result = {};
+      for (const key of ["type", "stage", "outcome", "action", "code", "failureKind", "exception", "host"]) {
+        if (value[key]) result[key] = technicalText(value[key], settings).slice(0, 64);
+      }
+      if (value.message) result.message = technicalText(value.message, settings);
+      for (const key of ["status", "durationMs", "mediaCandidateCount"]) {
+        const number = Number(value[key]);
+        if (Number.isFinite(number) && number >= 0) result[key] = Math.min(36e5, Math.round(number));
+      }
+      return result;
+    }
+    __name(safeStage, "safeStage");
+    function errorDetails(error, settings = {}) {
+      const read = /* @__PURE__ */ __name((value, key) => {
+        try {
+          return value && value[key];
+        } catch (_) {
+          return void 0;
+        }
+      }, "read");
+      const nodes = [error];
+      for (let index = 0; index < nodes.length && nodes.length < 5; index += 1) {
+        for (const key of ["error", "cause"]) {
+          const child = read(nodes[index], key);
+          if (child && !nodes.includes(child) && nodes.length < 5) nodes.push(child);
+        }
+      }
+      const textField = /* @__PURE__ */ __name((keys) => {
+        for (const node of nodes) {
+          for (const key of keys) {
+            const value = read(node, key);
+            if ((typeof value === "string" || typeof value === "number") && String(value).trim()) return String(value);
+          }
+        }
+        return "";
+      }, "textField");
+      const name = textField(["name"]);
+      const message = textField(["message", "errorMessage", "errorDescription", "msg"]) || nodes.find((value) => typeof value === "string" && value.trim()) || (error && typeof error === "object" ? "Browser rejected with an object without a diagnostic message" : String(error || "Unknown browser error"));
+      const code = textField(["code", "errorCode"]);
+      return safeStage({
+        exception: ["Error", "SyntaxError", "ReferenceError", "TypeError", "RangeError", "AbortError"].includes(name) ? name : "Error",
+        message,
+        code: /^(?:[A-Z][A-Z0-9_]{1,63}|-?\d{1,6})$/.test(code) ? code : "",
+        status: Number(textField(["status", "statusCode"])) || 0
+      }, settings);
+    }
+    __name(errorDetails, "errorDetails");
+    function sanitize(value, settings = {}) {
+      const input = value && typeof value === "object" ? value : {};
+      const result = { source: "xiaohongshu-browser", schema: 2 };
+      for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{8,32}$/.test(input[key] || "") ? input[key] : "";
+      for (const key of ["startedAt", "finishedAt"]) if (Number.isFinite(Date.parse(input[key]))) result[key] = new Date(input[key]).toISOString();
+      if (/^\d+\.\d+\.\d+$/.test(input.runtimeVersion || "")) result.runtimeVersion = input.runtimeVersion;
+      for (const key of ["finalOutcome", "loginEvidence", "commentAccess"]) if (input[key]) result[key] = technicalText(input[key], settings).slice(0, 64);
+      result.loginCookiePresent = typeof input.loginCookiePresent === "boolean" ? input.loginCookiePresent : null;
+      result.transcriptionStarted = input.transcriptionStarted === true;
+      result.mediaCandidateCount = Number.isFinite(input.mediaCandidateCount) ? Math.max(0, Math.min(1e3, input.mediaCandidateCount)) : 0;
+      for (const key of ["stages", "events"]) result[key] = (Array.isArray(input[key]) ? input[key] : []).slice(-24).map((item) => safeStage(item || {}, settings));
+      result.downloadAttempts = (Array.isArray(input.downloadAttempts) ? input.downloadAttempts : []).slice(-12).map((item) => safeStage({ stage: item.transport || item.stage, outcome: typeof item.ok === "boolean" ? item.ok ? "success" : "failed" : item.outcome, status: item.status, code: item.code, durationMs: item.durationMs }, settings));
+      return result;
+    }
+    __name(sanitize, "sanitize");
+    module2.exports = { recordRef, technicalText, errorDetails, safeStage, sanitize };
+  }
+});
+
 // src/failure-technical-report.js
 var require_failure_technical_report = __commonJS({
   "src/failure-technical-report.js"(exports2, module2) {
@@ -2809,6 +2892,7 @@ var require_failure_technical_report = __commonJS({
     var { diagnosticRedact, readMatchingCrashSummary } = require_asr_recovery_utils();
     var asrDiagnosticEvidence2 = require_asr_diagnostic_evidence();
     var diagnosticNativeEvidence = require_diagnostic_native_evidence();
+    var xhsDiagnostic2 = require_xiaohongshu_diagnostic_utils();
     var MAX_REPORT_TEXT_BYTES = 128 * 1024;
     var MAX_SESSION_BYTES = 768 * 1024;
     var UNAVAILABLE_REASONS = /* @__PURE__ */ new Set([
@@ -3347,6 +3431,85 @@ var require_failure_technical_report = __commonJS({
       };
     }
     __name(safeAttempt, "safeAttempt");
+    var XIAOHONGSHU_PAGE_TYPES = /* @__PURE__ */ new Set([
+      "xiaohongshu-note",
+      "xiaohongshu-generic-landing",
+      "xiaohongshu-unavailable",
+      "unexpected-host",
+      "unknown"
+    ]);
+    var XIAOHONGSHU_REQUEST_INPUT_KINDS = /* @__PURE__ */ new Set([
+      "original-shortlink",
+      "source-url",
+      "resolved-url",
+      "response-final-url"
+    ]);
+    function safeHostname(value) {
+      const host = String(value || "").trim().toLowerCase();
+      return /^[a-z0-9](?:[a-z0-9.-]{0,118}[a-z0-9])?$/.test(host) ? host : "";
+    }
+    __name(safeHostname, "safeHostname");
+    function safeXiaohongshuExtractionDiagnostic(value, settings = {}) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const request = value.request && typeof value.request === "object" && !Array.isArray(value.request) ? value.request : null;
+      const extraction = value.extraction && typeof value.extraction === "object" && !Array.isArray(value.extraction) ? value.extraction : null;
+      const browser = value.browser && typeof value.browser === "object" && !Array.isArray(value.browser) ? value.browser : null;
+      if (!request && !extraction && !browser) return null;
+      const result = { component: "xiaohongshu" };
+      if (request) {
+        const safeRequest = {
+          sourceHost: safeHostname(request.sourceHost),
+          finalHost: safeHostname(request.finalHost),
+          redirected: request.redirected === true,
+          pageType: XIAOHONGSHU_PAGE_TYPES.has(request.pageType) ? request.pageType : "unknown",
+          renderFailed: request.renderFailed === true,
+          requestFailed: request.requestFailed === true,
+          browserTimedOut: request.browserTimedOut === true,
+          usedGetFallback: request.usedGetFallback === true
+        };
+        const status = nonnegativeInt(request.responseStatus);
+        if (status !== null) safeRequest.responseStatus = Math.min(status, 599);
+        const redirectCount = nonnegativeInt(request.redirectCount);
+        if (redirectCount !== null) safeRequest.redirectCount = Math.min(redirectCount, 10);
+        if (Array.isArray(request.redirectAttempts)) {
+          safeRequest.redirectAttempts = request.redirectAttempts.slice(0, 6).map((attempt) => ({
+            method: ["HEAD", "GET"].includes(attempt && attempt.method) ? attempt.method : "",
+            status: Math.min(nonnegativeInt(attempt && attempt.status) || 0, 599),
+            host: safeHostname(attempt && attempt.host),
+            outcome: safeDiagnosticText(attempt && attempt.outcome, settings, 48)
+          }));
+        }
+        if (Array.isArray(request.browserAttempts)) {
+          safeRequest.browserAttempts = request.browserAttempts.slice(0, 6).flatMap((attempt) => {
+            if (!attempt || typeof attempt !== "object") return [];
+            return [{
+              inputKind: XIAOHONGSHU_REQUEST_INPUT_KINDS.has(attempt.inputKind) ? attempt.inputKind : "unknown",
+              attempted: attempt.attempted === true,
+              finalHost: safeHostname(attempt.finalHost),
+              pageType: XIAOHONGSHU_PAGE_TYPES.has(attempt.pageType) ? attempt.pageType : "unknown",
+              bodyCharacterCount: Math.min(nonnegativeInt(attempt.bodyCharacterCount) || 0, 1e7),
+              imageCount: Math.min(nonnegativeInt(attempt.imageCount) || 0, 1e4),
+              failed: attempt.failed === true,
+              timedOut: attempt.timedOut === true
+            }];
+          });
+        }
+        result.request = safeRequest;
+      }
+      if (extraction) {
+        result.extraction = {
+          hasUsableTitle: extraction.hasUsableTitle === true,
+          bodyCharacterCount: Math.min(nonnegativeInt(extraction.bodyCharacterCount) || 0, 1e7),
+          imageCount: Math.min(nonnegativeInt(extraction.imageCount) || 0, 1e4),
+          shareBoilerplateOnly: extraction.shareBoilerplateOnly === true,
+          genericLanding: extraction.genericLanding === true,
+          unavailablePage: extraction.unavailablePage === true
+        };
+      }
+      if (browser) result.browser = xhsDiagnostic2.sanitize(browser, settings);
+      return redactTree(result, settings);
+    }
+    __name(safeXiaohongshuExtractionDiagnostic, "safeXiaohongshuExtractionDiagnostic");
     function safeError(error, settings = {}) {
       const source = error && typeof error === "object" ? error : { message: String(error || "") };
       const allFrames = String(source.stack || "").split(/\r?\n/).map((line) => line.trim()).filter((line) => /^at\s|^[A-Za-z][A-Za-z0-9_]*Error:/.test(line));
@@ -3366,6 +3529,8 @@ var require_failure_technical_report = __commonJS({
       if (mediaResolutionDiagnostic) value.mediaResolutionDiagnostic = mediaResolutionDiagnostic;
       const extractionDiagnostic = safeWechatArticleExtractionDiagnostic(source.diagnostic, settings);
       if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
+      const xiaohongshuDiagnostic = safeXiaohongshuExtractionDiagnostic(source.diagnostic, settings);
+      if (xiaohongshuDiagnostic) value.xiaohongshuDiagnostic = xiaohongshuDiagnostic;
       return redactTree(value, settings);
     }
     __name(safeError, "safeError");
@@ -5064,6 +5229,314 @@ var require_feishu_image_display = __commonJS({
   }
 });
 
+// src/transcript-media-player.js
+var require_transcript_media_player = __commonJS({
+  "src/transcript-media-player.js"(exports2, module2) {
+    "use strict";
+    var TIMESTAMP_PATTERN = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/;
+    var SEGMENT_HEADING_PATTERN = /分段转写/;
+    var SEEK_CLASS = "wb-transcript-seek";
+    var BAR_CLASS = "wb-transcript-media-bar";
+    var BUTTON_CLASS = "wb-transcript-screenshot";
+    var SEEK_FLASH_CLASS = "wb-transcript-seek-active";
+    function parseTimestampSeconds(text) {
+      const match = TIMESTAMP_PATTERN.exec(String(text || ""));
+      if (!match) return null;
+      const first = Number(match[1]);
+      const second = Number(match[2]);
+      const third = match[3] === void 0 ? null : Number(match[3]);
+      const hours = third === null ? 0 : first;
+      const minutes = third === null ? first : second;
+      const seconds = third === null ? second : third;
+      if (!Number.isFinite(hours) || !Number.isFinite(minutes) || !Number.isFinite(seconds)) return null;
+      if (minutes > 59 || seconds > 59) return null;
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+    __name(parseTimestampSeconds, "parseTimestampSeconds");
+    function pad(value) {
+      return String(value).padStart(2, "0");
+    }
+    __name(pad, "pad");
+    function formatScreenshotTimestamp(date = /* @__PURE__ */ new Date()) {
+      const value = date instanceof Date ? date : new Date(date);
+      if (Number.isNaN(value.getTime())) return "00000000-000000";
+      return `${value.getFullYear()}${pad(value.getMonth() + 1)}${pad(value.getDate())}-${pad(value.getHours())}${pad(value.getMinutes())}${pad(value.getSeconds())}`;
+    }
+    __name(formatScreenshotTimestamp, "formatScreenshotTimestamp");
+    function resolveScreenshotFolder(vault, sourcePath) {
+      const notePath = String(sourcePath || "");
+      const noteDir = notePath.includes("/") ? notePath.slice(0, notePath.lastIndexOf("/")) : "";
+      let configured = "";
+      try {
+        configured = String(vault && typeof vault.getConfig === "function" && vault.getConfig("attachmentFolderPath") || "").trim();
+      } catch (error) {
+        configured = "";
+      }
+      const joinPath = /* @__PURE__ */ __name((...parts) => parts.filter(Boolean).join("/").replace(/^\/+/, ""), "joinPath");
+      if (!configured || configured === "/" || configured === "./" || configured === ".") {
+        return joinPath(noteDir, "附件");
+      }
+      if (configured.startsWith("./")) return joinPath(noteDir, configured.slice(2));
+      return joinPath(configured);
+    }
+    __name(resolveScreenshotFolder, "resolveScreenshotFolder");
+    async function ensureFolder(vault, folderPath) {
+      const path2 = String(folderPath || "").replace(/^\/+|\/+$/g, "");
+      if (!path2) return;
+      if (vault.getAbstractFileByPath(path2)) return;
+      const segments = path2.split("/");
+      let current = "";
+      for (const segment of segments) {
+        current = current ? `${current}/${segment}` : segment;
+        if (vault.getAbstractFileByPath(current)) continue;
+        try {
+          await vault.createFolder(current);
+        } catch (error) {
+        }
+      }
+    }
+    __name(ensureFolder, "ensureFolder");
+    async function createUniqueScreenshotPath(vault, folderPath, prefix) {
+      const base = `截图-${prefix}`;
+      let candidate = `${folderPath ? `${folderPath}/` : ""}${base}.png`;
+      let index = 1;
+      while (vault.getAbstractFileByPath(candidate)) {
+        candidate = `${folderPath ? `${folderPath}/` : ""}${base}-${index}.png`;
+        index += 1;
+        if (index > 500) throw new Error("截图文件名冲突过多");
+      }
+      return candidate;
+    }
+    __name(createUniqueScreenshotPath, "createUniqueScreenshotPath");
+    async function captureVideoFrame(video) {
+      const width = Number(video.videoWidth) || 0;
+      const height = Number(video.videoHeight) || 0;
+      if (!width || !height) throw new Error("视频画面尚未加载，请播放后再截图");
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("无法创建画布");
+      context.drawImage(video, 0, 0, width, height);
+      const blob = await new Promise((resolve, reject) => {
+        try {
+          canvas.toBlob((result) => {
+            if (result) resolve(result);
+            else reject(new Error("截图编码失败"));
+          }, "image/png");
+        } catch (error) {
+          reject(error);
+        }
+      });
+      return blob;
+    }
+    __name(captureVideoFrame, "captureVideoFrame");
+    function findSegmentItems(root) {
+      const headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6"));
+      const heading = headings.find((item) => SEGMENT_HEADING_PATTERN.test(item.textContent || ""));
+      if (!heading) return [];
+      const items = [];
+      let node = heading.nextElementSibling;
+      while (node) {
+        if (/^H[1-6]$/.test(node.tagName)) break;
+        if (node.tagName === "UL" || node.tagName === "OL") {
+          items.push(...Array.from(node.querySelectorAll("li")));
+        } else if (node.tagName === "LI") {
+          items.push(node);
+        } else {
+          items.push(...Array.from(node.querySelectorAll("li")));
+        }
+        node = node.nextElementSibling;
+      }
+      return items;
+    }
+    __name(findSegmentItems, "findSegmentItems");
+    function resolveNoteRoot(el) {
+      if (!el || typeof el.closest !== "function") return el;
+      return el.closest(".markdown-preview-sizer") || el.closest(".markdown-embed-content") || el.closest(".markdown-reading-view") || el;
+    }
+    __name(resolveNoteRoot, "resolveNoteRoot");
+    function seekSingleMedia(media, seconds) {
+      const apply = /* @__PURE__ */ __name(() => {
+        try {
+          if (typeof media.pause === "function") media.pause();
+          media.currentTime = seconds;
+          const playResult = typeof media.play === "function" ? media.play() : null;
+          if (playResult && typeof playResult.catch === "function") playResult.catch(() => {
+          });
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }, "apply");
+      if (Number(media.readyState) >= 1) return apply();
+      let done = false;
+      const onReady = /* @__PURE__ */ __name(() => {
+        if (done) return;
+        done = true;
+        apply();
+      }, "onReady");
+      try {
+        media.addEventListener("loadedmetadata", onReady, { once: true });
+        window.setTimeout(onReady, 3e3);
+        return true;
+      } catch (error) {
+        return apply();
+      }
+    }
+    __name(seekSingleMedia, "seekSingleMedia");
+    function seekMedia(mediaList, seconds) {
+      let handled = false;
+      mediaList.forEach((media) => {
+        if (seekSingleMedia(media, seconds)) handled = true;
+      });
+      return handled;
+    }
+    __name(seekMedia, "seekMedia");
+    function decorateSegmentItems(items, mediaList) {
+      items.forEach((item) => {
+        if (!item || item.querySelector(`.${SEEK_CLASS}`)) return;
+        const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT, null);
+        let textNode = walker.nextNode();
+        while (textNode && !TIMESTAMP_PATTERN.test(textNode.nodeValue || "")) {
+          textNode = walker.nextNode();
+        }
+        if (!textNode) return;
+        const value = String(textNode.nodeValue || "");
+        const match = TIMESTAMP_PATTERN.exec(value);
+        if (!match) return;
+        const seconds = parseTimestampSeconds(match[0]);
+        if (seconds === null) return;
+        const before = value.slice(0, match.index);
+        const after = value.slice(match.index + match[0].length);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = SEEK_CLASS;
+        button.textContent = match[0];
+        button.title = "跳转到该时间点";
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const media = mediaList.filter((element) => element.isConnected);
+          if (!seekMedia(media, seconds)) return;
+          button.classList.add(SEEK_FLASH_CLASS);
+          window.setTimeout(() => button.classList.remove(SEEK_FLASH_CLASS), 600);
+        });
+        const fragment = document.createDocumentFragment();
+        if (before) fragment.appendChild(document.createTextNode(before));
+        fragment.appendChild(button);
+        if (after) fragment.appendChild(document.createTextNode(after));
+        textNode.parentNode.replaceChild(fragment, textNode);
+      });
+    }
+    __name(decorateSegmentItems, "decorateSegmentItems");
+    function createScreenshotBar({ video, vault, sourcePath, notify }) {
+      const bar = document.createElement("div");
+      bar.className = BAR_CLASS;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = BUTTON_CLASS;
+      button.textContent = "截图";
+      button.title = "保存当前画面到笔记附件";
+      button.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+          const blob = await captureVideoFrame(video);
+          const buffer = await blob.arrayBuffer();
+          const folder = resolveScreenshotFolder(vault, sourcePath);
+          await ensureFolder(vault, folder);
+          const path2 = await createUniqueScreenshotPath(vault, folder, formatScreenshotTimestamp(/* @__PURE__ */ new Date()));
+          await vault.createBinary(path2, buffer);
+          const embed = `![[${path2}]]`;
+          try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+              await navigator.clipboard.writeText(embed);
+              notify(`截图已保存：${path2}
+嵌入语法已复制到剪贴板`);
+            } else {
+              notify(`截图已保存：${path2}
+${embed}`);
+            }
+          } catch (error) {
+            notify(`截图已保存：${path2}`);
+          }
+        } catch (error) {
+          const message = String(error && error.message || error || "");
+          notify(/SecurityError|tainted|insecure/i.test(message) ? "该视频不支持直接截图，请用系统截图工具" : `截图失败：${message || "未知错误"}`);
+        } finally {
+          button.disabled = false;
+        }
+      });
+      bar.appendChild(button);
+      return bar;
+    }
+    __name(createScreenshotBar, "createScreenshotBar");
+    function createTranscriptMediaPlayer2({
+      vault,
+      getSettings,
+      notify = /* @__PURE__ */ __name(() => {
+      }, "notify")
+    } = {}) {
+      const boundMedia = /* @__PURE__ */ new WeakSet();
+      const bindScreenshot = /* @__PURE__ */ __name((video, sourcePath, settings) => {
+        if (settings.transcriptScreenshotEnabled !== true) return;
+        if (boundMedia.has(video)) return;
+        boundMedia.add(video);
+        const host = video.closest(".internal-embed") || video.parentElement;
+        if (!host || !host.parentNode) return;
+        if (host.parentNode.querySelector(`.${BAR_CLASS}`)) return;
+        const bar = createScreenshotBar({ video, vault, sourcePath, notify });
+        host.insertAdjacentElement("afterend", bar);
+      }, "bindScreenshot");
+      return /* @__PURE__ */ __name(function scan(el, sourcePath) {
+        if (!el || !vault) return;
+        const settings = (typeof getSettings === "function" ? getSettings() : null) || {};
+        const timestampsEnabled = settings.transcriptTimestampsEnabled === true;
+        const screenshotEnabled = settings.transcriptScreenshotEnabled === true;
+        if (!timestampsEnabled && !screenshotEnabled) return;
+        const root = resolveNoteRoot(el);
+        const apply = /* @__PURE__ */ __name(() => {
+          const mediaList = Array.from(root.querySelectorAll("video, audio"));
+          if (timestampsEnabled && mediaList.length) {
+            const items = findSegmentItems(root);
+            if (items.length) {
+              items.forEach((item) => {
+                item.dataset.wbTranscriptSegments = "1";
+              });
+              decorateSegmentItems(items, mediaList);
+            }
+          }
+          if (screenshotEnabled) {
+            root.querySelectorAll("video").forEach((video) => bindScreenshot(video, sourcePath, settings));
+          }
+        }, "apply");
+        apply();
+        if (typeof MutationObserver !== "function" || !root.querySelector("video, audio") && !root.querySelector("h1, h2, h3")) return;
+        let attempts = 0;
+        const observer = new MutationObserver(() => {
+          attempts += 1;
+          apply();
+          if (attempts > 20 || root.querySelector("video, audio") && root.querySelector(`.${SEEK_CLASS}, .${BUTTON_CLASS}`)) {
+            observer.disconnect();
+          }
+        });
+        observer.observe(root, { childList: true, subtree: true });
+        window.setTimeout(() => observer.disconnect(), 8e3);
+      }, "scan");
+    }
+    __name(createTranscriptMediaPlayer2, "createTranscriptMediaPlayer");
+    module2.exports = {
+      createTranscriptMediaPlayer: createTranscriptMediaPlayer2,
+      parseTimestampSeconds,
+      formatScreenshotTimestamp,
+      resolveScreenshotFolder
+    };
+  }
+});
+
 // src/asr-timeout-process-group.js
 var require_asr_timeout_process_group = __commonJS({
   "src/asr-timeout-process-group.js"(exports2, module2) {
@@ -5910,21 +6383,28 @@ var require_compact_sync_diagnostic = __commonJS({
     function describeCause(diagnostic) {
       if (!diagnostic || typeof diagnostic !== "object") return "";
       const cause = diagnostic.cause && typeof diagnostic.cause === "object" ? diagnostic.cause : diagnostic;
-      if (cause.source !== "platform-article") return "";
-      const parts = [];
-      if (cause.platform) parts.push(`平台 ${cause.platform}`);
-      if (cause.stage) parts.push(`阶段 ${cause.stage}`);
-      if (cause.reason) parts.push(cause.reason);
-      const hidden = cause.hiddenBrowser;
-      if (hidden && typeof hidden === "object") {
-        const flags = [hidden.ok ? "成功" : "失败", hidden.blocked ? "被拒绝" : "", hidden.needsLogin ? "需登录" : ""].filter(Boolean);
-        parts.push(`隐藏浏览器 ${flags.join("/")}`);
+      if (cause.source === "platform-article") {
+        const parts = [];
+        if (cause.platform) parts.push(`平台 ${cause.platform}`);
+        if (cause.stage) parts.push(`阶段 ${cause.stage}`);
+        if (cause.reason) parts.push(cause.reason);
+        const hidden = cause.hiddenBrowser;
+        if (hidden && typeof hidden === "object") {
+          const flags = [hidden.ok ? "成功" : "失败", hidden.blocked ? "被拒绝" : "", hidden.needsLogin ? "需登录" : ""].filter(Boolean);
+          parts.push(`隐藏浏览器 ${flags.join("/")}`);
+        }
+        const http2 = cause.http;
+        if (http2 && typeof http2 === "object") {
+          parts.push(http2.status ? `HTTP ${http2.status}` : String(http2.transport || ""));
+        }
+        return parts.filter(Boolean).join("；").slice(0, 300);
       }
-      const http2 = cause.http;
-      if (http2 && typeof http2 === "object") {
-        parts.push(http2.status ? `HTTP ${http2.status}` : String(http2.transport || ""));
+      if (diagnostic.reason) return String(diagnostic.reason).slice(0, 300);
+      try {
+        return JSON.stringify(diagnostic).slice(0, 300);
+      } catch (error) {
+        return "";
       }
-      return parts.filter(Boolean).join("；").slice(0, 300);
     }
     __name(describeCause, "describeCause");
     function formatCompactSyncDiagnostic2({ failure, version, system, installStatus, maxBytes = MAX_COMPACT_DIAGNOSTIC_BYTES } = {}) {
@@ -7962,89 +8442,6 @@ var require_component_diagnostic_summary = __commonJS({
   }
 });
 
-// src/xiaohongshu-diagnostic-utils.js
-var require_xiaohongshu_diagnostic_utils = __commonJS({
-  "src/xiaohongshu-diagnostic-utils.js"(exports2, module2) {
-    "use strict";
-    var crypto2 = require("crypto");
-    var { diagnosticRedact } = require_asr_recovery_utils();
-    function recordRef(value) {
-      return value ? crypto2.createHash("sha256").update(String(value)).digest("hex").slice(0, 16) : "";
-    }
-    __name(recordRef, "recordRef");
-    function technicalText(value, settings = {}) {
-      const text = String(value || "");
-      if (text.length > 16384) return "[oversized error message omitted]";
-      return diagnosticRedact(text, settings).replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]").replace(/(["']?(?:token|bindingToken|xsec_token|access_token|refresh_token|web_session|a1|authorization|cookie|password|secret|api[_-]?key)["']?\s*[=:]\s*)[^\r\n]+/gi, "$1[REDACTED]").replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[EMAIL REDACTED]").replace(/\s+/g, " ").slice(0, 480);
-    }
-    __name(technicalText, "technicalText");
-    function safeStage(value = {}, settings = {}) {
-      const result = {};
-      for (const key of ["type", "stage", "outcome", "action", "code", "failureKind", "exception", "host"]) {
-        if (value[key]) result[key] = technicalText(value[key], settings).slice(0, 64);
-      }
-      if (value.message) result.message = technicalText(value.message, settings);
-      for (const key of ["status", "durationMs", "mediaCandidateCount"]) {
-        const number = Number(value[key]);
-        if (Number.isFinite(number) && number >= 0) result[key] = Math.min(36e5, Math.round(number));
-      }
-      return result;
-    }
-    __name(safeStage, "safeStage");
-    function errorDetails(error, settings = {}) {
-      const read = /* @__PURE__ */ __name((value, key) => {
-        try {
-          return value && value[key];
-        } catch (_) {
-          return void 0;
-        }
-      }, "read");
-      const nodes = [error];
-      for (let index = 0; index < nodes.length && nodes.length < 5; index += 1) {
-        for (const key of ["error", "cause"]) {
-          const child = read(nodes[index], key);
-          if (child && !nodes.includes(child) && nodes.length < 5) nodes.push(child);
-        }
-      }
-      const textField = /* @__PURE__ */ __name((keys) => {
-        for (const node of nodes) {
-          for (const key of keys) {
-            const value = read(node, key);
-            if ((typeof value === "string" || typeof value === "number") && String(value).trim()) return String(value);
-          }
-        }
-        return "";
-      }, "textField");
-      const name = textField(["name"]);
-      const message = textField(["message", "errorMessage", "errorDescription", "msg"]) || nodes.find((value) => typeof value === "string" && value.trim()) || (error && typeof error === "object" ? "Browser rejected with an object without a diagnostic message" : String(error || "Unknown browser error"));
-      const code = textField(["code", "errorCode"]);
-      return safeStage({
-        exception: ["Error", "SyntaxError", "ReferenceError", "TypeError", "RangeError", "AbortError"].includes(name) ? name : "Error",
-        message,
-        code: /^(?:[A-Z][A-Z0-9_]{1,63}|-?\d{1,6})$/.test(code) ? code : "",
-        status: Number(textField(["status", "statusCode"])) || 0
-      }, settings);
-    }
-    __name(errorDetails, "errorDetails");
-    function sanitize(value, settings = {}) {
-      const input = value && typeof value === "object" ? value : {};
-      const result = { source: "xiaohongshu-browser", schema: 2 };
-      for (const key of ["attemptId", "recordRef"]) result[key] = /^[a-f0-9]{8,32}$/.test(input[key] || "") ? input[key] : "";
-      for (const key of ["startedAt", "finishedAt"]) if (Number.isFinite(Date.parse(input[key]))) result[key] = new Date(input[key]).toISOString();
-      if (/^\d+\.\d+\.\d+$/.test(input.runtimeVersion || "")) result.runtimeVersion = input.runtimeVersion;
-      for (const key of ["finalOutcome", "loginEvidence", "commentAccess"]) if (input[key]) result[key] = technicalText(input[key], settings).slice(0, 64);
-      result.loginCookiePresent = typeof input.loginCookiePresent === "boolean" ? input.loginCookiePresent : null;
-      result.transcriptionStarted = input.transcriptionStarted === true;
-      result.mediaCandidateCount = Number.isFinite(input.mediaCandidateCount) ? Math.max(0, Math.min(1e3, input.mediaCandidateCount)) : 0;
-      for (const key of ["stages", "events"]) result[key] = (Array.isArray(input[key]) ? input[key] : []).slice(-24).map((item) => safeStage(item || {}, settings));
-      result.downloadAttempts = (Array.isArray(input.downloadAttempts) ? input.downloadAttempts : []).slice(-12).map((item) => safeStage({ stage: item.transport || item.stage, outcome: typeof item.ok === "boolean" ? item.ok ? "success" : "failed" : item.outcome, status: item.status, code: item.code, durationMs: item.durationMs }, settings));
-      return result;
-    }
-    __name(sanitize, "sanitize");
-    module2.exports = { recordRef, technicalText, errorDetails, safeStage, sanitize };
-  }
-});
-
 // src/wechat-request-gate.js
 var require_wechat_request_gate = __commonJS({
   "src/wechat-request-gate.js"(exports2, module2) {
@@ -8342,7 +8739,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.32"
+$InstallerScriptVersion = "1.2.33"
 $DownloadResumeVersion = "asr-resume-v1"
 $script:DownloadEvents = @()
 $script:AuthorizedDownloadAssets = @()
@@ -8362,15 +8759,179 @@ $WhisperWindowsCompatibilityUrls = @($env:WECHAT_INBOX_ASR_WHISPER_COMPAT_URL) |
 $WhisperWindowsCompatibilitySha256 = '7B562DEEF031BD8A1A3954E3F5FF43BE0ACE2E86974235518530594BEECFF4B7'
 $FfmpegAuthorizedUrls = @($env:WECHAT_INBOX_ASR_FFMPEG_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $ModelAuthorizedUrls = @($env:WECHAT_INBOX_ASR_MODEL_URL) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+# "small" mis-hears Chinese dialects, names and crosstalk badly. The turbo
+# large-v3 quantization is about twelve times the compute and roughly three
+# times slower than real time on a desktop CPU, which is the right trade for
+# a transcript that is then read instead of listened to.
+$WhisperModelFileName = "ggml-large-v3-turbo-q5_0.bin"
+$WhisperModelMinBytes = 500MB
+$LegacyWhisperModelFileName = "ggml-small.bin"
 $ModelFallbackUrls = @(
-  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/$WhisperModelFileName"
 )
 $ModelOfficialFallbackUrls = @(
-  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+  "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$WhisperModelFileName"
 )
 $WhisperWindowsFallbackUrls = @(
   "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.0/whisper-bin-x64.zip"
 )
+
+# Speaker diarization (optional, best-effort): pure-CPU sherpa-onnx runtime with
+# the pyannote segmentation-3.0 model plus a 3D-Speaker CAM++ embedding model.
+# The wheels are ordinary zip archives, so Expand-Archive can unpack them.
+$DiarizationEngineVersion = "1.13.8"
+$DiarizationBinUrls = @(
+  "https://files.pythonhosted.org/packages/38/b9/ad8cd468f0adb37f2701c5067d5b19b141bf815c6434a8749b02d688f3b9/sherpa_onnx_bin-1.13.8-py3-none-win_amd64.whl",
+  "https://pypi.tuna.tsinghua.edu.cn/packages/38/b9/ad8cd468f0adb37f2701c5067d5b19b141bf815c6434a8749b02d688f3b9/sherpa_onnx_bin-1.13.8-py3-none-win_amd64.whl"
+)
+$DiarizationBinSha256 = "9549D3C1A9EC325FB7315006407FFDE5BDEEE99F3625C03D0B7967009E869A9A"
+$DiarizationCoreUrls = @(
+  "https://files.pythonhosted.org/packages/94/38/64356ad97f68fffcf01fe7545407ad18a2ea86c1ffae5b0950f7fac73638/sherpa_onnx_core-1.13.8-py3-none-win_amd64.whl",
+  "https://pypi.tuna.tsinghua.edu.cn/packages/94/38/64356ad97f68fffcf01fe7545407ad18a2ea86c1ffae5b0950f7fac73638/sherpa_onnx_core-1.13.8-py3-none-win_amd64.whl"
+)
+$DiarizationCoreSha256 = "5579E80196D516E6DAE23C8F629292CE3142AB8869925D32B94612FD86F93733"
+$DiarizationSegmentationUrls = @(
+  "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+  "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx"
+)
+$DiarizationSegmentationSha256 = "220AD67CA923BEF2FA91F2390C786097BF305BCEB5E261D4AF67B38E938E1079"
+$DiarizationEmbeddingUrls = @(
+  "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+)
+$DiarizationEmbeddingSha256 = "AA3CFC16963A10586A9393F5035D6D6B57E98D358B347F80C2A30BF4F00CEBA2"
+
+# Chinese punctuation restoration (optional, best-effort). whisper.cpp emits no
+# punctuation for Mandarin, so transcripts are punctuated afterwards by the
+# same sherpa-onnx runtime the diarization stage already installs. Only the
+# model file is an extra download; the runtime DLLs come from that stage.
+$PunctuationModelUrls = @(
+  "https://hf-mirror.com/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/resolve/main/model.onnx",
+  "https://huggingface.co/csukuangfj/sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12/resolve/main/model.onnx"
+)
+$PunctuationModelSha256 = "E93593A6DBD69A07F8734EF269DBE861A379755F8D1C8354719432116F2C44BD"
+$PunctuationModelMinBytes = 250MB
+$PunctuationModelFileName = "punct-ct-transformer-zh-en.onnx"
+# The punctuation CLI shipped with sherpa-onnx only accepts text on its command
+# line, and Windows PowerShell hands native programs ANSI bytes, so Chinese text
+# would arrive as mojibake. This shim calls the runtime's C API directly with
+# UTF-8 buffers instead. It is generated into the install directory so the
+# transcription script can load it with Add-Type -Path.
+$PunctuationShimSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class WechatInboxSherpaPunctuation
+{
+  [StructLayout(LayoutKind.Sequential)]
+  private struct ModelConfig
+  {
+    public IntPtr ct_transformer;
+    public int num_threads;
+    public int debug;
+    public IntPtr provider;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  private struct Config
+  {
+    public ModelConfig model;
+  }
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern bool SetDllDirectoryW(string path);
+
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  private static extern IntPtr LoadLibraryExW(string path, IntPtr hFile, uint flags);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern IntPtr SherpaOnnxCreateOfflinePunctuation(ref Config config);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern void SherpaOnnxDestroyOfflinePunctuation(IntPtr handle);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern IntPtr SherpaOfflinePunctuationAddPunct(IntPtr handle, IntPtr text);
+
+  [DllImport("sherpa-onnx-c-api.dll", CallingConvention = CallingConvention.Cdecl)]
+  private static extern void SherpaOfflinePunctuationFreeText(IntPtr text);
+
+  private static IntPtr Utf8ToPtr(string value)
+  {
+    byte[] bytes = Encoding.UTF8.GetBytes(value);
+    IntPtr pointer = Marshal.AllocHGlobal(bytes.Length + 1);
+    Marshal.Copy(bytes, 0, pointer, bytes.Length);
+    Marshal.WriteByte(pointer, bytes.Length, 0);
+    return pointer;
+  }
+
+  private static string PtrToUtf8(IntPtr pointer)
+  {
+    if (pointer == IntPtr.Zero)
+    {
+      return string.Empty;
+    }
+    int length = 0;
+    while (Marshal.ReadByte(pointer, length) != 0)
+    {
+      length += 1;
+    }
+    byte[] bytes = new byte[length];
+    Marshal.Copy(pointer, bytes, 0, length);
+    return Encoding.UTF8.GetString(bytes);
+  }
+
+  public static bool Preload(string runtimeDir)
+  {
+    string directory = runtimeDir.TrimEnd('\\\\');
+    SetDllDirectoryW(directory);
+    IntPtr dependency = LoadLibraryExW(directory + "\\\\onnxruntime.dll", IntPtr.Zero, 8);
+    if (dependency == IntPtr.Zero)
+    {
+      return false;
+    }
+    IntPtr runtime = LoadLibraryExW(directory + "\\\\sherpa-onnx-c-api.dll", IntPtr.Zero, 8);
+    return runtime != IntPtr.Zero;
+  }
+
+  public static IntPtr Create(string modelPath, int threads)
+  {
+    Config config = new Config();
+    IntPtr modelPointer = Utf8ToPtr(modelPath);
+    IntPtr providerPointer = Utf8ToPtr("cpu");
+    config.model.ct_transformer = modelPointer;
+    config.model.num_threads = threads;
+    config.model.debug = 0;
+    config.model.provider = providerPointer;
+    IntPtr handle = SherpaOnnxCreateOfflinePunctuation(ref config);
+    Marshal.FreeHGlobal(modelPointer);
+    Marshal.FreeHGlobal(providerPointer);
+    return handle;
+  }
+
+  public static void Destroy(IntPtr handle)
+  {
+    if (handle != IntPtr.Zero)
+    {
+      SherpaOnnxDestroyOfflinePunctuation(handle);
+    }
+  }
+
+  public static string AddPunctuation(IntPtr handle, string text)
+  {
+    IntPtr textPointer = Utf8ToPtr(text);
+    IntPtr resultPointer = SherpaOfflinePunctuationAddPunct(handle, textPointer);
+    Marshal.FreeHGlobal(textPointer);
+    if (resultPointer == IntPtr.Zero)
+    {
+      return string.Empty;
+    }
+    string punctuated = PtrToUtf8(resultPointer);
+    SherpaOfflinePunctuationFreeText(resultPointer);
+    return punctuated;
+  }
+}
+'@
 
 function New-CleanDirectory {
   param([Parameter(Mandatory = $true)][string]$Path)
@@ -8864,7 +9425,7 @@ function Assert-LocalAsrInference {
   try {
     $samplePath = Join-Path $validationDir "validation.wav"
     $outputBase = Join-Path $validationDir "validation"
-    $safeModelPath = Join-Path $validationDir "ggml-small.bin"
+    $safeModelPath = Join-Path $validationDir $WhisperModelFileName
     Copy-Item -LiteralPath $ModelPath -Destination $safeModelPath -Force
     Assert-ExecutableRuns \`
       -Path $FfmpegPath \`
@@ -9136,6 +9697,143 @@ function Install-ModelPackage {
   throw $lastError
 }
 
+function Install-VerifiedAsset {
+  param(
+    [Parameter(Mandatory = $true)][string[]]$Urls,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    [Parameter(Mandatory = $true)][Int64]$MinBytes,
+    [Parameter(Mandatory = $true)][string]$ExpectedSha256,
+    [Parameter(Mandatory = $true)][string]$Label
+  )
+  $expected = $ExpectedSha256.ToUpperInvariant()
+  if (Test-Path -LiteralPath $OutFile) {
+    if ((Get-FileSha256 -Path $OutFile) -eq $expected) {
+      Write-Host "$Label is cached; skipping download."
+      return $OutFile
+    }
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+  }
+  $lastError = $null
+  foreach ($url in $Urls) {
+    try {
+      Download-File -Url $url -OutFile $OutFile -Resume
+      Assert-DownloadedFile -Path $OutFile -MinBytes $MinBytes -Label $Label | Out-Null
+      Assert-FileSha256 -Path $OutFile -ExpectedSha256 $expected -Label $Label
+      return $OutFile
+    } catch {
+      $lastError = $_
+      Write-Host "$Label source failed: $url"
+      Write-Host ($_.Exception.Message)
+    }
+  }
+  throw $lastError
+}
+
+function Install-DiarizationPackage {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot,
+    [Parameter(Mandatory = $true)][string]$TempRoot
+  )
+  $destinationDir = Join-Path $InstallRoot "diarization"
+  $modelDir = Join-Path $destinationDir "models"
+  $exePath = Join-Path $destinationDir "sherpa-onnx-offline-speaker-diarization.exe"
+  $segmentationPath = Join-Path $modelDir "segmentation-3.0.onnx"
+  $embeddingPath = Join-Path $modelDir "campplus-zh-en-16k.onnx"
+  if ((Test-Path -LiteralPath $exePath) -and
+      (Test-Path -LiteralPath $segmentationPath) -and
+      (Test-Path -LiteralPath $embeddingPath)) {
+    Assert-ExecutableRuns -Path $exePath -Arguments @("--help") -Label "speaker diarization" -TryInstallVcRuntime | Out-Null
+    Write-Host "Existing speaker diarization is usable; skipping download."
+    return
+  }
+
+  $binZip = Join-Path $CacheRoot ("sherpa-onnx-bin-" + $DiarizationEngineVersion + ".zip")
+  $coreZip = Join-Path $CacheRoot ("sherpa-onnx-core-" + $DiarizationEngineVersion + ".zip")
+  Install-VerifiedAsset -Urls $DiarizationBinUrls -OutFile $binZip -MinBytes 15MB -ExpectedSha256 $DiarizationBinSha256 -Label "speaker diarization engine" | Out-Null
+  Install-VerifiedAsset -Urls $DiarizationCoreUrls -OutFile $coreZip -MinBytes 15MB -ExpectedSha256 $DiarizationCoreSha256 -Label "speaker diarization runtime" | Out-Null
+
+  $stageDir = Join-Path $TempRoot "diarization"
+  New-CleanDirectory -Path $stageDir
+  $binStage = Join-Path $stageDir "bin"
+  $coreStage = Join-Path $stageDir "core"
+  New-Item -ItemType Directory -Force -Path $binStage | Out-Null
+  New-Item -ItemType Directory -Force -Path $coreStage | Out-Null
+  Expand-Archive -LiteralPath $binZip -DestinationPath $binStage -Force
+  Expand-Archive -LiteralPath $coreZip -DestinationPath $coreStage -Force
+
+  $sourceExe = Find-InstalledFile -Root $binStage -Names @("sherpa-onnx-offline-speaker-diarization.exe")
+  if (-not $sourceExe) {
+    throw "speaker diarization engine package is missing the CLI executable."
+  }
+  $runtimeNames = @("onnxruntime.dll", "sherpa-onnx-c-api.dll", "sherpa-onnx-cxx-api.dll")
+  $runtimeFiles = @()
+  foreach ($name in $runtimeNames) {
+    $file = Find-InstalledFile -Root $coreStage -Names @($name)
+    if (-not $file) {
+      throw "speaker diarization runtime package is missing $name."
+    }
+    $runtimeFiles += $file
+  }
+
+  $segmentationCache = Join-Path $CacheRoot "sherpa-segmentation-3.0.onnx"
+  Install-VerifiedAsset -Urls $DiarizationSegmentationUrls -OutFile $segmentationCache -MinBytes 5MB -ExpectedSha256 $DiarizationSegmentationSha256 -Label "speaker segmentation model" | Out-Null
+  $embeddingCache = Join-Path $CacheRoot "sherpa-campplus-zh-en-16k.onnx"
+  Install-VerifiedAsset -Urls $DiarizationEmbeddingUrls -OutFile $embeddingCache -MinBytes 25MB -ExpectedSha256 $DiarizationEmbeddingSha256 -Label "speaker embedding model" | Out-Null
+
+  New-CleanDirectory -Path $destinationDir
+  New-Item -ItemType Directory -Force -Path $modelDir | Out-Null
+  Copy-FileWithRetry -SourcePath $sourceExe.FullName -DestinationPath $exePath | Out-Null
+  foreach ($file in $runtimeFiles) {
+    Copy-FileWithRetry -SourcePath $file.FullName -DestinationPath (Join-Path $destinationDir $file.Name) | Out-Null
+  }
+  Copy-FileWithRetry -SourcePath $segmentationCache -DestinationPath $segmentationPath | Out-Null
+  Copy-FileWithRetry -SourcePath $embeddingCache -DestinationPath $embeddingPath | Out-Null
+
+  Assert-ExecutableRuns -Path $exePath -Arguments @("--help") -Label "speaker diarization" -TryInstallVcRuntime | Out-Null
+  Write-Host "Speaker diarization installed to: $destinationDir"
+}
+
+function Install-PunctuationModel {
+  param(
+    [Parameter(Mandatory = $true)][string]$InstallRoot
+  )
+  $runtimeDir = Join-Path $InstallRoot "diarization"
+  $destinationDir = Join-Path $runtimeDir "models"
+  $modelPath = Join-Path $destinationDir $PunctuationModelFileName
+  $shimPath = Join-Path $runtimeDir "punctuation-shim.cs"
+  # The shim is a few kilobytes, so refresh it before any early return: a repair
+  # run must be able to restore it without re-downloading the model.
+  if ((Test-Path -LiteralPath $runtimeDir) -and (Test-Path -LiteralPath $shimPath)) {
+    $existingShim = [System.IO.File]::ReadAllText($shimPath)
+    if ($existingShim -ne $PunctuationShimSource) {
+      [System.IO.File]::WriteAllText($shimPath, $PunctuationShimSource, (New-Object System.Text.UTF8Encoding($false)))
+    }
+  } elseif (-not (Test-Path -LiteralPath $runtimeDir)) {
+    Write-Host "Punctuation runtime is missing; skipping the Chinese punctuation shim."
+    return
+  } else {
+    [System.IO.File]::WriteAllText($shimPath, $PunctuationShimSource, (New-Object System.Text.UTF8Encoding($false)))
+  }
+  # Punctuation reuses the diarization runtime; without its DLLs the model file
+  # alone cannot do anything, so skip instead of downloading 294 MB for nothing.
+  foreach ($name in @("onnxruntime.dll", "sherpa-onnx-c-api.dll")) {
+    if (-not (Test-Path -LiteralPath (Join-Path $runtimeDir $name))) {
+      Write-Host "Punctuation runtime is missing; skipping the Chinese punctuation model."
+      return
+    }
+  }
+  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -ge $PunctuationModelMinBytes)) {
+    Write-Host "Existing Chinese punctuation model is usable; skipping download."
+    return
+  }
+  $cachePath = Join-Path $CacheRoot $PunctuationModelFileName
+  Install-VerifiedAsset -Urls $PunctuationModelUrls -OutFile $cachePath -MinBytes $PunctuationModelMinBytes -ExpectedSha256 $PunctuationModelSha256 -Label "Chinese punctuation model" | Out-Null
+  New-Item -ItemType Directory -Force -Path $destinationDir | Out-Null
+  Copy-FileWithRetry -SourcePath $cachePath -DestinationPath $modelPath | Out-Null
+  Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
+  Write-Host "Chinese punctuation model installed to: $modelPath"
+}
+
 function Get-LatestWhisperWindowsAsset {
   try {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest" -Headers $Headers
@@ -9201,6 +9899,18 @@ function Assert-TranscribeScriptCandidate {
     '$TranscriptQualityGuardVersion = "repeat-guard-v2"',
     '$TranscriptPartialRecoveryVersion = "partial-recovery-v1"',
     '$NativeProcessRunnerVersion = "diagnostics-process-v2"',
+    '$SpeakerDiarizationVersion = "speaker-diarization-v1"',
+    '$ChinesePunctuationVersion = "chinese-punctuation-v1"',
+    'Set-SegmentSpeakers',
+    'WechatInboxSherpaPunctuation',
+    'Add-UnitPunctuation',
+    'Optimize-PunctuationText',
+    'PunctuationStatus',
+    'Find-SilenceCutPoints',
+    'Get-WavDurationSeconds',
+    'ChunkStartSeconds',
+    '-segment_times',
+    'ChunkOffsetMs',
     'System.Diagnostics.ProcessStartInfo',
     'ReadToEndAsync',
     '$null = $process.Handle',
@@ -9398,18 +10108,24 @@ try {
     Assert-ExecutableRuns -Path $installedFfmpeg.FullName -Arguments @("-version") -Label "ffmpeg" | Out-Null
   }
 
-  $modelPath = Join-Path $ModelDir "ggml-small.bin"
-  $cachedModelPath = Join-Path $CacheRoot "ggml-small.bin"
-  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt 400MB)) {
+  $modelPath = Join-Path $ModelDir $WhisperModelFileName
+  $cachedModelPath = Join-Path $CacheRoot $WhisperModelFileName
+  if ((Test-Path -LiteralPath $modelPath) -and ((Get-Item -LiteralPath $modelPath).Length -lt $WhisperModelMinBytes)) {
     Remove-Item -LiteralPath $modelPath -Force
   }
   if (-not (Test-Path -LiteralPath $modelPath)) {
     # Retain partial model cache; Download-File resumes only a matching asset identity.
-    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+    Install-ModelPackage -Urls (Get-EnabledAssetUrls -PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)) -OutFile $cachedModelPath -MinBytes $WhisperModelMinBytes -Label "Whisper model" | Out-Null
     Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force
   }
 
-  Assert-DownloadedFile -Path $modelPath -MinBytes 400MB -Label "Whisper model" | Out-Null
+  Assert-DownloadedFile -Path $modelPath -MinBytes $WhisperModelMinBytes -Label "Whisper model" | Out-Null
+  # The previous "small" model is no longer used; it would otherwise keep
+  # half a gigabyte of dead weights around after the upgrade.
+  $legacyModelPath = Join-Path $ModelDir $LegacyWhisperModelFileName
+  if ((Test-Path -LiteralPath $legacyModelPath) -and $LegacyWhisperModelFileName -ne $WhisperModelFileName) {
+    Remove-Item -LiteralPath $legacyModelPath -Force -ErrorAction SilentlyContinue
+  }
 
   try {
     Invoke-LocalAsrValidation -WhisperPath $installedWhisper.FullName -FfmpegPath $installedFfmpeg.FullName -ModelPath $modelPath
@@ -9442,6 +10158,24 @@ try {
   }
   Remove-Item -LiteralPath $cachedModelPath -Force -ErrorAction SilentlyContinue
 
+  # Optional stage: transcription must keep working when these assets cannot be
+  # downloaded on this machine or network.
+  $diarizationInstalled = $false
+  try {
+    Install-DiarizationPackage -InstallRoot $InstallRoot -TempRoot $TempRoot
+    $diarizationInstalled = $true
+  } catch {
+    Write-Host "Speaker diarization is unavailable; transcription continues without speaker labels."
+    Write-Host ($_.Exception.Message)
+  }
+
+  try {
+    Install-PunctuationModel -InstallRoot $InstallRoot
+  } catch {
+    Write-Host "Chinese punctuation is unavailable; transcripts continue without punctuation."
+    Write-Host ($_.Exception.Message)
+  }
+
 # BEGIN_TRANSCRIBE_TEMPLATE
   $embeddedTranscribeTemplate = @'
 param(
@@ -9466,10 +10200,38 @@ if (-not $Ffmpeg) {
   throw "ffmpeg.exe not found. Please rerun install-local-asr.ps1."
 }
 
-$Model = Join-Path $Root "models\\ggml-small.bin"
+$ModelFileName = "ggml-large-v3-turbo-q5_0.bin"
+$Model = Join-Path $Root "models\\$ModelFileName"
+# whisper.cpp defaults to four threads on every machine. The large model makes
+# transcription the slowest stage of a sync, so use the cores that are there.
+$WhisperThreads = [Math]::Max(4, [Math]::Min(16, [Environment]::ProcessorCount))
 if (-not (Test-Path -LiteralPath $Model)) {
   throw "Whisper model not found: $Model"
 }
+
+# Speaker diarization is optional. Old installs simply have no diarization
+# folder and produce transcripts without speaker labels.
+$DiarizationExe = $null
+$DiarizationSegmentationModel = Join-Path $Root "diarization\\models\\segmentation-3.0.onnx"
+$DiarizationEmbeddingModel = Join-Path $Root "diarization\\models\\campplus-zh-en-16k.onnx"
+$DiarizationDir = Join-Path $Root "diarization"
+if (Test-Path -LiteralPath $DiarizationDir) {
+  $DiarizationExe = Get-ChildItem -LiteralPath $DiarizationDir -Recurse -File -Filter "sherpa-onnx-offline-speaker-diarization.exe" | Select-Object -First 1
+}
+$DiarizationReady = [bool]($DiarizationExe -and
+  (Test-Path -LiteralPath $DiarizationSegmentationModel) -and
+  (Test-Path -LiteralPath $DiarizationEmbeddingModel))
+
+# Chinese punctuation is optional as well. It needs the sherpa-onnx runtime the
+# diarization stage installs, the CT-Transformer model, and the small C# shim
+# that bridges to the runtime's C API.
+$PunctuationModel = Join-Path $DiarizationDir "models\\punct-ct-transformer-zh-en.onnx"
+$PunctuationShimPath = Join-Path $DiarizationDir "punctuation-shim.cs"
+$PunctuationReady = [bool](
+  (Test-Path -LiteralPath $PunctuationModel) -and
+  (Test-Path -LiteralPath $PunctuationShimPath) -and
+  (Test-Path -LiteralPath (Join-Path $DiarizationDir "onnxruntime.dll")) -and
+  (Test-Path -LiteralPath (Join-Path $DiarizationDir "sherpa-onnx-c-api.dll")))
 
 $OutputDir = Split-Path -Parent $OutputPath
 if ($OutputDir) {
@@ -9487,6 +10249,8 @@ $RunLog = Join-Path $Root "transcribe-last.log"
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $TranscriptQualityGuardVersion = "repeat-guard-v2"
 $TranscriptPartialRecoveryVersion = "partial-recovery-v1"
+$SpeakerDiarizationVersion = "speaker-diarization-v1"
+$ChinesePunctuationVersion = "chinese-punctuation-v1"
 $NativeProcessRunnerVersion = "diagnostics-process-v2"
 @(
   "time=$(Get-Date -Format o)"
@@ -9776,7 +10540,10 @@ function Trim-RepeatedTranscriptTailLegacy {
   while ($prefixLines.Count -gt 0) {
     $last = $prefixLines[$prefixLines.Count - 1].Trim()
     $looksLikeNoise = $last.Length -lt 3 -or
-      $last -match "^(?:字幕|本字幕|谢谢观看|请不吝点赞|www\\\\.|https?://)" -or
+      # CJK is written as .NET regex escapes on purpose: this installer is
+      # stored as UTF-8 without a BOM and Windows PowerShell 5.1 decodes it
+      # with the ANSI code page, so literal CJK here would arrive as mojibake.
+      $last -match "^(?:\\u5b57\\u5e55|\\u672c\\u5b57\\u5e55|\\u8c22\\u8c22\\u89c2\\u770b|\\u8bf7\\u4e0d\\u541d\\u70b9\\u8d5e|www\\\\.|https?://)" -or
       $last -match "^[A-Za-z\\s\\.,!?-]{1,8}$"
     if (-not $looksLikeNoise) {
       break
@@ -9874,12 +10641,470 @@ function Invoke-WhisperChunk {
   $arguments = @(
     "-m", (& $PathForNative $attemptModelPath),
     "-f", (& $PathForNative $ChunkPath),
+    "-t", [string]$WhisperThreads,
     "-l", "zh"
   ) + $ExtraArguments + @(
     "-otxt",
+    "-oj",
     "-of", (& $PathForNative $ChunkBase)
   )
   return Invoke-NativeProcess -FilePath $Whisper.FullName -Arguments $arguments -ReportProgress -ProgressStage "transcribing" -ProgressCurrent $ProgressCurrent -ProgressTotal $ProgressTotal
+}
+
+function Read-WhisperChunkSegments {
+  param(
+    [Parameter(Mandatory = $true)][string]$ChunkBase,
+    [Parameter(Mandatory = $true)][int64]$ChunkOffsetMs
+  )
+  $jsonPath = "$ChunkBase.json"
+  if (-not (Test-Path -LiteralPath $jsonPath)) {
+    return @()
+  }
+  try {
+    $payload = [System.IO.File]::ReadAllText($jsonPath, $Utf8NoBom) | ConvertFrom-Json
+  } catch {
+    return @()
+  }
+  if (-not $payload -or -not $payload.transcription) {
+    return @()
+  }
+  $offsetMs = $ChunkOffsetMs
+  $segments = New-Object System.Collections.Generic.List[object]
+  foreach ($item in @($payload.transcription)) {
+    if (-not $item) { continue }
+    $text = (ConvertTo-SimplifiedChinese ([string]$item.text)).Trim()
+    if (-not $text) { continue }
+    $fromMs = [int64]0
+    $toMs = [int64]0
+    if ($item.offsets) {
+      $fromMs = [int64]$item.offsets.from
+      $toMs = [int64]$item.offsets.to
+    }
+    if ($toMs -lt $fromMs) { $toMs = $fromMs }
+    $segments.Add([PSCustomObject]@{
+      startMs = $offsetMs + $fromMs
+      endMs = $offsetMs + $toMs
+      text = $text
+      speaker = ""
+    })
+  }
+  return $segments.ToArray()
+}
+
+function Convert-AudioToNormalizedWav {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][string]$OutputPath,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  return Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+    "-hide_banner", "-loglevel", "error", "-y",
+    "-i", (& $PathForNative $AudioPath),
+    "-vn",
+    "-ar", "16000",
+    "-ac", "1",
+    "-c:a", "pcm_s16le",
+    "-f", "wav",
+    (& $PathForNative $OutputPath)
+  ) -ReportProgress -ProgressStage "diarizing"
+}
+
+function Read-DiarizationTurns {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  # One whole-file pass: the clustering step is global, so running this per
+  # chunk would give each chunk its own speaker ids and produce labels that
+  # contradict each other across chunk boundaries.
+  $result = Invoke-NativeProcess -FilePath $DiarizationExe.FullName -Arguments @(
+    ("--segmentation.pyannote-model=" + (& $PathForNative $DiarizationSegmentationModel)),
+    ("--embedding.model=" + (& $PathForNative $DiarizationEmbeddingModel)),
+    (& $PathForNative $AudioPath)
+  ) -ReportProgress -ProgressStage "diarizing"
+  $turns = New-Object System.Collections.Generic.List[object]
+  foreach ($line in ([string]$result.Output -split "\`r?\`n")) {
+    $match = [regex]::Match($line, '^\\s*(\\d+(?:\\.\\d+)?)\\s*--\\s*(\\d+(?:\\.\\d+)?)\\s+(speaker_\\d+)\\s*$')
+    if (-not $match.Success) { continue }
+    $startSeconds = [double]$match.Groups[1].Value
+    $endSeconds = [double]$match.Groups[2].Value
+    if ($endSeconds -le $startSeconds) { continue }
+    $turns.Add([PSCustomObject]@{
+      StartMs = [int64][math]::Round($startSeconds * 1000)
+      EndMs = [int64][math]::Round($endSeconds * 1000)
+      Speaker = [string]$match.Groups[3].Value
+    })
+  }
+  return [PSCustomObject]@{
+    ExitCode = $result.ExitCode
+    Turns = $turns
+    Output = $result.Output
+  }
+}
+
+function Set-SegmentSpeakers {
+  param(
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Segments,
+    [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Turns
+  )
+  if ($Segments.Count -eq 0 -or $Turns.Count -eq 0) { return 0 }
+  # Speaker ids from sherpa-onnx are sparse (speaker_00, speaker_07...);
+  # renumber by first appearance so the note reads speaker 1, speaker 2, ...
+  # The CJK label prefix is built from code points on purpose: this installer
+  # is stored as UTF-8 without a BOM and Windows PowerShell 5.1 decodes that
+  # with the ANSI code page, so a literal here would arrive as mojibake.
+  $speakerPrefix = [string]([char]0x8BF4) + [string]([char]0x8BDD) + [string]([char]0x4EBA)
+  $labels = @{}
+  $speakerCount = 0
+  foreach ($turn in $Turns) {
+    if (-not $labels.ContainsKey($turn.Speaker)) {
+      $speakerCount += 1
+      $labels[$turn.Speaker] = $speakerPrefix + [string]$speakerCount
+    }
+  }
+  foreach ($segment in $Segments) {
+    $segmentStart = [double]$segment.startMs
+    $segmentEnd = [double]$segment.endMs
+    $segmentMiddle = ($segmentStart + $segmentEnd) / 2
+    $bestSpeaker = $null
+    $bestOverlap = 0.0
+    $nearestSpeaker = $null
+    $nearestDistance = [double]::MaxValue
+    foreach ($turn in $Turns) {
+      $overlap = [math]::Min($segmentEnd, [double]$turn.EndMs) - [math]::Max($segmentStart, [double]$turn.StartMs)
+      if ($overlap -gt $bestOverlap) {
+        $bestOverlap = $overlap
+        $bestSpeaker = $turn.Speaker
+      }
+      $turnMiddle = ([double]$turn.StartMs + [double]$turn.EndMs) / 2
+      $distance = [math]::Abs($turnMiddle - $segmentMiddle)
+      if ($distance -lt $nearestDistance) {
+        $nearestDistance = $distance
+        $nearestSpeaker = $turn.Speaker
+      }
+    }
+    $speaker = if ($bestSpeaker) { $bestSpeaker } else { $nearestSpeaker }
+    if ($speaker -and $labels.ContainsKey($speaker)) {
+      $segment.speaker = $labels[$speaker]
+    }
+  }
+  return $speakerCount
+}
+
+# whisper.cpp produces no punctuation for Mandarin, so transcripts are
+# punctuated afterwards by the sherpa-onnx CT-Transformer model. The model only
+# inserts punctuation and keeps every other character, which is what makes the
+# mapping back onto timed segments possible.
+function Test-PunctuationFillerCharacter {
+  param([char]$Character)
+  return ([char]::IsWhiteSpace($Character) -or
+    [char]::IsPunctuation($Character) -or
+    [char]::IsSymbol($Character))
+}
+
+function Get-PunctuationCoreText {
+  param([string]$Text)
+  $builder = New-Object System.Text.StringBuilder
+  foreach ($character in ([string]$Text).ToCharArray()) {
+    if (Test-PunctuationFillerCharacter $character) { continue }
+    [void]$builder.Append($character)
+  }
+  return $builder.ToString()
+}
+
+function Test-CjkCharacter {
+  param([char]$Character)
+  $code = [int]$Character
+  return (($code -ge 0x3400 -and $code -le 0x4DBF) -or
+    ($code -ge 0x4E00 -and $code -le 0x9FFF) -or
+    ($code -ge 0xF900 -and $code -le 0xFAFF) -or
+    ($code -ge 0xFF00 -and $code -le 0xFFEF) -or
+    ($code -ge 0x3000 -and $code -le 0x303F))
+}
+
+function Test-SentenceEndPunctuation {
+  param([char]$Character)
+  $code = [int]$Character
+  return ($code -eq 0x3002 -or $code -eq 0xFF01 -or $code -eq 0xFF1F)
+}
+
+function Test-ClausePunctuation {
+  param([char]$Character)
+  $code = [int]$Character
+  return ($code -eq 0xFF0C -or $code -eq 0x3001 -or $code -eq 0xFF1B -or $code -eq 0xFF1A)
+}
+
+function Get-FullWidthPunctuation {
+  param([char]$Character)
+  switch ([int]$Character) {
+    0x2C { return [char]0xFF0C }
+    0x3F { return [char]0xFF1F }
+    0x21 { return [char]0xFF01 }
+    0x3B { return [char]0xFF1B }
+    0x3A { return [char]0xFF1A }
+    0x2E { return [char]0x3002 }
+  }
+  return $Character
+}
+
+# The model mixes half-width and full-width marks and occasionally emits a
+# comma right after a sentence end. Normalize both so notes read evenly.
+# Half-width marks only become full width after a Chinese character, which
+# keeps English text such as "ChatGPT, GPT-4" untouched.
+function Optimize-PunctuationText {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  $source = $Text.ToCharArray()
+  $builder = New-Object System.Text.StringBuilder
+  $lastAppended = [char]0
+  $previousCore = [char]0
+  for ($index = 0; $index -lt $source.Length; $index += 1) {
+    $character = $source[$index]
+    if ([char]::IsWhiteSpace($character)) { continue }
+    $mapped = $character
+    if (Test-CjkCharacter $previousCore) {
+      $mapped = Get-FullWidthPunctuation $character
+    }
+    if ((Test-ClausePunctuation $mapped) -and (Test-SentenceEndPunctuation $lastAppended)) {
+      continue
+    }
+    if (Test-SentenceEndPunctuation $mapped) {
+      if (Test-SentenceEndPunctuation $lastAppended) {
+        continue
+      }
+      if ($builder.Length -gt 0 -and (Test-ClausePunctuation $lastAppended)) {
+        $builder.Length = $builder.Length - 1
+      }
+    }
+    [void]$builder.Append($mapped)
+    if (-not (Test-PunctuationFillerCharacter $mapped)) {
+      $previousCore = $mapped
+    }
+    $lastAppended = $mapped
+  }
+  return $builder.ToString()
+}
+
+function Initialize-PunctuationEngine {
+  if ($script:PunctuationInitialized) { return }
+  $script:PunctuationInitialized = $true
+  $script:PunctuationHandle = [IntPtr]::Zero
+  if (-not $PunctuationReady) { return }
+  try {
+    Add-Type -Path $PunctuationShimPath -ErrorAction Stop
+    if (-not [WechatInboxSherpaPunctuation]::Preload($DiarizationDir)) {
+      throw "the sherpa-onnx punctuation runtime failed to load"
+    }
+    $threads = [Math]::Max(1, [Math]::Min(8, [Environment]::ProcessorCount))
+    $script:PunctuationHandle = [WechatInboxSherpaPunctuation]::Create($PunctuationModel, $threads)
+    if ($script:PunctuationHandle -eq [IntPtr]::Zero) {
+      throw "the punctuation model failed to open"
+    }
+    Write-Host "[punctuation] engine ready"
+  } catch {
+    $script:PunctuationHandle = [IntPtr]::Zero
+    Write-Host ("[punctuation] unavailable: " + $_.Exception.Message)
+  }
+}
+
+function Add-TextPunctuation {
+  param([string]$Text)
+  if (-not $Text) { return "" }
+  Initialize-PunctuationEngine
+  if ($script:PunctuationHandle -eq [IntPtr]::Zero) { return "" }
+  try {
+    return [WechatInboxSherpaPunctuation]::AddPunctuation($script:PunctuationHandle, $Text)
+  } catch {
+    $script:PunctuationHandle = [IntPtr]::Zero
+    Write-Host ("[punctuation] model call failed: " + $_.Exception.Message)
+    return ""
+  }
+}
+
+function Set-PunctuationUnitText {
+  param([AllowEmptyCollection()][object[]]$Units)
+  if ($Units.Count -eq 0) { return 0 }
+  $flat = New-Object System.Text.StringBuilder
+  foreach ($unit in $Units) { [void]$flat.Append([string]$unit.text) }
+  $flatText = $flat.ToString()
+  $punctuated = Add-TextPunctuation $flatText
+  if (-not $punctuated) { return 0 }
+  $punctuated = Optimize-PunctuationText $punctuated
+  # Guard: the model must only add punctuation. If it rewrote characters the
+  # result cannot be mapped back onto timings, so keep the original text.
+  if ((Get-PunctuationCoreText $flatText) -ne (Get-PunctuationCoreText $punctuated)) {
+    Write-Host "[punctuation] block skipped: the model altered characters"
+    return 0
+  }
+  $owners = New-Object System.Collections.Generic.List[int]
+  for ($index = 0; $index -lt $Units.Count; $index += 1) {
+    $coreLength = (Get-PunctuationCoreText ([string]$Units[$index].text)).Length
+    for ($k = 0; $k -lt $coreLength; $k += 1) { $owners.Add($index) }
+  }
+  if ($owners.Count -eq 0) { return 0 }
+  $buffers = @()
+  for ($index = 0; $index -lt $Units.Count; $index += 1) {
+    $buffers += (New-Object System.Text.StringBuilder)
+  }
+  $coreIndex = 0
+  foreach ($character in $punctuated.ToCharArray()) {
+    if ([char]::IsWhiteSpace($character)) { continue }
+    if (Test-PunctuationFillerCharacter $character) {
+      $owner = if ($coreIndex -eq 0) { 0 } else { $owners[$coreIndex - 1] }
+    } else {
+      if ($coreIndex -ge $owners.Count) { break }
+      $owner = $owners[$coreIndex]
+      $coreIndex += 1
+    }
+    if ($owner -ge 0 -and $owner -lt $buffers.Count) {
+      [void]$buffers[$owner].Append($character)
+    }
+  }
+  $changed = 0
+  for ($index = 0; $index -lt $Units.Count; $index += 1) {
+    $updated = $buffers[$index].ToString().Trim()
+    if (-not $updated) { continue }
+    if ($updated -ne [string]$Units[$index].text) {
+      $Units[$index].text = $updated
+      $changed += 1
+    }
+  }
+  return $changed
+}
+
+function Add-UnitPunctuation {
+  param(
+    [AllowEmptyCollection()][object[]]$Units,
+    [int]$MaxCoreCharacters = 1600
+  )
+  if (-not $PunctuationReady) { return 0 }
+  if ($Units.Count -eq 0) { return 0 }
+  $changed = 0
+  $batch = New-Object System.Collections.Generic.List[object]
+  $batchCoreLength = 0
+  foreach ($unit in $Units) {
+    if (-not $unit) { continue }
+    $text = [string]$unit.text
+    if (-not $text) { continue }
+    $batch.Add($unit)
+    $batchCoreLength += (Get-PunctuationCoreText $text).Length
+    if ($batchCoreLength -lt $MaxCoreCharacters) { continue }
+    $changed += (Set-PunctuationUnitText -Units @($batch.ToArray()))
+    $batch = New-Object System.Collections.Generic.List[object]
+    $batchCoreLength = 0
+  }
+  if ($batch.Count -gt 0) {
+    $changed += (Set-PunctuationUnitText -Units @($batch.ToArray()))
+  }
+  return $changed
+}
+
+function Get-WavDurationSeconds {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path
+  )
+  $stream = $null
+  $reader = $null
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    if ($stream.Length -lt 44) { return 0.0 }
+    $reader = New-Object System.IO.BinaryReader($stream)
+    $header = $reader.ReadBytes(12)
+    if ($header.Length -lt 12) { return 0.0 }
+    $ascii = [System.Text.Encoding]::ASCII
+    if (($ascii.GetString($header, 0, 4)) -ne "RIFF") { return 0.0 }
+    if (($ascii.GetString($header, 8, 4)) -ne "WAVE") { return 0.0 }
+    $position = [int64]12
+    while (($position + 8) -le $stream.Length) {
+      $stream.Position = $position
+      $chunkId = $ascii.GetString($reader.ReadBytes(4))
+      $chunkSize = [int64]$reader.ReadInt32()
+      if ($chunkSize -lt 0) { break }
+      if ($chunkId -eq "data") {
+        # Chunks are written as 16 kHz mono 16-bit PCM: 32000 bytes a second.
+        return ([double]$chunkSize / 32000.0)
+      }
+      $position = $position + 8 + $chunkSize
+      if (($chunkSize % 2) -ne 0) { $position = $position + 1 }
+    }
+    return 0.0
+  } catch {
+    return 0.0
+  } finally {
+    if ($reader) { $reader.Dispose() }
+    if ($stream) { $stream.Dispose() }
+  }
+}
+
+function Find-SilenceCutPoints {
+  param(
+    [Parameter(Mandatory = $true)][string]$AudioPath,
+    [Parameter(Mandatory = $true)][int]$TargetSeconds,
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+  )
+  $result = [PSCustomObject]@{
+    Cuts = @()
+    DurationSeconds = 0.0
+  }
+  # Default log level on purpose: silencedetect reports on stderr at info level,
+  # together with the Duration line this pass needs anyway.
+  $probe = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+    "-hide_banner", "-nostats",
+    "-i", (& $PathForNative $AudioPath),
+    "-af", "silencedetect=noise=-32dB:d=0.7",
+    "-f", "null", "-"
+  )
+  if ($probe.ExitCode -ne 0) {
+    return $result
+  }
+  $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+  $durationSeconds = 0.0
+  $durationMatch = [regex]::Match([string]$probe.Output, "Duration:\\s*(\\d+):(\\d+):([0-9.]+)")
+  if ($durationMatch.Success) {
+    $durationSeconds = ([double]$durationMatch.Groups[1].Value * 3600.0) +
+      ([double]$durationMatch.Groups[2].Value * 60.0) +
+      [double]::Parse($durationMatch.Groups[3].Value, $invariant)
+  }
+  $result.DurationSeconds = $durationSeconds
+  if ($durationSeconds -le [double]$TargetSeconds) {
+    return $result
+  }
+  # The end of a pause, not its start. A chunk that opens on silence makes the
+  # model guess its first words, and it guesses whatever it just heard.
+  $silences = New-Object System.Collections.Generic.List[double]
+  foreach ($line in ([string]$probe.Output -split "\`r?\`n")) {
+    $match = [regex]::Match($line, "silence_end:\\s*(-?[0-9.]+)")
+    if (-not $match.Success) { continue }
+    $value = [double]::Parse($match.Groups[1].Value, $invariant)
+    if ($value -ge 0) { $silences.Add($value) }
+  }
+  # A cut through a spoken word loses or repeats it, so each boundary slides to
+  # the nearest quiet moment. When nothing is quiet nearby the clock wins.
+  $window = [Math]::Max(6.0, [double]$TargetSeconds * 0.08)
+  $cuts = New-Object System.Collections.Generic.List[double]
+  $previous = 0.0
+  $boundary = [double]$TargetSeconds
+  while ($boundary -lt ($durationSeconds - 10.0)) {
+    $chosen = $boundary
+    $bestDistance = $window + 1.0
+    foreach ($silence in $silences) {
+      $distance = [Math]::Abs($silence - $boundary)
+      if ($distance -le $window -and $distance -lt $bestDistance) {
+        $chosen = $silence
+        $bestDistance = $distance
+      }
+    }
+    # A cut too close to the previous one would leave a stub chunk.
+    if (($chosen - $previous) -ge 20.0) {
+      $cuts.Add($chosen)
+      $previous = $chosen
+    } else {
+      $previous = $boundary
+    }
+    $boundary = $boundary + [double]$TargetSeconds
+  }
+  $result.Cuts = $cuts.ToArray()
+  return $result
 }
 
 function Split-AudioToChunks {
@@ -9887,26 +11112,53 @@ function Split-AudioToChunks {
     [Parameter(Mandatory = $true)][string]$AudioPath,
     [Parameter(Mandatory = $true)][string]$OutputDir,
     [Parameter(Mandatory = $true)][int]$SegmentSeconds,
-    [Parameter(Mandatory = $true)][scriptblock]$PathForNative
+    [Parameter(Mandatory = $true)][scriptblock]$PathForNative,
+    [switch]$PreferSilence
   )
   New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
   $pattern = Join-Path $OutputDir "chunk-%03d.wav"
-  $result = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments @(
+  $cutSeconds = @()
+  if ($PreferSilence) {
+    try {
+      $analysis = Find-SilenceCutPoints -AudioPath $AudioPath -TargetSeconds $SegmentSeconds -PathForNative $PathForNative
+      if ($analysis -and $analysis.Cuts) {
+        $cutSeconds = @($analysis.Cuts)
+      }
+    } catch {
+      $cutSeconds = @()
+    }
+  }
+  $arguments = @(
     "-hide_banner", "-loglevel", "error", "-y",
     "-i", (& $PathForNative $AudioPath),
     "-ar", "16000",
     "-ac", "1",
     "-c:a", "pcm_s16le",
-    "-f", "segment",
-    "-segment_time", [string]$SegmentSeconds,
-    "-reset_timestamps", "1",
-    $pattern
-  ) -ReportProgress -ProgressStage "segmenting"
+    "-f", "segment"
+  )
+  if ($cutSeconds.Count -gt 0) {
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $cutList = ($cutSeconds | ForEach-Object { ([double]$_).ToString("0.000", $invariant) }) -join ","
+    $arguments += @("-segment_times", $cutList)
+  } else {
+    $arguments += @("-segment_time", [string]$SegmentSeconds)
+  }
+  $arguments += @("-reset_timestamps", "1", $pattern)
+  $result = Invoke-NativeProcess -FilePath $Ffmpeg.FullName -Arguments $arguments -ReportProgress -ProgressStage "segmenting"
   $chunks = @(Get-ChildItem -LiteralPath $OutputDir -Filter "chunk-*.wav" | Sort-Object Name)
+  # Chunks are not exactly SegmentSeconds long, so timestamps are built from the
+  # real start of each chunk instead of assuming a fixed stride.
+  $chunkStartSeconds = New-Object System.Collections.Generic.List[double]
+  $elapsed = 0.0
+  foreach ($chunk in $chunks) {
+    $chunkStartSeconds.Add($elapsed)
+    $elapsed = $elapsed + (Get-WavDurationSeconds -Path $chunk.FullName)
+  }
   return [PSCustomObject]@{
     FfmpegResult = $result
     ChunkFiles = $chunks
     ChunkPattern = $pattern
+    ChunkStartSeconds = $chunkStartSeconds.ToArray()
   }
 }
 
@@ -9971,7 +11223,7 @@ function Invoke-TranscribeAttempt {
     $safeTempRoot = New-SafeTempDirectory
     $tempWorkDir = Join-Path $safeTempRoot "chunks"
     $attemptInputPath = Join-Path $safeTempRoot ("input" + [System.IO.Path]::GetExtension($InputPath))
-    $attemptModelPath = Join-Path $safeTempRoot "ggml-small.bin"
+    $attemptModelPath = Join-Path $safeTempRoot $ModelFileName
     Copy-Item -LiteralPath $InputPath -Destination $attemptInputPath -Force
     Copy-Item -LiteralPath $Model -Destination $attemptModelPath -Force
   } else {
@@ -9998,18 +11250,51 @@ function Invoke-TranscribeAttempt {
     Text = ""
     Error = ""
   }
+  $punctuationStatus = "pending"
 
   try {
   New-Item -ItemType Directory -Force -Path $TempWorkDir | Out-Null
+  $diarizationTurns = @()
+  $diarizationStatus = if ($DiarizationReady) { "pending" } else { "unavailable" }
+  $diarizationLog = ""
+  $splitSourcePath = $attemptInputPath
+  if ($DiarizationReady) {
+    $normalizedAudioPath = Join-Path $TempWorkDir "normalized.wav"
+    try {
+      $normalizeResult = Convert-AudioToNormalizedWav -AudioPath $attemptInputPath -OutputPath $normalizedAudioPath -PathForNative $pathForNative
+      if ($normalizeResult.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $normalizedAudioPath)) {
+        throw "ffmpeg normalize failed with exit code $($normalizeResult.ExitCode)"
+      }
+      # Chunking reuses this decode instead of re-reading the source.
+      $splitSourcePath = $normalizedAudioPath
+      if ((Get-Item -LiteralPath $normalizedAudioPath).Length -gt 460MB) {
+        $diarizationStatus = "too-long"
+      } else {
+        $diarizationResult = Read-DiarizationTurns -AudioPath $normalizedAudioPath -PathForNative $pathForNative
+        $diarizationTurns = @($diarizationResult.Turns.ToArray())
+        $diarizationStatus = if ($diarizationTurns.Count -gt 0) { "ok" } else { "empty" }
+        $diarizationLog = $diarizationResult.Output
+      }
+    } catch {
+      $diarizationStatus = "failed"
+      $diarizationTurns = @()
+      $diarizationLog = ($_ | Out-String)
+    }
+  }
   Write-ProgressLog -Stage "segmenting" -Current 0 -Total 0
-  $split = Split-AudioToChunks -AudioPath $attemptInputPath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative
+  $split = Split-AudioToChunks -AudioPath $splitSourcePath -OutputDir $tempWorkDir -SegmentSeconds $ChunkSeconds -PathForNative $pathForNative -PreferSilence
+  if ($splitSourcePath -ne $attemptInputPath) {
+    Remove-Item -LiteralPath $splitSourcePath -Force -ErrorAction SilentlyContinue
+  }
   $ffmpegOutput = $split.FfmpegResult.Output
   $ffmpegExit = $split.FfmpegResult.ExitCode
   $chunkFiles = @($split.ChunkFiles)
+  $chunkStartSeconds = @($split.ChunkStartSeconds)
   $result.ChunkCount = $chunkFiles.Count
   Write-ProgressLog -Stage "transcribing" -Current 0 -Total $chunkFiles.Count
   $whisperLogs = New-Object System.Collections.Generic.List[string]
   $mergedText = New-Object System.Collections.Generic.List[string]
+  $mergedSegments = New-Object System.Collections.Generic.List[object]
   $whisperExit = 0
   $chunkIndex = 0
   $recoveryTriggered = 0
@@ -10063,19 +11348,64 @@ function Invoke-TranscribeAttempt {
           }
         }
         $mergedText.Add($normalizedText)
+        # Timestamps come from the original chunk output. Repeat-hallucination
+        # recovery may trim the text slightly; segment timing stays the trusted
+        # first-pass alignment.
+        $chunkOffsetMs = [int64]0
+        if ($chunkIndex -lt $chunkStartSeconds.Count) {
+          $chunkOffsetMs = [int64][Math]::Round([double]$chunkStartSeconds[$chunkIndex] * 1000.0)
+        }
+        foreach ($segment in @(Read-WhisperChunkSegments -ChunkBase $chunkBase -ChunkOffsetMs $chunkOffsetMs)) {
+          $mergedSegments.Add($segment)
+        }
       }
     }
     $chunkIndex += 1
     Write-ProgressLog -Stage "transcribing" -Current $chunkIndex -Total $chunkFiles.Count
   }
 
+    $detectedSpeakers = 0
+    if ($diarizationTurns.Count -gt 0 -and $mergedSegments.Count -gt 0) {
+      $detectedSpeakers = Set-SegmentSpeakers -Segments @($mergedSegments.ToArray()) -Turns $diarizationTurns
+    }
+
+    # Punctuation is best effort: any failure leaves the raw transcript intact.
+    $punctuationStatus = if ($PunctuationReady) { "skipped" } else { "unavailable" }
+    if ($PunctuationReady -and $mergedSegments.Count -gt 0) {
+      try {
+        $punctuatedSegments = Add-UnitPunctuation -Units @($mergedSegments.ToArray())
+        $punctuationStatus = if ($punctuatedSegments -gt 0) { "ok" } else { "unchanged" }
+      } catch {
+        $punctuationStatus = "failed"
+        Write-Host ("[punctuation] segment step failed: " + $_.Exception.Message)
+      }
+    }
+    if ($PunctuationReady -and $mergedText.Count -gt 0) {
+      try {
+        $textUnits = @()
+        foreach ($chunkText in $mergedText) {
+          $textUnits += [PSCustomObject]@{ text = [string]$chunkText }
+        }
+        [void](Add-UnitPunctuation -Units $textUnits)
+        $mergedText = New-Object System.Collections.Generic.List[string]
+        foreach ($textUnit in $textUnits) { $mergedText.Add([string]$textUnit.text) }
+      } catch {
+        Write-Host ("[punctuation] text step failed: " + $_.Exception.Message)
+      }
+    }
+
     $result.FfmpegOutput = $ffmpegOutput
     $result.FfmpegExit = $ffmpegExit
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "\`n\`n")
+    $result | Add-Member -NotePropertyName Segments -NotePropertyValue @($mergedSegments.ToArray()) -Force
     $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
     $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
+    $result | Add-Member -NotePropertyName DiarizationStatus -NotePropertyValue $diarizationStatus -Force
+    $result | Add-Member -NotePropertyName DiarizationSpeakers -NotePropertyValue $detectedSpeakers -Force
+    $result | Add-Member -NotePropertyName DiarizationLog -NotePropertyValue $diarizationLog -Force
+    $result | Add-Member -NotePropertyName PunctuationStatus -NotePropertyValue $punctuationStatus -Force
     return $result
   } catch {
     $result.FfmpegOutput = $ffmpegOutput
@@ -10083,8 +11413,13 @@ function Invoke-TranscribeAttempt {
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
     $result.Error = ($_ | Out-String)
+    $result | Add-Member -NotePropertyName Segments -NotePropertyValue @($mergedSegments.ToArray()) -Force
     $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
     $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
+    $result | Add-Member -NotePropertyName DiarizationStatus -NotePropertyValue $diarizationStatus -Force
+    $result | Add-Member -NotePropertyName DiarizationSpeakers -NotePropertyValue 0 -Force
+    $result | Add-Member -NotePropertyName DiarizationLog -NotePropertyValue $diarizationLog -Force
+    $result | Add-Member -NotePropertyName PunctuationStatus -NotePropertyValue $punctuationStatus -Force
     return $result
   } finally {
     if ($safeTempRoot -and (Test-Path -LiteralPath $safeTempRoot)) {
@@ -10112,6 +11447,9 @@ function Write-AttemptLog {
     "chunkCount=$($Attempt.ChunkCount)"
     "recoveryTriggered=$($Attempt.RecoveryTriggered)"
     "skippedRepeatChunks=$($Attempt.SkippedRepeatChunks)"
+    "diarization=$($Attempt.DiarizationStatus)"
+    "diarizationSpeakers=$($Attempt.DiarizationSpeakers)"
+    "punctuation=$($Attempt.PunctuationStatus)"
     "ffmpeg=$($Ffmpeg.FullName)"
     "ffmpegExit=$($Attempt.FfmpegExit)"
     "--- ffmpeg output ---"
@@ -10130,6 +11468,8 @@ function Write-AttemptLog {
       "safeModelPath=$($FallbackAttempt.ModelPath)"
       "chunkCount=$($FallbackAttempt.ChunkCount)"
       "skippedRepeatChunks=$($FallbackAttempt.SkippedRepeatChunks)"
+      "diarization=$($FallbackAttempt.DiarizationStatus)"
+      "diarizationSpeakers=$($FallbackAttempt.DiarizationSpeakers)"
       "ffmpegExit=$($FallbackAttempt.FfmpegExit)"
       "--- fallback ffmpeg output ---"
       $FallbackAttempt.FfmpegOutput
@@ -10173,6 +11513,29 @@ try {
 
   $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
+  $segmentsPath = [System.IO.Path]::ChangeExtension($OutputPath, ".segments.json")
+  $finalSegments = @()
+  if ($finalAttempt.Segments) {
+    $finalSegments = @($finalAttempt.Segments)
+  }
+  if ($finalSegments.Count -gt 0) {
+    $speakerCount = 0
+    if ($finalAttempt.DiarizationSpeakers) {
+      $speakerCount = [int]$finalAttempt.DiarizationSpeakers
+    }
+    $segmentsPayload = [PSCustomObject]@{
+      version = 1
+      language = "zh"
+      chunkSeconds = $ChunkSeconds
+      speakers = $speakerCount
+      segments = $finalSegments
+    }
+    $segmentsJson = $segmentsPayload | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($segmentsPath, $segmentsJson, $Utf8NoBom)
+  } elseif (Test-Path -LiteralPath $segmentsPath) {
+    # A previous run may leave a stale sidecar; the text no longer matches it.
+    Remove-Item -LiteralPath $segmentsPath -Force -ErrorAction SilentlyContinue
+  }
   Write-ProgressLog -Stage "done" -Current $finalAttempt.ChunkCount -Total $finalAttempt.ChunkCount
   Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"
   [System.IO.File]::ReadAllText($OutputPath, $Utf8NoBom)
@@ -10198,6 +11561,7 @@ try {
   Write-Host "whisper: $($installedWhisper.FullName)"
   Write-Host "ffmpeg: $($installedFfmpeg.FullName)"
   Write-Host "model: $modelPath"
+  Write-Host "speaker diarization: $(if ($diarizationInstalled) { 'installed' } else { 'unavailable' })"
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
   Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File \`"$InstallRoot\\transcribe.ps1\`" -InputPath {input} -OutputPath {output}"
@@ -12431,11 +13795,212 @@ var require_date_utils = __commonJS({
   }
 });
 
+// src/transcript-segment-utils.js
+var require_transcript_segment_utils = __commonJS({
+  "src/transcript-segment-utils.js"(exports2, module2) {
+    "use strict";
+    var MAX_SEGMENTS = 5e3;
+    var MAX_SEGMENT_TEXT = 2e3;
+    function toFiniteNumber(value) {
+      const number = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+    __name(toFiniteNumber, "toFiniteNumber");
+    function readSegmentRange(item) {
+      if (!item || typeof item !== "object") return null;
+      let startMs = toFiniteNumber(item.startMs);
+      let endMs = toFiniteNumber(item.endMs);
+      if (startMs === null) {
+        if (item.start_time !== void 0 || item.startTime !== void 0) {
+          startMs = toFiniteNumber(item.start_time !== void 0 ? item.start_time : item.startTime);
+        } else if (item.start !== void 0) {
+          const seconds = toFiniteNumber(item.start);
+          startMs = seconds === null ? null : seconds * 1e3;
+        }
+      }
+      if (endMs === null) {
+        if (item.end_time !== void 0 || item.endTime !== void 0) {
+          endMs = toFiniteNumber(item.end_time !== void 0 ? item.end_time : item.endTime);
+        } else if (item.end !== void 0) {
+          const seconds = toFiniteNumber(item.end);
+          endMs = seconds === null ? null : seconds * 1e3;
+        }
+      }
+      if (startMs === null && endMs === null) return null;
+      const anchor = startMs === null ? endMs : startMs;
+      return {
+        startMs: Math.max(0, Math.round(startMs === null ? anchor : startMs)),
+        endMs: Math.max(0, Math.round(endMs === null ? anchor : endMs))
+      };
+    }
+    __name(readSegmentRange, "readSegmentRange");
+    function normalizeSpeakerLabel(value) {
+      if (value === void 0 || value === null || value === "") return "";
+      const text = String(value).trim();
+      if (!text) return "";
+      if (/^说话人/.test(text)) return text;
+      if (/^\d+$/.test(text)) return `说话人${text}`;
+      return text;
+    }
+    __name(normalizeSpeakerLabel, "normalizeSpeakerLabel");
+    function normalizeTranscriptSegments2(value) {
+      const list = Array.isArray(value) ? value : [];
+      const result = [];
+      const seen = /* @__PURE__ */ new Set();
+      for (const item of list) {
+        if (result.length >= MAX_SEGMENTS) break;
+        const range = readSegmentRange(item);
+        if (!range) continue;
+        const rawText = typeof item === "string" ? item : item.text || item.content || "";
+        const text = String(rawText || "").replace(/\s+/g, " ").trim().slice(0, MAX_SEGMENT_TEXT);
+        if (!text) continue;
+        if (range.endMs < range.startMs) continue;
+        const speaker = normalizeSpeakerLabel(item.speaker !== void 0 ? item.speaker : item.speakerId);
+        const key = `${range.startMs}:${text}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({
+          startMs: range.startMs,
+          endMs: range.endMs,
+          text,
+          ...speaker ? { speaker } : {}
+        });
+      }
+      result.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+      return result;
+    }
+    __name(normalizeTranscriptSegments2, "normalizeTranscriptSegments");
+    function formatTranscriptTimestamp(milliseconds) {
+      const totalSeconds = Math.max(0, Math.floor((Number(milliseconds) || 0) / 1e3));
+      const seconds = totalSeconds % 60;
+      const minutes = Math.floor(totalSeconds / 60) % 60;
+      const hours = Math.floor(totalSeconds / 3600);
+      const pad = /* @__PURE__ */ __name((value) => String(value).padStart(2, "0"), "pad");
+      return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+    }
+    __name(formatTranscriptTimestamp, "formatTranscriptTimestamp");
+    var BLOCK_MAX_CHARS = 80;
+    var BLOCK_MAX_DURATION_MS = 3e4;
+    var BLOCK_GAP_BREAK_MS = 1200;
+    var CJK_PATTERN = /[　-〿㐀-鿿＀-￯]$/;
+    var CJK_START_PATTERN = /^[　-〿㐀-鿿＀-￯]/;
+    function joinSegmentTexts(left, right) {
+      const a = String(left || "");
+      const b = String(right || "");
+      if (!a) return b;
+      if (!b) return a;
+      return CJK_PATTERN.test(a) || CJK_START_PATTERN.test(b) ? `${a}${b}` : `${a} ${b}`;
+    }
+    __name(joinSegmentTexts, "joinSegmentTexts");
+    function groupTranscriptSegments(value) {
+      const segments = normalizeTranscriptSegments2(value);
+      const blocks = [];
+      let current = null;
+      for (const segment of segments) {
+        const startsNewBlock = !current || segment.speaker && current.speaker && segment.speaker !== current.speaker || !current.speaker && segment.speaker || segment.startMs - current.endMs >= BLOCK_GAP_BREAK_MS || segment.startMs - current.startMs >= BLOCK_MAX_DURATION_MS || current.text.length + segment.text.length > BLOCK_MAX_CHARS;
+        if (startsNewBlock) {
+          current = {
+            startMs: segment.startMs,
+            endMs: segment.endMs,
+            text: segment.text,
+            ...segment.speaker ? { speaker: segment.speaker } : {}
+          };
+          blocks.push(current);
+          continue;
+        }
+        current.text = joinSegmentTexts(current.text, segment.text);
+        current.endMs = Math.max(current.endMs, segment.endMs);
+      }
+      return blocks;
+    }
+    __name(groupTranscriptSegments, "groupTranscriptSegments");
+    function buildTranscriptSegmentsMarkdown2(value) {
+      const blocks = groupTranscriptSegments(value);
+      if (!blocks.length) return "";
+      const lines = blocks.map((block) => {
+        const stamp = `[${formatTranscriptTimestamp(block.startMs)}]`;
+        const speaker = block.speaker ? `${block.speaker}：` : "";
+        return `- ${stamp} ${speaker}${block.text}`;
+      });
+      return ["## 分段转写", "", ...lines, ""].join("\n");
+    }
+    __name(buildTranscriptSegmentsMarkdown2, "buildTranscriptSegmentsMarkdown");
+    function countTranscriptCoreCharacters(value) {
+      return String(value || "").replace(/[\s\p{P}\p{S}]/gu, "").length;
+    }
+    __name(countTranscriptCoreCharacters, "countTranscriptCoreCharacters");
+    function transcriptSegmentsCoverText(segments, transcription) {
+      const textCharacters = countTranscriptCoreCharacters(transcription);
+      if (!textCharacters) return false;
+      const segmentCharacters = normalizeTranscriptSegments2(segments).reduce((total, segment) => total + countTranscriptCoreCharacters(segment.text), 0);
+      if (!segmentCharacters) return false;
+      return segmentCharacters >= textCharacters * 0.6;
+    }
+    __name(transcriptSegmentsCoverText, "transcriptSegmentsCoverText");
+    function parseTranscriptSegmentsSidecar2(value) {
+      let payload = value;
+      if (typeof value === "string") {
+        try {
+          payload = JSON.parse(value);
+        } catch (error) {
+          return [];
+        }
+      }
+      if (!payload || typeof payload !== "object") return [];
+      const segments = Array.isArray(payload.segments) ? payload.segments : Array.isArray(payload.transcription) ? payload.transcription : [];
+      return normalizeTranscriptSegments2(segments);
+    }
+    __name(parseTranscriptSegmentsSidecar2, "parseTranscriptSegmentsSidecar");
+    function extractDoubaoUtteranceSegments2(payload) {
+      const data = typeof payload === "string" ? (() => {
+        try {
+          return JSON.parse(payload);
+        } catch (error) {
+          return null;
+        }
+      })() : payload;
+      const result = data && data.result;
+      const groups = Array.isArray(result) ? result : [result];
+      const segments = [];
+      for (const group of groups) {
+        if (!group || typeof group !== "object") continue;
+        const utterances = Array.isArray(group.utterances) ? group.utterances : [];
+        for (const utterance of utterances) {
+          if (!utterance || typeof utterance !== "object") continue;
+          const text = String(utterance.text || utterance.result_text || utterance.utterance_text || "").trim();
+          if (!text) continue;
+          const additions = utterance.additions && typeof utterance.additions === "object" ? utterance.additions : {};
+          const speaker = utterance.speaker || utterance.speaker_id || utterance.spk || utterance.speakerId || additions.speaker || additions.speaker_id || additions.spk || additions.speakerId;
+          segments.push({
+            startMs: utterance.start_time !== void 0 ? utterance.start_time : utterance.startTime,
+            endMs: utterance.end_time !== void 0 ? utterance.end_time : utterance.endTime,
+            text,
+            speaker
+          });
+        }
+      }
+      return normalizeTranscriptSegments2(segments);
+    }
+    __name(extractDoubaoUtteranceSegments2, "extractDoubaoUtteranceSegments");
+    module2.exports = {
+      normalizeTranscriptSegments: normalizeTranscriptSegments2,
+      normalizeSpeakerLabel,
+      formatTranscriptTimestamp,
+      groupTranscriptSegments,
+      buildTranscriptSegmentsMarkdown: buildTranscriptSegmentsMarkdown2,
+      transcriptSegmentsCoverText,
+      parseTranscriptSegmentsSidecar: parseTranscriptSegmentsSidecar2,
+      extractDoubaoUtteranceSegments: extractDoubaoUtteranceSegments2
+    };
+  }
+});
+
 // src/cloud-transcription-response-utils.js
 var require_cloud_transcription_response_utils = __commonJS({
   "src/cloud-transcription-response-utils.js"(exports2, module2) {
     "use strict";
     var { dedupeRepeatedTranscriptionLines } = require_transcription_quality_utils();
+    var { extractDoubaoUtteranceSegments: extractDoubaoUtteranceSegments2 } = require_transcript_segment_utils();
     function parseTencentCreateTaskResponse2(payload) {
       const data = payload && payload.Response && payload.Response.Data;
       const taskId = data && (data.TaskId || data.TaskID || data.Taskid);
@@ -12543,9 +14108,11 @@ var require_cloud_transcription_response_utils = __commonJS({
         throw new Error(formatHttpError2("豆包语音识别", response));
       }
       const transcription = parseDoubaoAsrResult2(response.json || response.text);
+      const transcriptionSegments = transcription ? extractDoubaoUtteranceSegments2(response.json || response.text) : [];
       return {
         status: transcription ? "success" : "empty",
-        transcription
+        transcription,
+        ...transcriptionSegments.length ? { transcriptionSegments } : {}
       };
     }
     __name(parseDoubaoAsrTaskState2, "parseDoubaoAsrTaskState");
@@ -12677,12 +14244,13 @@ var require_cloud_fallback_job_utils = __commonJS({
       const jobId = String(value.jobId || value.id || "").trim();
       if (!jobId || jobId.length > 180) return null;
       const sourceType = String(value.sourceType || "").trim().toLowerCase();
-      if (!["douyin_url", "uploaded_file"].includes(sourceType)) return null;
+      if (!["uploaded_file", ...CLOUD_FALLBACK_URL_SOURCE_TYPES].includes(sourceType)) return null;
       const status = normalizeCloudFallbackStatus(value.status);
       const recordId = String(value.recordId || value.syncRecordId || "").trim().slice(0, 180);
       const sourceUrl = String(value.sourceUrl || value.url || "").trim().slice(0, 4096);
       const fileID = String(value.fileID || value.audioFileID || value.fileId || "").trim().slice(0, 512);
       const transcription = String(value.transcription || "").trim().slice(0, 2e5);
+      const content = normalizeCloudFallbackContent(value.content);
       const recordSnapshot = normalizeCloudFallbackRecordSnapshot2(value.recordSnapshot);
       return {
         jobId,
@@ -12702,6 +14270,7 @@ var require_cloud_fallback_job_utils = __commonJS({
         provider: String(value.provider || "").trim().slice(0, 120),
         providerRequestId: String(value.providerRequestId || "").trim().slice(0, 180),
         ...transcription ? { transcription } : {},
+        ...content ? { content } : {},
         error: normalizeCloudFallbackError(value.error),
         clientRequestId: String(value.clientRequestId || value.idempotencyKey || "").trim().slice(0, 240),
         createdAt: String(value.createdAt || "").trim(),
@@ -12785,11 +14354,44 @@ var require_cloud_fallback_job_utils = __commonJS({
       }).slice(-100);
     }
     __name(normalizeCloudFallbackAcks2, "normalizeCloudFallbackAcks");
+    var CLOUD_FALLBACK_URL_SOURCE_TYPES = ["douyin_url", "xiaohongshu_url"];
+    var MAX_CLOUD_FALLBACK_CONTENT_MARKDOWN = 4e5;
+    var MAX_CLOUD_FALLBACK_CONTENT_IMAGES = 60;
+    var MAX_CLOUD_FALLBACK_CONTENT_TAGS = 40;
     function normalizeCloudFallbackSourceType2(value) {
       const sourceType = String(value || "").trim().toLowerCase();
-      return ["douyin_url", "uploaded_file"].includes(sourceType) ? sourceType : "";
+      return ["uploaded_file", ...CLOUD_FALLBACK_URL_SOURCE_TYPES].includes(sourceType) ? sourceType : "";
     }
     __name(normalizeCloudFallbackSourceType2, "normalizeCloudFallbackSourceType");
+    function isCloudFallbackUrlSourceType2(value) {
+      return CLOUD_FALLBACK_URL_SOURCE_TYPES.includes(String(value || "").trim().toLowerCase());
+    }
+    __name(isCloudFallbackUrlSourceType2, "isCloudFallbackUrlSourceType");
+    function normalizeCloudFallbackContent(value) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+      const markdown = String(value.markdown || "").replace(/\r\n?/g, "\n").slice(0, MAX_CLOUD_FALLBACK_CONTENT_MARKDOWN).trim();
+      const imageUrls = [];
+      (Array.isArray(value.imageUrls) ? value.imageUrls : []).forEach((item) => {
+        const url = String(item || "").trim();
+        if (!/^https?:\/\//i.test(url) || url.length > 4096 || imageUrls.includes(url)) return;
+        if (imageUrls.length < MAX_CLOUD_FALLBACK_CONTENT_IMAGES) imageUrls.push(url);
+      });
+      const tags = [];
+      (Array.isArray(value.tags) ? value.tags : []).forEach((item) => {
+        const tag = String(item || "").trim().slice(0, 60);
+        if (!tag || tags.includes(tag)) return;
+        if (tags.length < MAX_CLOUD_FALLBACK_CONTENT_TAGS) tags.push(tag);
+      });
+      if (!markdown && !imageUrls.length) return null;
+      return {
+        title: String(value.title || "").trim().slice(0, 300),
+        author: String(value.author || "").trim().slice(0, 160),
+        markdown,
+        imageUrls,
+        tags
+      };
+    }
+    __name(normalizeCloudFallbackContent, "normalizeCloudFallbackContent");
     function isControlledCloudFallbackFileId2(value) {
       const fileID = String(value || "").trim();
       return Boolean(fileID) && fileID.length <= 512 && !/[?&#\s]/.test(fileID) && (!/^[a-z][a-z0-9+.-]*:\/\//i.test(fileID) || /^cloud:\/\//i.test(fileID)) && !/["'<>]/.test(fileID);
@@ -12812,6 +14414,8 @@ var require_cloud_fallback_job_utils = __commonJS({
       isCloudFallbackJobTerminal: isCloudFallbackJobTerminal2,
       isCloudFallbackJobPending: isCloudFallbackJobPending2,
       normalizeCloudFallbackSourceType: normalizeCloudFallbackSourceType2,
+      isCloudFallbackUrlSourceType: isCloudFallbackUrlSourceType2,
+      normalizeCloudFallbackContent,
       isControlledCloudFallbackFileId: isControlledCloudFallbackFileId2
     };
   }
@@ -13186,6 +14790,7 @@ var require_operator_media_node = __commonJS({
     var OPERATOR_NODE_API_BASE_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_API_BASE";
     var WORKER_PROTOCOL_VERSION2 = "cfb-worker/v2";
     var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
+    var XIAOHONGSHU_CAPABILITY = "xiaohongshu";
     var DEFAULT_POLL_INTERVAL_MS = 15e3;
     var DEFAULT_MAX_IDLE_POLL_INTERVAL_MS = 12e4;
     var DEFAULT_HEARTBEAT_INTERVAL_MS = 3e4;
@@ -13335,6 +14940,23 @@ var require_operator_media_node = __commonJS({
       }
     }
     __name(isDouyinSourceUrl, "isDouyinSourceUrl");
+    function isXiaohongshuSourceUrl(value) {
+      try {
+        const url = new URL(String(value || "").trim());
+        return /^https?:$/.test(url.protocol) && (/(^|\.)xiaohongshu\.com$/i.test(url.hostname) || /(^|\.)xhslink\.com$/i.test(url.hostname) || /(^|\.)xhslink\.cn$/i.test(url.hostname));
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isXiaohongshuSourceUrl, "isXiaohongshuSourceUrl");
+    function resolveMediaSourcePlatform(job) {
+      const sourceType = String(job && job.sourceType || "").trim().toLowerCase();
+      const sourceUrl = String(job && job.sourceUrl || "").trim();
+      if (sourceType === "douyin_url" && isDouyinSourceUrl(sourceUrl)) return "douyin";
+      if (sourceType === "xiaohongshu_url" && isXiaohongshuSourceUrl(sourceUrl)) return "xiaohongshu";
+      return "";
+    }
+    __name(resolveMediaSourcePlatform, "resolveMediaSourcePlatform");
     function createOperatorMediaNode2({
       plugin = null,
       env = process.env,
@@ -13427,14 +15049,35 @@ var require_operator_media_node = __commonJS({
       const complete = /* @__PURE__ */ __name(async (job, body) => {
         return await callApi("/transcriptions/fallback/worker/complete", { ...baseForJob(job), ...body }, { signal: null });
       }, "complete");
+      const rejectedCapabilities = /* @__PURE__ */ new Set();
       const getCapabilities = /* @__PURE__ */ __name(() => {
         const capabilities = ["media_acquire"];
+        if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY) && plugin && typeof plugin.acquireOperatorXiaohongshuContent === "function") {
+          capabilities.push(XIAOHONGSHU_CAPABILITY);
+        }
         try {
-          if (plugin && typeof plugin.getLocalAsrInstallStatus === "function" && plugin.getLocalAsrInstallStatus().ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
+          if (!rejectedCapabilities.has("local_asr") && plugin && typeof plugin.getLocalAsrInstallStatus === "function" && plugin.getLocalAsrInstallStatus().ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
         } catch (_) {
         }
         return capabilities;
       }, "getCapabilities");
+      const withCapabilityNegotiation = /* @__PURE__ */ __name(async (send) => {
+        for (; ; ) {
+          try {
+            return await send();
+          } catch (error) {
+            if (!error || error.code !== "WORKER_CAPABILITY_FORBIDDEN") throw error;
+            const candidate = [XIAOHONGSHU_CAPABILITY, "local_asr"].find((capability) => getCapabilities().includes(capability));
+            if (!candidate) throw error;
+            rejectedCapabilities.add(candidate);
+            lastErrorCode = "WORKER_CAPABILITY_DOWNGRADED";
+            try {
+              logger({ type: "capability-downgraded", capability: candidate });
+            } catch (_) {
+            }
+          }
+        }
+      }, "withCapabilityNegotiation");
       const stopCapacityHeartbeat = /* @__PURE__ */ __name(() => {
         if (capacityHeartbeatTimer) clearInterval(capacityHeartbeatTimer);
         capacityHeartbeatTimer = null;
@@ -13445,22 +15088,23 @@ var require_operator_media_node = __commonJS({
       const sendCapacityHeartbeat = /* @__PURE__ */ __name(async () => {
         if (!running) return false;
         if (capacityHeartbeatInFlight) return await capacityHeartbeatInFlight;
-        const capabilities = getCapabilities();
         const controller = new AbortController();
         capacityController = controller;
-        const body = {
-          workerId: config.workerId,
-          protocolVersion: WORKER_PROTOCOL_VERSION2,
-          capabilities,
-          runtimeCapabilities: capabilities,
-          availableCapabilities: capabilities,
-          phases: ["media", "asr"],
-          capacitySlots: 1,
-          activeSlots: activeJob ? 1 : 0
-        };
         capacityHeartbeatInFlight = (async () => {
           try {
-            await callApi("/transcriptions/fallback/worker/capacity", body, { signal: controller.signal });
+            await withCapabilityNegotiation(() => {
+              const capabilities = getCapabilities();
+              return callApi("/transcriptions/fallback/worker/capacity", {
+                workerId: config.workerId,
+                protocolVersion: WORKER_PROTOCOL_VERSION2,
+                capabilities,
+                runtimeCapabilities: capabilities,
+                availableCapabilities: capabilities,
+                phases: ["media", "asr"],
+                capacitySlots: 1,
+                activeSlots: activeJob ? 1 : 0
+              }, { signal: controller.signal });
+            });
             capacityReady = true;
             return true;
           } catch (error) {
@@ -13497,8 +15141,10 @@ var require_operator_media_node = __commonJS({
         backend: String(activeJob && activeJob.backend || "").trim() || void 0,
         error: {
           ...shutdown ? { code: "OPERATOR_NODE_STOPPED" } : redactError(error),
-          message: shutdown ? "运营节点已停止，任务可由其他节点继续" : "运营节点任务处理失败",
-          retryable: true,
+          message: shutdown ? "运营节点已停止，任务可由其他节点继续" : error && error.linkExpired === true && String(error.message || "").trim() ? String(error.message).trim() : "运营节点任务处理失败",
+          // A retired share link is answered by asking the user for a new one; every
+          // other failure may succeed on another node or a later attempt.
+          retryable: error && error.linkExpired === true ? false : true,
           stage: String(stage || "").slice(0, 64)
         }
       }), "failBody");
@@ -13507,8 +15153,19 @@ var require_operator_media_node = __commonJS({
         const base = baseForJob(job);
         if (!base.jobId || !base.attemptId || !base.leaseToken) throw nodeError("OPERATOR_JOB_INVALID", "运营节点任务租约无效");
         if (!["media", "asr"].includes(phase)) throw nodeError("OPERATOR_JOB_PHASE_INVALID", "运营节点任务阶段无效");
-        if (phase === "media" && (!isDouyinSourceUrl(job.sourceUrl) || String(job.sourceType || "").trim() !== "douyin_url")) {
-          throw nodeError("OPERATOR_MEDIA_SOURCE_INVALID", "运营节点只处理受控抖音媒体任务", { retryable: false });
+        const mediaPlatform = phase === "media" ? resolveMediaSourcePlatform(job) : "";
+        if (phase === "media" && !mediaPlatform) {
+          await complete(job, {
+            phase: "media",
+            outcome: "failed",
+            error: {
+              code: "OPERATOR_MEDIA_SOURCE_INVALID",
+              message: "运营节点只处理受控平台媒体任务",
+              retryable: false,
+              stage: "acquiring"
+            }
+          });
+          return null;
         }
         if (phase === "asr" && !/^https?:\/\//i.test(String(job.controlledMediaUrl || "").trim())) {
           throw nodeError("OPERATOR_CONTROLLED_MEDIA_REQUIRED", "运营节点 ASR 缺少受控媒体地址", { retryable: false });
@@ -13520,6 +15177,41 @@ var require_operator_media_node = __commonJS({
         let mediaCompletionAttempted = false;
         try {
           await heartbeat(job, "acquiring", 5);
+          if (phase === "media" && mediaPlatform === "xiaohongshu") {
+            if (!plugin || typeof plugin.acquireOperatorXiaohongshuContent !== "function" || typeof plugin.uploadWorkerMediaForJob !== "function") {
+              throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点小红书抓取能力未就绪", { retryable: true });
+            }
+            const acquired = await plugin.acquireOperatorXiaohongshuContent(job.sourceUrl, { signal: activeController.signal });
+            if (acquired && acquired.kind === "content") {
+              const content = acquired.content && typeof acquired.content === "object" ? acquired.content : null;
+              const markdown = String(content && content.markdown || "").trim();
+              const imageUrls = Array.isArray(content && content.imageUrls) ? content.imageUrls : [];
+              if (!markdown && !imageUrls.length) {
+                throw nodeError("OPERATOR_XIAOHONGSHU_EMPTY", "运营节点未提取到小红书图文内容", { retryable: true });
+              }
+              activeJob.progress = 100;
+              stopHeartbeat();
+              return await complete(job, { phase: "media", outcome: "succeeded", content });
+            }
+            const videoPath = String(acquired && acquired.tempPath || "").trim();
+            if (!videoPath) throw nodeError("OPERATOR_XIAOHONGSHU_EMPTY", "运营节点未取得小红书视频文件", { retryable: true });
+            tempPath = videoPath;
+            activeJob.progress = 45;
+            const uploadedXiaohongshu = await plugin.uploadWorkerMediaForJob(tempPath, job, {
+              signal: activeController.signal,
+              workerConfig: config,
+              request: callApi,
+              beforeComplete: /* @__PURE__ */ __name(() => {
+                mediaCompletionAttempted = true;
+                stopHeartbeat();
+              }, "beforeComplete")
+            });
+            activeJob.progress = 100;
+            stopHeartbeat();
+            const xiaohongshuCompletion = uploadedXiaohongshu && uploadedXiaohongshu.completion;
+            if (!xiaohongshuCompletion) throw nodeError("OPERATOR_MEDIA_COMPLETE_INVALID", "运营节点媒体上传未完成", { retryable: true });
+            return xiaohongshuCompletion;
+          }
           if (phase === "media") {
             if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== "function" || typeof plugin.uploadWorkerMediaForJob !== "function") {
               throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点媒体能力未就绪", { retryable: true });
@@ -13607,14 +15299,14 @@ var require_operator_media_node = __commonJS({
           let claimed = false;
           try {
             if (!capacityReady && !await sendCapacityHeartbeat()) return;
-            const response = await callApi("/transcriptions/fallback/worker/claim", {
+            const response = await withCapabilityNegotiation(() => callApi("/transcriptions/fallback/worker/claim", {
               workerId: config.workerId,
               protocolVersion: WORKER_PROTOCOL_VERSION2,
               capabilities: getCapabilities(),
               capacitySlots: 1,
               activeSlots: 0,
               limit: 1
-            }, { signal: null });
+            }, { signal: null }));
             const jobs = normalizeJobs(response).slice(0, 1);
             if (jobs.length) {
               claimed = true;
@@ -13695,6 +15387,10 @@ var require_operator_media_node = __commonJS({
       OPERATOR_NODE_API_BASE_ENV: OPERATOR_NODE_API_BASE_ENV2,
       WORKER_PROTOCOL_VERSION: WORKER_PROTOCOL_VERSION2,
       DEFAULT_CAPABILITIES,
+      XIAOHONGSHU_CAPABILITY,
+      isDouyinSourceUrl,
+      isXiaohongshuSourceUrl,
+      resolveMediaSourcePlatform,
       isOperatorNodeEnabled,
       readOperatorNodeConfig,
       requestJsonViaNode: requestJsonViaNode2,
@@ -14557,7 +16253,8 @@ var require_progress_notice_utils = __commonJS({
       const cloudProcessingCount = skipped.filter((item) => item && item.reason === "cloud-transcription-processing").length;
       const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === "locally-quarantined-unrecoverable").length;
       const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === "deleted-expired-xhs-shortlink").length;
-      const otherSkippedCount = skipped.filter((item) => item && item.reason !== "already-synced-local" && item.reason !== "failed-awaiting-manual-retry" && item.reason !== "failure-report-pending" && item.reason !== "cloud-transcription-processing" && item.reason !== "locally-quarantined-unrecoverable" && item.reason !== "deleted-expired-xhs-shortlink").length;
+      const xiaohongshuRateLimitedCount = skipped.filter((item) => item && item.reason === "xiaohongshu-rate-limited").length;
+      const otherSkippedCount = skipped.filter((item) => item && item.reason !== "already-synced-local" && item.reason !== "failed-awaiting-manual-retry" && item.reason !== "failure-report-pending" && item.reason !== "cloud-transcription-processing" && item.reason !== "locally-quarantined-unrecoverable" && item.reason !== "deleted-expired-xhs-shortlink" && item.reason !== "xiaohongshu-rate-limited").length;
       const parts = [];
       if (cloudProcessingCount) {
         parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
@@ -14567,6 +16264,9 @@ var require_progress_notice_utils = __commonJS({
       }
       if (deletedExpiredXiaohongshuCount) {
         parts.push(`${deletedExpiredXiaohongshuCount} 条原小红书临时链接已失效，已生成失效说明文件并删除云端旧记录；请重新复制原笔记链接后再保存`);
+      }
+      if (xiaohongshuRateLimitedCount) {
+        parts.push(`${xiaohongshuRateLimitedCount} 条小红书内容本次未同步（平台提示请求过于频繁），记录已保留，下次同步会继续尝试`);
       }
       if (otherSkippedCount) {
         parts.push(`${otherSkippedCount} 条已跳过`);
@@ -15046,6 +16746,9 @@ var require_sync_lifecycle_utils = __commonJS({
       if (code === "LOCAL_COMPONENT_SETUP_REQUIRED") return "LOCAL_COMPONENT_UNAVAILABLE";
       if (code === "LOCAL_TRANSCRIPTION_BINDING_REQUIRED" || code === "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED") return "SYNC_FAILED";
       if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
+      if (/^XIAOHONGSHU_/.test(code)) {
+        return code === "XIAOHONGSHU_PRO_REQUIRED" ? "SYNC_FAILED" : "EXTRACTION_FAILED";
+      }
       if (code === "UNSUPPORTED_PLATFORM" || /UNSUPPORTED_(?:PLATFORM|RECORD_TYPE|SITE)/.test(code) || /UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)/.test(message) || /\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0|\u4e0d\u652f\u6301(?:\u6b64|\u8be5)?\u5e73\u53f0/.test(message)) {
         return "UNSUPPORTED_PLATFORM";
       }
@@ -15268,6 +16971,10 @@ var require_sync_lifecycle_utils = __commonJS({
       return meaningfulLength > 0 || hasEmbeddedAttachment;
     }
     __name(isExistingLocalNoteDeliverable2, "isExistingLocalNoteDeliverable");
+    function isXiaohongshuRecordSource(value) {
+      return /^https?:\/\/(?:[^/?#]*\.)?(?:xiaohongshu\.com|xhslink\.com|xhslink\.cn)(?:[/?#]|$)/i.test(String(value || "").trim());
+    }
+    __name(isXiaohongshuRecordSource, "isXiaohongshuRecordSource");
     function getSyncLifecycleOutcomeError2(record) {
       const source = record && typeof record === "object" ? record : {};
       const metadata = source.metadata && typeof source.metadata === "object" ? source.metadata : {};
@@ -15285,7 +16992,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const declaredError = `${metadata.conversionError || ""} ${metadata.transcriptionError || ""}`.trim();
       if (transcriptionStatus === "no_speech" || conversionStatus === "no_speech") {
         if (isRecognizedNoSpeechMetadata2(metadata)) return null;
-        return createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", "无语音识别结果缺少有效证据");
+        return isXiaohongshuRecordSource(url) ? createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "小红书内容提取失败，请重新同步") : createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", "无语音识别结果缺少有效证据");
       }
       const meaningfulLength = getMeaningfulMarkdownLength(markdown);
       const hasUsableImages = hasWechatImageBody(source, markdown);
@@ -15294,7 +17001,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const channelsOutcome = channelsDiagnostic2.outcome(metadata.mediaResolutionDiagnostic);
       if (channelsOutcome && transcriptionStatus === "failed") return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
       if (transcriptionStatus === "failed" && !transcription) {
-        return createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
+        return isXiaohongshuRecordSource(url) ? createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "小红书内容提取失败，请重新同步") : createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
       }
       if (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || !hasUsableOutput)) {
         return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
@@ -15374,6 +17081,7 @@ var require_note_output_plan_utils = __commonJS({
     "use strict";
     var { formatTranscriptForReading: formatTranscriptForReading2 } = require_readable_content_utils();
     var { toSimplifiedChinese } = require_transcription_quality_utils();
+    var { buildTranscriptSegmentsMarkdown: buildTranscriptSegmentsMarkdown2, transcriptSegmentsCoverText } = require_transcript_segment_utils();
     function requireFunction(value, name) {
       if (typeof value !== "function") {
         throw new TypeError(`note output dependency is required: ${name}`);
@@ -15531,7 +17239,19 @@ var require_note_output_plan_utils = __commonJS({
         } else if (type === "voice") {
           const errorText = metadata.transcriptionError || metadata.aiError || "";
           const transcription = formatTranscriptForReading2(toSimplifiedChinese(metadata.transcription || "")) || (metadata.transcriptionStatus === "failed" ? `语音转写失败。${errorText}` : "未开启语音转写。");
-          body = ["## 转写全文", "", transcription, "", "## 录音文件", "", `![[${audioFileName}]]`, ""].join("\n");
+          const segmentsMarkdown = buildTranscriptSegmentsMarkdown2(metadata.transcriptionSegments || []);
+          const hasFullSegments = segmentsMarkdown && transcriptSegmentsCoverText(metadata.transcriptionSegments || [], metadata.transcription || "");
+          body = [
+            hasFullSegments ? "" : "## 转写全文",
+            "",
+            hasFullSegments ? "" : transcription,
+            "",
+            segmentsMarkdown,
+            "## 录音文件",
+            "",
+            `![[${audioFileName}]]`,
+            ""
+          ].filter((line) => line !== "").join("\n");
         } else if (type === "file") {
           body = helpers.buildFileMarkdownBody(record);
         } else {
@@ -15667,6 +17387,7 @@ var require_record_body_markdown_utils = __commonJS({
     var { cleanTranscriptionTail: cleanTranscriptionTail2, formatTranscriptForReading: formatTranscriptForReading2 } = require_readable_content_utils();
     var { toSimplifiedChinese, NO_SPEECH_SAVED_MESSAGE, isRecognizedNoSpeechMetadata: isRecognizedNoSpeechMetadata2 } = require_transcription_quality_utils();
     var { QUALITY_NOTICE_START, QUALITY_NOTICE_END, QUALITY_PARTIAL_NOTICE: QUALITY_PARTIAL_NOTICE2 } = require_transcription_partial_note_utils();
+    var { buildTranscriptSegmentsMarkdown: buildTranscriptSegmentsMarkdown2, normalizeTranscriptSegments: normalizeTranscriptSegments2, transcriptSegmentsCoverText } = require_transcript_segment_utils();
     function requireFunction(value, name) {
       if (typeof value !== "function") {
         throw new TypeError(`record body markdown dependency is required: ${name}`);
@@ -15695,7 +17416,8 @@ var require_record_body_markdown_utils = __commonJS({
         transcriptionStatus = "pending",
         transcriptionSource = "",
         transcriptionError = "",
-        transcriptionQualityStatus = ""
+        transcriptionQualityStatus = "",
+        transcriptionSegments = []
       }) {
         url = helpers.cleanDisplayUrl(url);
         const status = String(transcriptionStatus || "").toLowerCase();
@@ -15704,11 +17426,16 @@ var require_record_body_markdown_utils = __commonJS({
         }
         const isCloudPending = ["queued", "processing"].includes(status) && String(transcriptionSource || "").includes("cloud");
         const content = formatTranscriptForReading2(toSimplifiedChinese(transcription)) || (status === "failed" ? `转写失败。${transcriptionError || "未能提取到视频/音频文案。"}` : isCloudPending ? "云端转写中，下次同步会自动更新。" : "转写处理中，或未配置可用的转写方案。");
+        const segmentsMarkdown = buildTranscriptSegmentsMarkdown2(transcriptionSegments);
+        if (segmentsMarkdown && (!String(transcription || "").trim() || transcriptSegmentsCoverText(transcriptionSegments, transcription))) {
+          return segmentsMarkdown;
+        }
         return [
           "## 口播/音频文案",
           "",
           content,
-          ""
+          "",
+          segmentsMarkdown
         ].filter((line) => line !== "").join("\n");
       }
       __name(buildAudioTranscriptMarkdown2, "buildAudioTranscriptMarkdown");
@@ -15757,6 +17484,7 @@ var require_record_body_markdown_utils = __commonJS({
         mediaUrls = [],
         subtitleUrl = "",
         transcription = "",
+        transcriptionSegments = [],
         transcriptionStatus = "failed",
         transcriptionSource = "",
         transcriptionError = "",
@@ -15780,6 +17508,9 @@ var require_record_body_markdown_utils = __commonJS({
         const cleanedTrailingMarkdown = String(trailingMarkdown || existingTrailingMarkdown || "").trim();
         const normalizedMediaUrls = Array.from(new Set((Array.isArray(mediaUrls) ? mediaUrls : []).map((item) => helpers.normalizeExtractedUrl(typeof item === "string" ? item : item && item.url)).filter((item) => /^https?:\/\//i.test(item))));
         if (mediaUrl && !normalizedMediaUrls.includes(mediaUrl)) normalizedMediaUrls.unshift(mediaUrl);
+        const normalizedSegments = normalizeTranscriptSegments2(
+          Array.isArray(transcriptionSegments) && transcriptionSegments.length ? transcriptionSegments : rest.transcriptionSegments
+        );
         return {
           ...rest,
           title: String(sourceTitle || rest.sourceTitle || rest.title || `${sourceName}口播文案`).trim(),
@@ -15793,6 +17524,7 @@ var require_record_body_markdown_utils = __commonJS({
           mediaUrls: normalizedMediaUrls,
           subtitleUrl,
           transcription: toSimplifiedChinese(cleanTranscriptionTail2(transcription)),
+          ...normalizedSegments.length ? { transcriptionSegments: normalizedSegments } : {},
           transcriptionStatus,
           transcriptionSource,
           transcriptionError,
@@ -15870,7 +17602,8 @@ ${NO_SPEECH_SAVED_MESSAGE}
             transcriptionStatus: metadata.transcriptionStatus || metadata.conversionStatus || "pending",
             transcriptionSource: metadata.transcriptionSource || metadata.transcriptionProvider || "",
             transcriptionError: metadata.transcriptionError || metadata.conversionError || "",
-            transcriptionQualityStatus: metadata.transcriptionQualityStatus || ""
+            transcriptionQualityStatus: metadata.transcriptionQualityStatus || "",
+            transcriptionSegments: metadata.transcriptionSegments || []
           });
           return [sourceMediaMarkdown, snapshot, transcriptMarkdown, trailingMarkdown, automaticShareTextMarkdown].filter(Boolean).join("\n\n").trim() + "\n";
         }
@@ -15928,15 +17661,19 @@ ${NO_SPEECH_SAVED_MESSAGE}
         if (transcriptionStatus || transcription) {
           const transcriptionError = metadata.transcriptionError || "";
           const content = transcription || (transcriptionStatus === "failed" ? `转写失败。${transcriptionError || "未能提取到音视频文案。"}` : "转写处理中，或未配置可用的转写方案。");
+          const segmentsMarkdown = buildTranscriptSegmentsMarkdown2(metadata.transcriptionSegments || []);
+          const hasFullSegments = segmentsMarkdown && transcriptSegmentsCoverText(metadata.transcriptionSegments || [], metadata.transcription || "");
           return [
             `文件名：${fileName}`,
             attachmentLine,
             fileID ? `云端文件：${fileID}` : "",
             metadata.transcriptionSource ? `转写来源：${metadata.transcriptionSource}` : "",
             "",
-            "## 口播/音频文案",
+            hasFullSegments ? "" : "## 口播/音频文案",
             "",
-            content,
+            hasFullSegments ? "" : content,
+            "",
+            segmentsMarkdown,
             ""
           ].filter((line) => line !== "").join("\n");
         }
@@ -16466,21 +18203,21 @@ var require_platform_article_utils = __commonJS({
       return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
     }
     __name(isHostWithin, "isHostWithin");
-    function isZhihuUrl(url) {
+    function isZhihuUrl2(url) {
       return isHostWithin(url, ZHIHU_ROOTS);
     }
-    __name(isZhihuUrl, "isZhihuUrl");
-    function isToutiaoUrl(url) {
+    __name(isZhihuUrl2, "isZhihuUrl");
+    function isToutiaoUrl2(url) {
       return isHostWithin(url, TOUTIAO_ROOTS);
     }
-    __name(isToutiaoUrl, "isToutiaoUrl");
+    __name(isToutiaoUrl2, "isToutiaoUrl");
     function isPlatformArticleUrl2(url) {
-      return isZhihuUrl(url) || isToutiaoUrl(url);
+      return isZhihuUrl2(url) || isToutiaoUrl2(url);
     }
     __name(isPlatformArticleUrl2, "isPlatformArticleUrl");
     function getPlatformArticleKind2(url) {
-      if (isZhihuUrl(url)) return "zhihu";
-      if (isToutiaoUrl(url)) return "toutiao";
+      if (isZhihuUrl2(url)) return "zhihu";
+      if (isToutiaoUrl2(url)) return "toutiao";
       return "";
     }
     __name(getPlatformArticleKind2, "getPlatformArticleKind");
@@ -16492,8 +18229,8 @@ var require_platform_article_utils = __commonJS({
     }
     __name(getPlatformArticleLabel2, "getPlatformArticleLabel");
     function getPlatformArticleReferer2(url) {
-      if (isZhihuUrl(url)) return "https://www.zhihu.com/";
-      if (isToutiaoUrl(url)) return "https://www.toutiao.com/";
+      if (isZhihuUrl2(url)) return "https://www.zhihu.com/";
+      if (isToutiaoUrl2(url)) return "https://www.toutiao.com/";
       return "";
     }
     __name(getPlatformArticleReferer2, "getPlatformArticleReferer");
@@ -16553,7 +18290,7 @@ var require_platform_article_utils = __commonJS({
       if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return source;
       if (parsed.username || parsed.password) return source;
       const hostname = cleanHost(parsed.hostname);
-      const kind = isZhihuUrl(parsed.toString()) ? "zhihu" : isToutiaoUrl(parsed.toString()) ? "toutiao" : "";
+      const kind = isZhihuUrl2(parsed.toString()) ? "zhihu" : isToutiaoUrl2(parsed.toString()) ? "toutiao" : "";
       if (!kind) return source;
       const canonicalPath = kind === "zhihu" ? ZHIHU_CANONICAL_PATH.test(parsed.pathname) : TOUTIAO_CANONICAL_PATH.test(parsed.pathname);
       const result = new URL(`${parsed.protocol}//${hostname}${parsed.pathname}`);
@@ -16698,8 +18435,8 @@ var require_platform_article_utils = __commonJS({
     }
     __name(extractPlatformArticleFromHtml2, "extractPlatformArticleFromHtml");
     module2.exports = {
-      isZhihuUrl,
-      isToutiaoUrl,
+      isZhihuUrl: isZhihuUrl2,
+      isToutiaoUrl: isToutiaoUrl2,
       isPlatformArticleUrl: isPlatformArticleUrl2,
       getPlatformArticleKind: getPlatformArticleKind2,
       getPlatformArticleLabel: getPlatformArticleLabel2,
@@ -17668,6 +19405,8 @@ var require_ai_metadata_utils = __commonJS({
       __name(isGeneratedTitleIndependent2, "isGeneratedTitleIndependent");
       function extractAiMetadataInputText2(record) {
         const metadata = record && record.metadata || {};
+        const recordType = String(record && record.type || "").toLowerCase();
+        const plainTextContent = recordType === "text" ? record && record.content : "";
         const isTranscriptRecord = metadata.transcriptOnly || metadata.webpageMediaType === "audio_video" || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim();
         const isWechatChannelsTranscript = isTranscriptRecord && String(metadata.platform || "").trim() === "视频号";
         const parts = isTranscriptRecord ? [
@@ -17676,6 +19415,8 @@ var require_ai_metadata_utils = __commonJS({
         ].filter(Boolean) : [
           metadata.title,
           metadata.markdown,
+          metadata.convertedMarkdown,
+          plainTextContent,
           metadata.snapshot,
           metadata.contentSnapshot,
           metadata.description,
@@ -19597,7 +21338,7 @@ var require_xiaohongshu_markdown_utils = __commonJS({
         replyRequestCount: count(input.replyRequestCount),
         invalidPayloadCount: count(input.invalidPayloadCount),
         stopReason: token(input.stopReason),
-        errorCode: /^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|TIMEOUT|REQUEST_FAILED|INVALID_RESPONSE|SECURITY_RESTRICTION|BROWSER_UNAVAILABLE|TARGET_IDENTITY_MISSING|TARGET_IDENTITY_MISMATCH|TARGET_IDENTITY_UNCONFIRMED|PAGE_ACCESS_WALL|PAGE_UNAVAILABLE)$/.test(input.errorCode || "") ? input.errorCode : ""
+        errorCode: /^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|TIMEOUT|REQUEST_FAILED|INVALID_RESPONSE|SECURITY_RESTRICTION|RATE_LIMITED|BROWSER_UNAVAILABLE|TARGET_IDENTITY_MISSING|TARGET_IDENTITY_MISMATCH|TARGET_IDENTITY_UNCONFIRMED|PAGE_ACCESS_WALL|PAGE_UNAVAILABLE)$/.test(input.errorCode || "") ? input.errorCode : ""
       };
     }
     __name(sanitizeXiaohongshuCommentResult2, "sanitizeXiaohongshuCommentResult");
@@ -19605,6 +21346,7 @@ var require_xiaohongshu_markdown_utils = __commonJS({
       const message = String(error && (error.code || error.message) || error || "");
       if (/^(?:HTTP_\d{3}|BUSINESS_-?\d{1,10}|INVALID_RESPONSE)$/i.test(message)) return message.toUpperCase();
       if (/timeout|timed?\s*out|AbortError/i.test(message)) return "TIMEOUT";
+      if (/XIAOHONGSHU_RATE_LIMITED|rate[_\s-]?limited|300013/i.test(message)) return "RATE_LIMITED";
       if (/security_restriction|300011/i.test(message)) return "SECURITY_RESTRICTION";
       return "REQUEST_FAILED";
     }
@@ -19619,7 +21361,7 @@ var require_xiaohongshu_markdown_utils = __commonJS({
         skipped: result.reason === "disabled" ? "小红书评论提取已关闭" : result.reason === "pro_not_confirmed" ? "小红书评论未提取：未确认 Pro 权限" : result.reason === "existing_content" ? "本次复用了已保存正文，未重新提取小红书评论" : result.reason === "skipped_no_login_cookie" ? "小红书评论未提取：提取前登录凭据已不可用，请重新检测登录状态" : "小红书评论未提取：登录预检未通过，尚不能确定是登录失效还是检测失败",
         captured: `小红书评论已提取 ${count} 条（主评论 ${result.rootCount} 条，回复 ${result.replyCount} 条）`,
         partial: `小红书评论可能不完整：已提取 ${count} 条（主评论 ${result.rootCount} 条，回复 ${result.replyCount} 条）`,
-        failed: result.stopReason === "target_identity_missing" ? "小红书评论未提取：未能识别目标笔记编号" : result.stopReason === "target_identity_mismatch" ? "小红书评论未提取：打开的页面与目标笔记不一致" : result.stopReason === "target_identity_unconfirmed" ? "小红书评论未提取：网页尚未显示可确认的目标笔记" : result.stopReason === "page_access_wall" ? "小红书评论未提取：目标页面要求登录或安全验证，请在插件内打开小红书完成验证" : result.stopReason === "page_unavailable" ? "小红书评论未提取：目标笔记当前无法浏览" : `小红书评论提取失败${result.loginCheck === "passed" ? "（登录预检已通过）" : ""}`,
+        failed: result.errorCode === "RATE_LIMITED" ? "小红书评论未提取：平台提示请求过于频繁，本次已暂停访问小红书，请稍后重试" : result.stopReason === "target_identity_missing" ? "小红书评论未提取：未能识别目标笔记编号" : result.stopReason === "target_identity_mismatch" ? "小红书评论未提取：打开的页面与目标笔记不一致" : result.stopReason === "target_identity_unconfirmed" ? "小红书评论未提取：网页尚未显示可确认的目标笔记" : result.stopReason === "page_access_wall" ? "小红书评论未提取：目标页面要求登录或安全验证，请在插件内打开小红书完成验证" : result.stopReason === "page_unavailable" ? "小红书评论未提取：目标笔记当前无法浏览" : `小红书评论提取失败${result.loginCheck === "passed" ? "（登录预检已通过）" : ""}`,
         empty_unconfirmed: "小红书评论未获取到，无法确认原笔记是否没有评论",
         aborted: "小红书评论提取已取消"
       };
@@ -19969,6 +21711,7 @@ function retainedSyncFailureDiagnostic(value, settings) {
 }
 __name(retainedSyncFailureDiagnostic, "retainedSyncFailureDiagnostic");
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
+var { createTranscriptMediaPlayer } = require_transcript_media_player();
 var crypto = require("crypto");
 var asrRecovery = require_asr_recovery_utils();
 var asrTimeoutProcessGroup = require_asr_timeout_process_group();
@@ -20057,6 +21800,7 @@ var {
   isCloudFallbackJobTerminal,
   isCloudFallbackJobPending,
   normalizeCloudFallbackSourceType,
+  isCloudFallbackUrlSourceType,
   isControlledCloudFallbackFileId
 } = require_cloud_fallback_job_utils();
 var {
@@ -20186,8 +21930,16 @@ var {
   getPlatformArticleReferer,
   isAllowedPlatformArticleNavigation,
   isPlatformArticleUrl,
+  isToutiaoUrl,
+  isZhihuUrl,
   normalizePlatformArticleUrl
 } = require_platform_article_utils();
+var {
+  buildTranscriptSegmentsMarkdown,
+  extractDoubaoUtteranceSegments,
+  normalizeTranscriptSegments,
+  parseTranscriptSegmentsSidecar
+} = require_transcript_segment_utils();
 var {
   decodeDataUrl,
   decodeUtf8ArrayBuffer,
@@ -20287,8 +22039,9 @@ var WECHAT_SESSION_PARTITION = "persist:wechat-inbox-wechat";
 var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36";
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
-var PLUGIN_RUNTIME_VERSION = "1.3.196";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1";
+var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+var PLUGIN_RUNTIME_VERSION = "1.3.197";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -20475,6 +22228,8 @@ var DEFAULT_SETTINGS = {
   xiaohongshuImageOcrEnabled: false,
   xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
+  transcriptTimestampsEnabled: true,
+  transcriptScreenshotEnabled: false,
   socialArticleImageStorageMode: "remote",
   socialArticleImageStorageModeConfigured: false,
   wechatChannelsExperimentUrl: "",
@@ -20965,9 +22720,13 @@ function findFirstExistingPath(candidates, exists) {
   return candidates.find((candidate) => candidate && exists(candidate)) || "";
 }
 __name(findFirstExistingPath, "findFirstExistingPath");
-var CURRENT_WINDOWS_ASR_SCRIPT_SHA256 = "d2c3f1b263a31e53a8758eff8c6a14c77370736f04c51558c5bf5b0ba853f845";
-var PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256 = "53bc6ffde07cd5d3828b20020ac4d7cfa56d775d0bd9e86d2e6fa8cdf4fc2c42";
 var LEGACY_WINDOWS_ASR_SCRIPT_SHA256 = "509a1b5aee1326da11e5f674e98cac3939b853c45180cced0f421d59c67fafcb";
+var WINDOWS_ASR_MODEL_FILE_NAME = "ggml-large-v3-turbo-q5_0.bin";
+var MACOS_ASR_MODEL_FILE_NAME = "ggml-small.bin";
+function getLocalAsrModelFileName(platform = os.platform()) {
+  return getLocalAsrPlatform(platform) === "darwin" ? MACOS_ASR_MODEL_FILE_NAME : WINDOWS_ASR_MODEL_FILE_NAME;
+}
+__name(getLocalAsrModelFileName, "getLocalAsrModelFileName");
 function getLocalAsrScriptIdentityHash(source) {
   const normalizedSource = String(source || "").replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").trimEnd();
   return crypto.createHash("sha256").update(normalizedSource, "utf8").digest("hex");
@@ -21001,12 +22760,6 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
       nativeProcessRunnerVersion: "diagnostics-process-v2",
       requireHandleInitialization: true
     })) {
-      if (sourceIdentityHash !== CURRENT_WINDOWS_ASR_SCRIPT_SHA256) {
-        return {
-          scriptVersion: "current-signature-mismatch",
-          scriptOutdated: true
-        };
-      }
       return {
         scriptVersion: "adaptive-chunked-diagnostics-process-v2-repeat-guard-v2-heartbeat-run-log",
         scriptOutdated: false
@@ -21015,12 +22768,6 @@ function getLocalAsrScriptVersionStatus(scriptPath, fileSystem = fs) {
     if (hasDiagnosticsProcessAsrRuntimeFeatures(source, {
       nativeProcessRunnerVersion: "diagnostics-process-v1"
     })) {
-      if (sourceIdentityHash !== PREVIOUS_WINDOWS_ASR_SCRIPT_SHA256) {
-        return {
-          scriptVersion: "diagnostics-process-v1-signature-mismatch",
-          scriptOutdated: true
-        };
-      }
       return {
         scriptVersion: "adaptive-chunked-diagnostics-process-v1-repeat-guard-v2-heartbeat-run-log",
         scriptOutdated: false,
@@ -21139,7 +22886,7 @@ __name(getLocalAsrScriptVersionStatus, "getLocalAsrScriptVersionStatus");
 function getLocalAsrInstallStatus(installRoot = getLocalAsrInstallRoot(), exists = fs.existsSync, platform = os.platform()) {
   const isMac = getLocalAsrPlatform(platform) === "darwin";
   const transcribeScript = joinLocalAsrPath(platform, installRoot, isMac ? "transcribe.sh" : "transcribe.ps1");
-  const modelPath = joinLocalAsrPath(platform, installRoot, "models", "ggml-small.bin");
+  const modelPath = joinLocalAsrPath(platform, installRoot, "models", getLocalAsrModelFileName(platform));
   const hasTranscribeScript = exists(transcribeScript);
   const scriptVersionStatus = exists === fs.existsSync ? getLocalAsrScriptVersionStatus(transcribeScript) : { scriptVersion: "unknown", scriptOutdated: false };
   const hasModel = exists(modelPath);
@@ -21491,8 +23238,8 @@ function getLocalAsrInstallProgressSnapshot(installRoot, fileSystem = fs) {
   const candidates = [
     ["cache", "whisper.zip"],
     ["cache", "ffmpeg.zip"],
-    ["cache", "ggml-small.bin"],
-    ["models", "ggml-small.bin"],
+    ["cache", WINDOWS_ASR_MODEL_FILE_NAME],
+    ["models", WINDOWS_ASR_MODEL_FILE_NAME],
     ["whisper"],
     ["ffmpeg"],
     ["transcribe.ps1"],
@@ -22396,6 +24143,16 @@ function getXiaohongshuCapabilityMatrix({
   };
 }
 __name(getXiaohongshuCapabilityMatrix, "getXiaohongshuCapabilityMatrix");
+function shouldRunXiaohongshuImageOcr({
+  capabilities = {},
+  extracted = null,
+  mediaUrl = ""
+} = {}) {
+  const matrix = capabilities && typeof capabilities === "object" ? capabilities : {};
+  if (matrix.imageOcr !== true) return false;
+  return !mediaUrl && !(extracted && extracted.videoUrl);
+}
+__name(shouldRunXiaohongshuImageOcr, "shouldRunXiaohongshuImageOcr");
 function getXiaohongshuBrowserCandidates(sourceUrl = "", targetIdentityUrl = "", responseFinalUrl = "") {
   const result = [];
   const seen = /* @__PURE__ */ new Set();
@@ -22422,12 +24179,18 @@ function isXiaohongshuShareBoilerplateOnly(extracted) {
   return hasShareInstruction && (hasShareLink || source.replace(/\s+/g, "").length <= 80);
 }
 __name(isXiaohongshuShareBoilerplateOnly, "isXiaohongshuShareBoilerplateOnly");
+function isXiaohongshuLoginLandingUrl(url) {
+  try {
+    const parsed = new URL(String(url || "").trim());
+    return isHostnameWithinDomain(parsed.hostname, "xiaohongshu.com") && /^\/login(?:\/|$)/i.test(parsed.pathname);
+  } catch (error) {
+    return false;
+  }
+}
+__name(isXiaohongshuLoginLandingUrl, "isXiaohongshuLoginLandingUrl");
 function isXiaohongshuLoginLanding(html, url = "", extracted = null) {
   const source = String(html || "");
-  try {
-    if (/^\/login(?:\/|$)/i.test(new URL(String(url || "")).pathname)) return true;
-  } catch {
-  }
+  if (isXiaohongshuLoginLandingUrl(url)) return true;
   if (extracted && extracted.xiaohongshuPrimaryNoteMatched === true) return false;
   const title = String(extractHtmlTitle(source) || "").trim();
   const normalizedTitle = title.toLowerCase().replace(/\s+/g, "").replace(/[|｜:：]/g, "-").replace(/[—_]/g, "-");
@@ -22435,6 +24198,8 @@ function isXiaohongshuLoginLanding(html, url = "", extracted = null) {
   const genericTitle = !normalizedTitle || /^(?:小红书|red)(?:-*(?:你的生活兴趣社区|yourlifecommunity))?$/.test(normalizedTitle);
   if (!genericTitle) return false;
   const readableText = cleanSocialDescription(stripHtmlTags(stripScriptAndStyleBlocks(selectReadableHtml(source))));
+  const shellText = [readableText, extracted && extracted.pageDescription].filter(Boolean).join("\n").replace(/\s+/g, "");
+  if (/App内打开|仅支持在小红书APP内查看|打开APP查看/i.test(shellText)) return true;
   const authMethods = [
     /手机号登录|手机登录/.test(readableText),
     /验证码登录/.test(readableText),
@@ -22509,6 +24274,7 @@ function buildXiaohongshuFailureDiagnostic({
       redirected: Boolean(source.host && final.host && source.host !== final.host),
       responseStatus: Number(responseStatus) || 0,
       pageType: classifyXiaohongshuPage({ html, resolvedUrl, extracted }),
+      loginLanding: isXiaohongshuLoginLanding(html, resolvedUrl, extracted),
       renderFailed: Boolean(renderError),
       requestFailed: Boolean(requestError),
       browserTimedOut: Boolean(
@@ -22544,8 +24310,30 @@ function buildXiaohongshuFailureDiagnostic({
   };
 }
 __name(buildXiaohongshuFailureDiagnostic, "buildXiaohongshuFailureDiagnostic");
+function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
+  const source = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
+  const request = source.request && typeof source.request === "object" ? source.request : {};
+  const extraction = source.extraction && typeof source.extraction === "object" ? source.extraction : {};
+  const pageType = String(request.pageType || "");
+  const looksLikeLanding = extraction.genericLanding === true || extraction.unavailablePage === true || ["xiaohongshu-generic-landing", "xiaohongshu-unavailable"].includes(pageType);
+  if (!looksLikeLanding) return false;
+  return (Number(extraction.bodyCharacterCount) || 0) <= 0 && (Number(extraction.imageCount) || 0) <= 0;
+}
+__name(isExpiredXiaohongshuLinkDiagnostic, "isExpiredXiaohongshuLinkDiagnostic");
+function describeXiaohongshuContentFailure(diagnostic = {}) {
+  const source = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
+  const request = source.request && typeof source.request === "object" ? source.request : {};
+  if (request.loginLanding === true) {
+    return "小红书要求登录后才能查看这条笔记，正文没有读到。请在小红书 App 里确认该笔记可以公开访问，重新“分享 → 复制链接”后再同步。";
+  }
+  if (isExpiredXiaohongshuLinkDiagnostic(source)) {
+    return "小红书链接已失效或笔记不可见（分享链接过期、笔记被删除或设为私密）。请在手机上重新打开该笔记，点“分享 → 复制链接”后重新同步；重试原链接不会成功。";
+  }
+  return "小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。";
+}
+__name(describeXiaohongshuContentFailure, "describeXiaohongshuContentFailure");
 function createRetryableXiaohongshuContentError(diagnostic = {}) {
-  const error = new Error("小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。");
+  const error = new Error(describeXiaohongshuContentFailure(diagnostic));
   error.retryable = true;
   error.code = "XIAOHONGSHU_CONTENT_UNAVAILABLE";
   error.diagnostic = redactSensitiveObject(
@@ -22869,6 +24657,8 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.xiaohongshuImageOcrConsentVersion = Number(merged.xiaohongshuImageOcrConsentVersion) === 1 ? 1 : 0;
   merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1 && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
+  merged.transcriptTimestampsEnabled = sourceSettings.transcriptTimestampsEnabled !== false;
+  merged.transcriptScreenshotEnabled = merged.transcriptScreenshotEnabled === true;
   const hasLegacyImageStoragePreference = Object.prototype.hasOwnProperty.call(sourceSettings, "wechatArticleImageStorageMode");
   const hasExplicitSocialImageStoragePreference = sourceSettings.socialArticleImageStorageModeConfigured === true;
   merged.socialArticleImageStorageMode = hasExplicitSocialImageStoragePreference || hasLegacyImageStoragePreference ? normalizeSocialArticleImageStorageMode(
@@ -23051,8 +24841,8 @@ function getActiveCloudFallbackLifecycle(record) {
   return { enabled: true, attemptId, leaseUntil, resumedCloudFallback: true };
 }
 __name(getActiveCloudFallbackLifecycle, "getActiveCloudFallbackLifecycle");
-function createCloudFallbackPendingError(job, localError = "") {
-  const error = new Error("云端兜底任务已提交，等待转写结果");
+function createCloudFallbackPendingError(job, localError = "", message = "") {
+  const error = new Error(String(message || "").trim() || "云端兜底任务已提交，等待转写结果");
   error.code = "CLOUD_FALLBACK_QUEUED";
   error.cloudFallbackJob = job || null;
   error.localError = String(localError || "").trim();
@@ -24051,6 +25841,11 @@ function isTrustedXiaohongshuTransportUrl(url) {
   }
 }
 __name(isTrustedXiaohongshuTransportUrl, "isTrustedXiaohongshuTransportUrl");
+function isXiaohongshuMediaUrl(url) {
+  const hostname = getHttpUrlHostname(url);
+  return isHostnameWithinDomain(hostname, "xhscdn.com");
+}
+__name(isXiaohongshuMediaUrl, "isXiaohongshuMediaUrl");
 var {
   isDouyinUrl,
   isTrustedDouyinPageUrl,
@@ -24429,6 +26224,7 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
   const cause = metadata.conversionDiagnostic || metadata.mediaResolutionDiagnostic || metadata.attachmentDiagnostic || null;
   const bilibiliCause = bilibiliDiagnostic.sanitize(cause);
   if (bilibiliCause) return { source: "automatic-webpage", stage: "hydration", cause: bilibiliCause };
+  const conversionError = String(metadata.conversionError || "").trim().slice(0, 200);
   return redactSensitiveObject({
     source: "automatic-webpage",
     stage: "hydration",
@@ -24437,6 +26233,7 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
     sourceHost: getSafeUrlDiagnostic(url).host || "unknown-host",
     conversionStatus: String(metadata.conversionStatus || "").toLowerCase() || "unknown",
     transcriptionStatus: String(metadata.transcriptionStatus || "").toLowerCase() || "unknown",
+    ...conversionError ? { reason: conversionError } : {},
     ...cause && typeof cause === "object" ? { cause } : {},
     ...xiaohongshuBrowserDiagnostic && typeof xiaohongshuBrowserDiagnostic === "object" ? { xiaohongshuBrowser: xiaohongshuBrowserDiagnostic } : {}
   });
@@ -24444,7 +26241,9 @@ function buildAutomaticWebpageFailureDiagnostic(url, record = null, xiaohongshuB
 __name(buildAutomaticWebpageFailureDiagnostic, "buildAutomaticWebpageFailureDiagnostic");
 function createAutomaticWebpageExtractionError(url, diagnostic = null) {
   const host = getSafeUrlDiagnostic(url).host || "unknown-host";
-  const error = new Error(bilibiliDiagnostic.summary(diagnostic) || `剪切板链接网页提取失败，已保留待重试：${host}`);
+  const base = bilibiliDiagnostic.summary(diagnostic) || `剪切板链接网页提取失败，已保留待重试：${host}`;
+  const cause = diagnostic && diagnostic.cause && typeof diagnostic.cause === "object" ? String(diagnostic.cause.reason || "").trim() : String(diagnostic && diagnostic.reason || "").trim();
+  const error = new Error(cause ? `${base}（${cause.slice(0, 80)}）` : base);
   error.code = "AUTOMATIC_WEBPAGE_EXTRACTION_FAILED";
   if (diagnostic && typeof diagnostic === "object") {
     error.diagnostic = bilibiliDiagnostic.sanitize(diagnostic) || redactSensitiveObject(diagnostic);
@@ -24468,6 +26267,14 @@ function getSocialRequestHeaders(url) {
   return headers;
 }
 __name(getSocialRequestHeaders, "getSocialRequestHeaders");
+function getXiaohongshuDocumentRequestHeaders(url) {
+  return {
+    ...getSocialRequestHeaders(url),
+    "User-Agent": XIAOHONGSHU_MOBILE_USER_AGENT,
+    Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+  };
+}
+__name(getXiaohongshuDocumentRequestHeaders, "getXiaohongshuDocumentRequestHeaders");
 function isHeaderProtectedMediaUrl(url) {
   return /bilivideo\.com|upos-[^/]+\.bilivideo\.com/i.test(String(url || ""));
 }
@@ -25192,6 +26999,28 @@ function installDouyinExtractionNavigationGuards(webContents, initialUrl) {
   webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 }
 __name(installDouyinExtractionNavigationGuards, "installDouyinExtractionNavigationGuards");
+function installPlatformArticleNavigationGuards(webContents, platform, initialUrl) {
+  if (!webContents || typeof webContents.removeAllListeners !== "function" || typeof webContents.on !== "function" || typeof webContents.setWindowOpenHandler !== "function") {
+    throw new Error("无法隔离平台文章提取窗口的跳转处理");
+  }
+  if (!isAllowedPlatformArticleNavigation(initialUrl, platform)) {
+    throw new Error("平台文章提取仅允许官方 HTTPS 页面");
+  }
+  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictNavigation = /* @__PURE__ */ __name((event, navigation) => {
+    const value = typeof navigation === "string" ? navigation : navigation && navigation.url || event && event.url;
+    if (!isAllowedPlatformArticleNavigation(value, platform) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "restrictNavigation");
+  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+    webContents.on(eventName, restrictNavigation);
+  }
+  webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+}
+__name(installPlatformArticleNavigationGuards, "installPlatformArticleNavigationGuards");
 function createXiaohongshuBrowserDiagnostic(record = null) {
   return {
     source: "xiaohongshu-browser",
@@ -25273,18 +27102,79 @@ function appendXiaohongshuBrowserFailure(options = {}, stage = "", error = null)
   });
 }
 __name(appendXiaohongshuBrowserFailure, "appendXiaohongshuBrowserFailure");
+var xiaohongshuRunRestriction = null;
 function detectXiaohongshuSecurityRestriction(text = "") {
-  const source = String(text || "");
-  const hasCode = /(?:^|\D)300011(?:\D|$)/.test(source);
-  const hasRestrictionWall = /安全限制/.test(source) && /账号异常|请稍后重试|返回首页|我要反馈/.test(source);
-  if (!hasCode && !hasRestrictionWall) return null;
+  const source = String(text || "").replace(/<script\b[\s\S]*?<\/script>/gi, " ").replace(/<style\b[\s\S]*?<\/style>/gi, " ");
+  const hasRateLimitCode = /(?:^|\D)300013(?:\D|$)/.test(source);
+  const hasSecurityCode = /(?:^|\D)300011(?:\D|$)/.test(source);
+  const hasRateLimitWall = /too\s+many\s+requests/i.test(source) && /try\s+again\s+later|please\s+try\s+again|稍后重试|稍后再试|请求(?:过于|太)频繁/i.test(source);
+  const hasChineseRateLimitWall = /(?:请求|访问)(?:过于|太)频繁/.test(source) && /稍后重试|稍后再试|请稍后/.test(source);
+  const hasRestrictionWall = /安全限制/.test(source) && /账号异常|请稍后重试|返回首页|我要反馈|Too\s+many\s+requests/i.test(source);
+  if (!hasRateLimitCode && !hasSecurityCode && !hasRateLimitWall && !hasChineseRateLimitWall && !hasRestrictionWall) return null;
+  const rateLimited = hasRateLimitCode || hasRateLimitWall || hasChineseRateLimitWall;
   return {
-    code: hasCode ? "300011" : "",
-    kind: "security_restriction"
+    code: hasRateLimitCode ? "300013" : hasSecurityCode ? "300011" : "",
+    kind: rateLimited ? "rate_limited" : "security_restriction"
   };
 }
 __name(detectXiaohongshuSecurityRestriction, "detectXiaohongshuSecurityRestriction");
-function recordXiaohongshuSecurityRestriction(options = {}, text = "", stage = "") {
+function markXiaohongshuRestriction(restriction = {}) {
+  if (!restriction || typeof restriction !== "object") return null;
+  if (!xiaohongshuRunRestriction) {
+    xiaohongshuRunRestriction = {
+      code: String(restriction.code || ""),
+      kind: String(restriction.kind || "security_restriction")
+    };
+  }
+  return xiaohongshuRunRestriction;
+}
+__name(markXiaohongshuRestriction, "markXiaohongshuRestriction");
+function getActiveXiaohongshuRestriction() {
+  return xiaohongshuRunRestriction;
+}
+__name(getActiveXiaohongshuRestriction, "getActiveXiaohongshuRestriction");
+function clearXiaohongshuRestriction() {
+  xiaohongshuRunRestriction = null;
+}
+__name(clearXiaohongshuRestriction, "clearXiaohongshuRestriction");
+function isXiaohongshuRateLimitError(error) {
+  return Boolean(error && error.code === "XIAOHONGSHU_RATE_LIMITED");
+}
+__name(isXiaohongshuRateLimitError, "isXiaohongshuRateLimitError");
+function createXiaohongshuRateLimitError(restriction = {}) {
+  const code = String(restriction && restriction.code || "").trim();
+  const error = new Error(
+    `小红书拒绝了当前请求${code ? `（${code}）` : ""}：平台提示请求过于频繁或需要安全验证。本次同步已停止继续访问小红书，未完成的记录会保留，下次同步时再试。`
+  );
+  error.code = "XIAOHONGSHU_RATE_LIMITED";
+  error.retryable = true;
+  error.restriction = {
+    code,
+    kind: String(restriction && restriction.kind || "rate_limited")
+  };
+  return error;
+}
+__name(createXiaohongshuRateLimitError, "createXiaohongshuRateLimitError");
+function createXiaohongshuProRequiredError() {
+  const error = new Error("小红书视频解析需要 Pro 权益，当前未开通或已到期。续期后重新同步即可。");
+  error.code = "XIAOHONGSHU_PRO_REQUIRED";
+  error.retryable = true;
+  return error;
+}
+__name(createXiaohongshuProRequiredError, "createXiaohongshuProRequiredError");
+function throwIfXiaohongshuRestricted(options = {}, stage = "") {
+  const restriction = getActiveXiaohongshuRestriction();
+  if (!restriction) return null;
+  appendXiaohongshuBrowserDiagnostic(options, {
+    type: "security_restriction",
+    stage,
+    outcome: "blocked",
+    code: restriction.code
+  });
+  throw createXiaohongshuRateLimitError(restriction);
+}
+__name(throwIfXiaohongshuRestricted, "throwIfXiaohongshuRestricted");
+function recordXiaohongshuSecurityRestriction(options = {}, text = "", stage = "", { markBatch = true } = {}) {
   const restriction = detectXiaohongshuSecurityRestriction(text);
   if (!restriction) return null;
   appendXiaohongshuBrowserDiagnostic(options, {
@@ -25293,6 +27183,7 @@ function recordXiaohongshuSecurityRestriction(options = {}, text = "", stage = "
     outcome: "detected",
     code: restriction.code
   });
+  if (markBatch) markXiaohongshuRestriction(restriction);
   return restriction;
 }
 __name(recordXiaohongshuSecurityRestriction, "recordXiaohongshuSecurityRestriction");
@@ -25381,8 +27272,30 @@ function installHiddenBrowserWindowGuards(browserWindow, options = {}) {
     browserWindow.on("ready-to-show", handleReadyToShow);
     browserWindow.on("show", handleShow);
   }
+  const lockedVisibilityMethods = ["show", "showInactive", "focus", "moveTop"];
+  const restoredMethods = [];
+  const lockedOptions = options && options.blockWindowVisibility !== false;
+  if (lockedOptions) {
+    for (const methodName of lockedVisibilityMethods) {
+      if (typeof browserWindow[methodName] !== "function") continue;
+      restoredMethods.push({ methodName, original: browserWindow[methodName] });
+      try {
+        browserWindow[methodName] = (...args) => {
+          hideWindow(`blocked_${methodName}`);
+          return void 0;
+        };
+      } catch (error) {
+      }
+    }
+  }
   return () => {
     cleanupChildWindows();
+    restoredMethods.splice(0).forEach(({ methodName, original }) => {
+      try {
+        browserWindow[methodName] = original;
+      } catch (error) {
+      }
+    });
     if (typeof browserWindow.removeListener === "function") {
       browserWindow.removeListener("ready-to-show", handleReadyToShow);
       browserWindow.removeListener("show", handleShow);
@@ -25412,28 +27325,6 @@ function shouldBlockXiaohongshuBrowserNavigationRequest(details = {}) {
   return isNavigation && !isAllowedXiaohongshuBrowserNavigationUrl(details && details.url);
 }
 __name(shouldBlockXiaohongshuBrowserNavigationRequest, "shouldBlockXiaohongshuBrowserNavigationRequest");
-function installPlatformArticleNavigationGuards(webContents, platform, initialUrl) {
-  if (!webContents || typeof webContents.removeAllListeners !== "function" || typeof webContents.on !== "function" || typeof webContents.setWindowOpenHandler !== "function") {
-    throw new Error("无法隔离平台文章提取窗口的跳转处理");
-  }
-  if (!isAllowedPlatformArticleNavigation(initialUrl, platform)) {
-    throw new Error("平台文章提取仅允许官方 HTTPS 页面");
-  }
-  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
-    webContents.removeAllListeners(eventName);
-  }
-  const restrictNavigation = /* @__PURE__ */ __name((event, navigation) => {
-    const value = typeof navigation === "string" ? navigation : navigation && navigation.url || event && event.url;
-    if (!isAllowedPlatformArticleNavigation(value, platform) && event && typeof event.preventDefault === "function") {
-      event.preventDefault();
-    }
-  }, "restrictNavigation");
-  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
-    webContents.on(eventName, restrictNavigation);
-  }
-  webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-}
-__name(installPlatformArticleNavigationGuards, "installPlatformArticleNavigationGuards");
 function installXiaohongshuNavigationGuards(webContents, options = {}) {
   if (!webContents) return;
   const preventUntrustedNavigation = /* @__PURE__ */ __name((event, navigationUrl) => {
@@ -25448,6 +27339,11 @@ function installXiaohongshuNavigationGuards(webContents, options = {}) {
       });
     }
   }, "preventUntrustedNavigation");
+  if (typeof webContents.removeAllListeners === "function") {
+    for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+      webContents.removeAllListeners(eventName);
+    }
+  }
   if (typeof webContents.on === "function") {
     webContents.on("will-navigate", preventUntrustedNavigation);
     webContents.on("will-frame-navigate", preventUntrustedNavigation);
@@ -29937,6 +31833,18 @@ function htmlToMarkdown(html) {
   return readable;
 }
 __name(htmlToMarkdown, "htmlToMarkdown");
+async function readTranscriptSegmentsSidecar(outputPath) {
+  const output = String(outputPath || "").trim();
+  if (!output) return [];
+  const sidecarPath = output.replace(/\.txt$/i, "") + ".segments.json";
+  try {
+    const text = await fs.promises.readFile(sidecarPath, "utf8");
+    return parseTranscriptSegmentsSidecar(text);
+  } catch (error) {
+    return [];
+  }
+}
+__name(readTranscriptSegmentsSidecar, "readTranscriptSegmentsSidecar");
 function getElectronBrowserWindow() {
   try {
     const electron = require("electron");
@@ -30070,6 +31978,32 @@ function isRecoverableDouyinMediaDownloadError(error) {
   return isMediaAuthorizationError(error) || isMediaDownloadTimeoutError(error);
 }
 __name(isRecoverableDouyinMediaDownloadError, "isRecoverableDouyinMediaDownloadError");
+function isMediaDownloadInterruptedError(error) {
+  return /\bMEDIA_DOWNLOAD_INTERRUPTED\b/.test(
+    `${error && error.code || ""} ${error && error.message || String(error || "")}`
+  );
+}
+__name(isMediaDownloadInterruptedError, "isMediaDownloadInterruptedError");
+function isRecoverableXiaohongshuMediaDownloadError(error) {
+  return isRecoverableDouyinMediaDownloadError(error) || isMediaDownloadInterruptedError(error) || /\bECONNRESET\b|\bEPIPE\b|\bETIMEDOUT\b|\bsocket hang up\b/i.test(
+    `${error && error.code || ""} ${error && error.message || ""}`
+  );
+}
+__name(isRecoverableXiaohongshuMediaDownloadError, "isRecoverableXiaohongshuMediaDownloadError");
+function isXiaohongshuMediaFailure(error) {
+  const code = String(error && error.code || "").toUpperCase();
+  return isRecoverableXiaohongshuMediaDownloadError(error) || /^MEDIA_/.test(code) || code === "LOCAL_ASR_INPUT_UNAVAILABLE" || code === "XIAOHONGSHU_CONTENT_UNAVAILABLE" || Boolean(error && error.mediaStage);
+}
+__name(isXiaohongshuMediaFailure, "isXiaohongshuMediaFailure");
+function createXiaohongshuMediaUnavailableError(cause = null) {
+  const error = new Error("小红书音视频内容未能完整下载，已保留记录，请在小程序“同步记录”中点击“重试”。");
+  error.retryable = true;
+  error.code = "XIAOHONGSHU_CONTENT_UNAVAILABLE";
+  error.mediaStage = "download";
+  if (cause) error.cause = cause;
+  return error;
+}
+__name(createXiaohongshuMediaUnavailableError, "createXiaohongshuMediaUnavailableError");
 function mergeDouyinDetailCandidates(current, incoming) {
   const previous = current && typeof current === "object" ? current : null;
   const next = incoming && typeof incoming === "object" ? incoming : null;
@@ -30373,7 +32307,7 @@ async function probeXiaohongshuLoginStatus(targetUrl = "", options = {}) {
     if (options.xiaohongshuBrowserDiagnostic) {
       options.xiaohongshuBrowserDiagnostic.loginEvidence = state && state.hasAccountApiSignal ? "account_signal" : state && state.hasUserSignal ? "page_signal" : "none";
     }
-    recordXiaohongshuSecurityRestriction(options, state && state.text, "login_check");
+    recordXiaohongshuSecurityRestriction(options, state && state.text, "login_check", { markBatch: false });
     appendXiaohongshuBrowserDiagnostic(options, { type: "stage", stage: "account_probe", outcome: state && state.accountResult || "unknown", status: state && state.accountStatus || 0 });
     if (state && (state.hasLoginWall || state.accountRejected)) return false;
     const hasCookieAfterProbe = await checkXiaohongshuLoginStatus();
@@ -31032,8 +32966,10 @@ async function renderUrlToMarkdownWithElectron(url) {
       sandbox: true
     }
   });
+  const cleanupHiddenWindowGuards = installHiddenBrowserWindowGuards(win);
   if (isXiaohongshuUrl(url)) {
     trackXiaohongshuBrowserWindow(win);
+    installXiaohongshuNavigationGuards(win.webContents);
   }
   try {
     const loaded = waitForWebContents(win.webContents);
@@ -31264,6 +33200,7 @@ async function renderUrlToMarkdownWithElectron(url) {
     }
     return result;
   } finally {
+    cleanupHiddenWindowGuards();
     if (win && typeof win.destroy === "function") {
       win.destroy();
     }
@@ -31714,6 +33651,9 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       __xiaohongshuSessionLockHeld: true
     }), options.signal);
   }
+  if (isXiaohongshuUrl(url)) {
+    throwIfXiaohongshuRestricted(options, "media_extraction");
+  }
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error("Current Obsidian environment does not support hidden browser rendering");
@@ -32153,7 +34093,10 @@ async function renderSocialMediaUrlsWithElectron(url, options = {}) {
       return sortMediaUrlsForTranscription(debuggerMediaUrls);
     }
     if (isXiaohongshuExtractionWindow) {
-      recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
+      const mediaRestriction = recordXiaohongshuSecurityRestriction(options, payload && payload.bodyText, "media_extraction");
+      if (mediaRestriction) {
+        throw createXiaohongshuRateLimitError(mediaRestriction);
+      }
       appendXiaohongshuBrowserDiagnostic(options, {
         type: "stage",
         stage: "media_extraction",
@@ -32359,7 +34302,10 @@ async function renderXiaohongshuContentWithElectron(url, options = {}) {
       );
     }
     throwIfAborted(options.signal);
-    recordXiaohongshuSecurityRestriction(options, payload && payload.html, "content_extraction");
+    const contentRestriction = recordXiaohongshuSecurityRestriction(options, payload && payload.html, "content_extraction");
+    if (contentRestriction) {
+      throw createXiaohongshuRateLimitError(contentRestriction);
+    }
     appendXiaohongshuBrowserDiagnostic(options, {
       type: "stage",
       stage: "content_extraction",
@@ -32446,6 +34392,7 @@ __name(runWithXiaohongshuBrowserSessionLock, "runWithXiaohongshuBrowserSessionLo
 async function renderXiaohongshuPageWithElectron(url, options = {}) {
   return await runWithXiaohongshuBrowserSessionLock(async () => {
     throwIfAborted(options.signal);
+    throwIfXiaohongshuRestricted(options, options.includeComments === false ? "content_extraction" : "comment_extraction");
     if (options.includeComments === false) {
       return await renderXiaohongshuContentWithElectron(url, options);
     }
@@ -33357,6 +35304,17 @@ async function renderXiaohongshuPageWithElectron(url, options = {}) {
         failureStage: (!comments.length && browserCommentFailure ? browserCommentFailure.failureStage : capturedDiagnostic.failureStage) || "",
         stopReason: explicitBudgetStopReason || (hasBrowserNetworkPayload ? browserStopReason : capturedDiagnostic.stopReason || pagedRootResult.stopReason)
       };
+      const commentErrorDigits = String(commentDiagnosticDetails.errorCode || "").replace(/^BUSINESS_/i, "");
+      if (/^-?300013$/.test(commentErrorDigits)) {
+        appendXiaohongshuBrowserDiagnostic(options, {
+          type: "security_restriction",
+          stage: "comment_extraction",
+          outcome: "detected",
+          code: "300013"
+        });
+        markXiaohongshuRestriction({ code: "300013", kind: "rate_limited" });
+        commentDiagnosticDetails.errorCode = "RATE_LIMITED";
+      }
       commentDiagnosticDetails.partial = isPartialXiaohongshuCommentResult(commentDiagnosticDetails);
       const commentDiagnostic = buildXiaohongshuCommentDiagnostic(commentDiagnosticDetails);
       throwIfAborted(options.signal);
@@ -34925,6 +36883,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (this.syncDiagnosticReporter) this.syncDiagnosticReporter.dispose();
     });
     this.startFeishuImageDisplay();
+    this.startTranscriptMediaPlayer();
     if (this.getConfiguredLocalAsrPlatform() === "win32") {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -35089,6 +37048,20 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       callback: /* @__PURE__ */ __name(() => this.feishuImageDisplay.retry(), "callback")
     });
   }
+  startTranscriptMediaPlayer() {
+    if (typeof this.registerMarkdownPostProcessor !== "function") return;
+    const vault = this.app && this.app.vault;
+    if (!vault) return;
+    this.transcriptMediaPlayer = createTranscriptMediaPlayer({
+      vault,
+      getSettings: /* @__PURE__ */ __name(() => this.settings || {}, "getSettings"),
+      notify: /* @__PURE__ */ __name((message) => new Notice(message, 6e3), "notify")
+    });
+    this.registerMarkdownPostProcessor((el, context) => {
+      if (!this.settings) return;
+      this.transcriptMediaPlayer(el, context && context.sourcePath);
+    });
+  }
   async loadFeishuDisplayImage({ url, token, signal }) {
     const resource = parseFeishuImageUrl(url);
     if (!resource || resource.token !== token) throw new Error("invalid_image");
@@ -35202,6 +37175,10 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   }
   async checkXiaohongshuLogin(options = {}) {
     try {
+      if (options.skipBrowserProbe === true) {
+        throwIfAborted(options.signal);
+        return await checkXiaohongshuLoginStatus();
+      }
       return await probeXiaohongshuLoginStatus("", options);
     } catch (error) {
       if (isAbortError(error)) throw error;
@@ -36405,10 +38382,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     let sourceUrl = "";
     let fileID = "";
-    if (sourceType === "douyin_url") {
+    if (isCloudFallbackUrlSourceType(sourceType)) {
       sourceUrl = String(options.sourceUrl || options.url || "").trim();
-      if (!/^https?:\/\//i.test(sourceUrl) || !isDouyinUrl(sourceUrl)) {
-        const error = new Error("云端兜底只接受有效的抖音原始链接");
+      const isAcceptedLink = /^https?:\/\//i.test(sourceUrl) && (sourceType === "douyin_url" ? isDouyinUrl(sourceUrl) : isXiaohongshuUrl(sourceUrl));
+      if (!isAcceptedLink) {
+        const error = new Error(sourceType === "douyin_url" ? "云端兜底只接受有效的抖音原始链接" : "云端兜底只接受有效的小红书原始链接");
         error.code = "CLOUD_FALLBACK_SOURCE_INVALID";
         throw error;
       }
@@ -36450,7 +38428,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       provider: String(options.provider || "").trim()
     };
     if (Number(options.durationSeconds) > 0) requestBody.durationSeconds = Number(options.durationSeconds);
-    if (sourceType === "douyin_url") {
+    if (isCloudFallbackUrlSourceType(sourceType)) {
       requestBody.sourceUrl = sourceUrl;
     } else {
       requestBody.fileID = fileID;
@@ -36666,6 +38644,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
       if (metadata.cloudFallbackJobId && metadata.cloudFallbackJobId !== job.jobId) return record;
       const recordRetryCount = getCloudFallbackJobRecordRetryCount(job) === null ? getCloudFallbackRecordRetryCount(record) : getCloudFallbackJobRecordRetryCount(job);
+      const isContentJob = Boolean(job.content);
       const nextMetadata = {
         ...metadata,
         cloudFallbackJobId: job.jobId,
@@ -36678,11 +38657,30 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         cloudFallbackSyncAttemptId: job.syncAttemptId || metadata.cloudFallbackSyncAttemptId || "",
         cloudFallbackSyncLeaseUntil: job.syncLeaseUntil || metadata.cloudFallbackSyncLeaseUntil || "",
         cloudFallbackUpdatedAt: job.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-        transcriptionSource: "cloud-fallback",
-        webpageMediaType: "audio_video",
-        transcriptOnly: true
+        ...isContentJob ? {
+          cloudFallbackResultKind: "content",
+          contentCategory: "图文",
+          webpageMediaType: "",
+          videoUrl: "",
+          transcriptOnly: false
+        } : {
+          transcriptionSource: "cloud-fallback",
+          webpageMediaType: "audio_video",
+          transcriptOnly: true
+        }
       };
-      if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+      if (job.status === "succeeded" && job.content) {
+        nextMetadata.markdown = String(job.content.markdown || "").trim() || metadata.markdown || "";
+        nextMetadata.imageUrls = job.content.imageUrls.length ? job.content.imageUrls : Array.isArray(metadata.imageUrls) ? metadata.imageUrls : [];
+        nextMetadata.title = metadata.title || job.content.title || "小红书笔记";
+        nextMetadata.author = metadata.author || job.content.author || "";
+        if (Array.isArray(job.content.tags) && job.content.tags.length) {
+          nextMetadata.extractedKeywords = job.content.tags;
+        }
+        nextMetadata.conversionStatus = "success";
+        nextMetadata.conversionError = "";
+        nextMetadata.transcriptionError = "";
+      } else if (job.status === "succeeded" && String(job.transcription || "").trim()) {
         nextMetadata.transcription = job.transcription;
         nextMetadata.transcriptionStatus = "success";
         nextMetadata.conversionStatus = "success";
@@ -36709,7 +38707,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     });
     const existingRecordIds = new Set(nextRecords.map((record) => getRecordId(record)).filter(Boolean));
     refreshedJobs.forEach((job) => {
-      if (job.status !== "succeeded" || !String(job.transcription || "").trim()) return;
+      if (job.status !== "succeeded" || !String(job.transcription || "").trim() && !job.content) return;
       if (!job.recordId || existingRecordIds.has(job.recordId) || !job.recordSnapshot) return;
       const syntheticRecord = applyJobToRecord({ ...job.recordSnapshot }, job);
       nextRecords.push(syntheticRecord);
@@ -38228,6 +40226,111 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     return { allowed: true, binding: activeBinding };
   }
+  /**
+   * Turns a finished content job into the record shape the normal graphic-note
+   * write path already understands. The image URLs are left as cloud links so
+   * the user's "save original images / keep links" setting still decides what
+   * lands in the vault.
+   */
+  buildCloudFallbackContentRecord(record, job, { url = "" } = {}) {
+    const content = job && job.content;
+    if (!content) return record;
+    const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
+    const cloudImages = Array.isArray(content.imageUrls) ? content.imageUrls : [];
+    const localImages = Array.isArray(metadata.imageUrls) ? metadata.imageUrls : [];
+    return {
+      ...record,
+      metadata: {
+        ...metadata,
+        ...url ? { url } : {},
+        title: metadata.title || content.title || "小红书笔记",
+        author: metadata.author || content.author || "",
+        markdown: String(content.markdown || "").trim() || metadata.markdown || "",
+        imageUrls: cloudImages.length ? cloudImages : localImages,
+        ...Array.isArray(content.tags) && content.tags.length ? { extractedKeywords: content.tags } : {},
+        platform: metadata.platform || "小红书",
+        contentCategory: "图文",
+        // Every Xiaohongshu share arrives tagged as audio_video. A note that
+        // turned out to be graphic must be untagged here, or the next sync
+        // pass sees "video without a transcript" and extracts it all over again.
+        webpageMediaType: "",
+        videoUrl: "",
+        transcriptOnly: false,
+        conversionStatus: "success",
+        conversionError: "",
+        transcriptionError: "",
+        cloudFallbackJobId: job.jobId,
+        cloudFallbackStatus: job.status,
+        cloudFallbackUpdatedAt: job.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        cloudFallbackResultKind: "content"
+      }
+    };
+  }
+  /**
+   * Submits one Xiaohongshu record to the cloud capture queue.
+   *
+   * The chain is the Douyin chain: binding -> active Pro -> local component
+   * installed -> local capture already failed. The Douyin login and resolver
+   * checks are deliberately absent, because a Xiaohongshu failure is never a
+   * Douyin setup gap.
+   *
+   * `linkDiagnostic` carries the evidence from the failed local attempt. A link
+   * that expired, was deleted, or went private is answered by asking for a
+   * fresh share link; the paid worker is never asked to chase it. Any other
+   * failure (risk control, login wall, missing media, parse failure) is exactly
+   * what the cloud nodes exist for.
+   *
+   * Returns { record } when the cloud answer is already usable, { gateMessage }
+   * when the chain itself blocked submission, or null when nothing was
+   * attempted. A queued job throws CLOUD_FALLBACK_QUEUED so the record is kept
+   * pending instead of being reported as a local extraction defect.
+   */
+  async maybeSubmitXiaohongshuCloudFallback(record, {
+    url = "",
+    binding = null,
+    signal = null,
+    title = "",
+    localError = "",
+    linkDiagnostic = null
+  } = {}) {
+    if (this.settings.cloudFallbackEnabled !== true) return null;
+    if (!binding || !binding.token) return null;
+    if (!isXiaohongshuUrl(url)) return null;
+    const diagnostic = linkDiagnostic && typeof linkDiagnostic === "object" ? linkDiagnostic : null;
+    const responseStatus = Number(diagnostic && diagnostic.request && diagnostic.request.responseStatus) || 0;
+    if (isExpiredXiaohongshuLinkDiagnostic(diagnostic || {}) || responseStatus === 404 || responseStatus === 410) {
+      return null;
+    }
+    const gate = await this.evaluateCloudFallbackUserGate({
+      binding,
+      featureName: "小红书云端兜底"
+    });
+    if (!gate.allowed) return { gateMessage: gate.message };
+    try {
+      const job = await this.submitCloudFallbackJob({
+        sourceType: "xiaohongshu_url",
+        sourceUrl: url,
+        recordId: getRecordId(record),
+        retryCount: record && record.retryCount,
+        title: title || record && record.metadata && record.metadata.title || "小红书笔记",
+        localError,
+        provider: this.settings.aiProvider || "",
+        binding,
+        signal
+      });
+      if (job.status === "succeeded" && job.content) {
+        return { record: this.buildCloudFallbackContentRecord(record, job, { url }) };
+      }
+      throw createCloudFallbackPendingError(
+        job,
+        localError,
+        "云端兜底任务已提交，正在由云端电脑抓取小红书内容"
+      );
+    } catch (error) {
+      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
+      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+    }
+  }
   openTranscriptionSetupSettings() {
     var _a;
     const settings = this.app && this.app.setting;
@@ -38732,14 +40835,14 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const reason = formatLocalComponentInstallFailureReason(error);
     const message = [
       `失败原因：${reason}`,
-      "如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。"
+      "如需协助，请点击插件设置里的「复制完整诊断」，联系开发者张张（微信：heyhmjx）。"
     ].join("\n");
     const modalResult = showLocalComponentInstallFailure(this.app, message);
     if (modalResult) {
       await modalResult;
       return;
     }
-    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制诊断信息」，联系开发者张张（微信：heyhmjx）。`, 12e3);
+    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制完整诊断」，联系开发者张张（微信：heyhmjx）。`, 12e3);
   }
   async doInstallLocalTranscriptionComponents(options = {}) {
     if (!options.requireAsr && !options.requireOcr && !options.requireResolver && !options.allComponents) {
@@ -39079,15 +41182,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (!isTrustedXiaohongshuTransportUrl(sourceUrl)) {
       throw new Error("小红书静态抓取地址不是可信的官方 HTTPS 地址");
     }
+    throwIfXiaohongshuRestricted(options, "static_content");
     appendXiaohongshuBrowserDiagnostic(options, { type: "stage", stage: "static_content", outcome: "started" });
     let response;
     try {
       response = await requestPublicWebpageText(sourceUrl, {
         // Static public-note extraction never needs login cookies. Logged-in
         // comments stay inside the isolated BrowserWindow / strict API path.
-        // This is a document navigation. A wildcard Accept can negotiate a login
-        // landing page even when the exact public note is available as HTML.
-        headers: { ...getSocialRequestHeaders(sourceUrl), Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+        // The note document is only served to the mobile surface: a desktop
+        // Chrome UA without a Xiaohongshu cookie is 302'd to /login, and the
+        // login page carries no note content.
+        headers: getXiaohongshuDocumentRequestHeaders(sourceUrl),
         allowedRedirectUrl: /* @__PURE__ */ __name((redirectUrl) => isTrustedXiaohongshuTransportUrl(redirectUrl), "allowedRedirectUrl")
       });
     } catch (error) {
@@ -39097,8 +41202,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     if (!response || !isTrustedXiaohongshuCookieUrl(response.url)) {
       throw new Error("小红书正文抓取的最终地址无法确认为官方 HTTPS 内容页");
     }
+    const staticRestriction = recordXiaohongshuSecurityRestriction(options, response.text, "static_content");
+    if (staticRestriction) {
+      throw createXiaohongshuRateLimitError(staticRestriction);
+    }
     const extracted = extractXiaohongshuMarkdownFromHtml(response.text, response.url, "", { includeComments: false });
-    const loginLanding = /^\/login(?:\/|$)/i.test(new URL(response.url).pathname);
+    const loginLanding = isXiaohongshuLoginLanding(response.text, response.url, extracted);
     appendXiaohongshuBrowserDiagnostic(options, {
       type: "stage",
       stage: "static_content",
@@ -39106,6 +41215,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       status: response.status,
       mediaCandidateCount: extracted.xiaohongshuPrimaryNoteMatched && extracted.videoUrl ? 1 : 0
     });
+    if (loginLanding && extracted.xiaohongshuPrimaryNoteMatched !== true) {
+      const error = new Error("小红书静态请求被重定向到登录页，未取到笔记正文");
+      error.code = "XIAOHONGSHU_LOGIN_LANDING";
+      error.retryable = true;
+      error.finalUrlIsLoginLanding = true;
+      throw error;
+    }
     return response;
   }
   getLocalDouyinResolverRoot() {
@@ -39304,7 +41420,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     return fetchDouyinMediaResolutionWithSession({ pageUrl, awemeId });
   }
   async downloadMediaArrayBufferWithSession(url, headers = {}, options = {}) {
-    const session = isDouyinUrl(url) || isDouyinMediaUrl(url) ? getDouyinSession() : getWechatSession();
+    const session = isDouyinUrl(url) || isDouyinMediaUrl(url) ? getDouyinSession() : isXiaohongshuUrl(url) || isXiaohongshuMediaUrl(url) ? getXiaohongshuSession() : getWechatSession();
     return downloadArrayBufferViaElectronSession(url, headers, options, session);
   }
   async renderWebpageWithElectron(url) {
@@ -39697,6 +41813,119 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     error.cause = lastError || null;
     throw error;
   }
+  /**
+   * Operator-node capture for a Xiaohongshu job.
+   *
+   * A graphic note has no audio, so its result is the extracted article itself;
+   * a video note returns a downloaded file and continues through the existing
+   * media -> ASR path. Nothing here depends on the user's Xiaohongshu login:
+   * that requirement exists only on the user's own machine, where a login wall
+   * is a local setup gap.
+   */
+  async acquireOperatorXiaohongshuContent(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || "").trim();
+    if (!isTrustedXiaohongshuTransportUrl(pageUrl)) {
+      const error = new Error("运营节点只接受官方小红书 HTTPS 分享链接");
+      error.code = "OPERATOR_XIAOHONGSHU_SOURCE_INVALID";
+      throw error;
+    }
+    throwIfAborted(signal);
+    let html = "";
+    let finalUrl = pageUrl;
+    try {
+      const response = await requestPublicWebpageText(pageUrl, {
+        headers: getXiaohongshuDocumentRequestHeaders(pageUrl),
+        allowedRedirectUrl: /* @__PURE__ */ __name((redirectUrl) => isTrustedXiaohongshuTransportUrl(redirectUrl), "allowedRedirectUrl")
+      });
+      html = String(response && response.text || "");
+      finalUrl = String(response && response.url || pageUrl).trim();
+    } catch (error) {
+      if (isAbortError(error) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+      html = "";
+    }
+    if (!isTrustedXiaohongshuCookieUrl(finalUrl)) {
+      const error = new Error("小红书抓取的最终地址无法确认为官方 HTTPS 内容页");
+      error.code = "OPERATOR_XIAOHONGSHU_SOURCE_INVALID";
+      throw error;
+    }
+    if (html && isUnavailableXiaohongshuPage(html, finalUrl)) {
+      const error = new Error("小红书链接已失效或笔记不可见，请重新复制最新分享链接");
+      error.code = "XIAOHONGSHU_LINK_UNAVAILABLE";
+      error.linkExpired = true;
+      throw error;
+    }
+    let extracted = html ? extractXiaohongshuMarkdownFromHtml(html, finalUrl, "", { includeComments: false }) : null;
+    if ((!extracted || extracted.xiaohongshuPrimaryNoteMatched !== true) && typeof this.renderXiaohongshuPage === "function") {
+      throwIfAborted(signal);
+      try {
+        const page = await this.renderXiaohongshuPage(finalUrl, {
+          includeComments: false,
+          expectedUrl: resolveXiaohongshuIdentityUrl([finalUrl, pageUrl]),
+          signal
+        });
+        const renderedHtml = String(page && page.html || "");
+        const renderedUrl = String(page && page.url || "").trim();
+        if (renderedHtml && isTrustedXiaohongshuCookieUrl(renderedUrl)) {
+          if (isUnavailableXiaohongshuPage(renderedHtml, renderedUrl)) {
+            const error = new Error("小红书链接已失效或笔记不可见，请重新复制最新分享链接");
+            error.code = "XIAOHONGSHU_LINK_UNAVAILABLE";
+            error.linkExpired = true;
+            throw error;
+          }
+          html = renderedHtml;
+          finalUrl = renderedUrl;
+          extracted = extractXiaohongshuMarkdownFromHtml(renderedHtml, renderedUrl, "", { includeComments: false });
+        }
+      } catch (error) {
+        if (isAbortError(error) || (signal == null ? void 0 : signal.aborted) || error.linkExpired === true) throw error;
+      }
+    }
+    if (html && detectXiaohongshuSecurityRestriction(html)) {
+      const error = new Error("小红书拒绝了运营节点的访问（平台限流或安全验证）");
+      error.code = "XIAOHONGSHU_RATE_LIMITED";
+      error.retryable = true;
+      throw error;
+    }
+    if (!extracted || extracted.xiaohongshuPrimaryNoteMatched !== true || isXiaohongshuLoginLanding(html, finalUrl, extracted)) {
+      const error = new Error("小红书返回的页面不是笔记正文，可能需要登录环境");
+      error.code = "OPERATOR_XIAOHONGSHU_CONTENT_MISSING";
+      error.retryable = true;
+      throw error;
+    }
+    const videoUrl = String(extracted.videoUrl || "").trim();
+    if (videoUrl) {
+      if (!isXiaohongshuMediaUrl(videoUrl)) {
+        const error = new Error("小红书视频地址不是官方 CDN 地址");
+        error.code = "OPERATOR_XIAOHONGSHU_SOURCE_INVALID";
+        throw error;
+      }
+      throwIfAborted(signal);
+      const tempPath = await this.downloadMediaToTempFile(videoUrl, {
+        sourceUrl: pageUrl,
+        signal,
+        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES
+      });
+      return { kind: "video", tempPath, title: extracted.title || "" };
+    }
+    const markdown = String(extracted.markdown || "").trim();
+    const imageUrls = (Array.isArray(extracted.imageUrls) ? extracted.imageUrls : []).map((item) => String(item || "").trim()).filter((item) => isXiaohongshuMediaUrl(item)).slice(0, 60);
+    if (!markdown && !imageUrls.length) {
+      const error = new Error("运营节点未提取到小红书图文内容");
+      error.code = "OPERATOR_XIAOHONGSHU_CONTENT_MISSING";
+      error.retryable = true;
+      throw error;
+    }
+    return {
+      kind: "content",
+      content: {
+        title: String(extracted.title || "").trim(),
+        author: String(extracted.author || "").trim(),
+        markdown,
+        imageUrls,
+        tags: (Array.isArray(extracted.tags) ? extracted.tags : []).map((item) => String(item || "").trim()).filter(Boolean).slice(0, 40)
+      }
+    };
+  }
   async verifyOperatorControlledMediaFile(filePath, job, { signal = null } = {}) {
     const expectedSize = Number(job && (job.mediaSize ?? job.artifactSize));
     const expectedSha256 = String(job && (job.mediaSha256 || job.artifactSha256) || "").trim().toLowerCase();
@@ -39886,11 +42115,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcription: normalizedResult.transcription,
           source: sourcePrefix ? sourcePrefix + "-local" : "local",
           ...normalizedResult.qualityStatus ? { transcriptionQualityStatus: normalizedResult.qualityStatus } : {},
-          ...normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {}
+          ...normalizedResult.qualityWarning ? { transcriptionQualityWarning: normalizedResult.qualityWarning } : {},
+          ...Array.isArray(normalizedResult.transcriptionSegments) && normalizedResult.transcriptionSegments.length ? { transcriptionSegments: normalizedResult.transcriptionSegments } : {}
         };
       } catch (error) {
         if (isAbortError(error) && !isRetryableTranscriptionError(error) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
         if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH" || isRetryableTranscriptionError(error)) throw error;
+        if (isXiaohongshuUrl(String(options.sourceUrl || "")) || isXiaohongshuMediaUrl(audioUrl)) {
+          if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
+          throw error;
+        }
         if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true) {
           let uploadedArtifactReady = false;
           try {
@@ -39984,8 +42218,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
         const pageSourceUrl = String(options.sourceUrl || "").trim();
         const legacyFileId = String(options.fileID || options.audioFileID || "").trim();
-        const legacyUrlFallbackAllowed = Boolean(legacyFileId) || options.allowCloudUrlFallback === true;
-        if (legacyUrlFallbackAllowed && !isDouyinUrl(pageSourceUrl || audioUrl)) {
+        const isDouyinTranscriptionSource = isDouyinUrl(pageSourceUrl) || isDouyinUrl(audioUrl);
+        const legacyUrlFallbackAllowed = Boolean(legacyFileId) || options.allowCloudUrlFallback === true && isDouyinTranscriptionSource;
+        if (legacyUrlFallbackAllowed) {
           return await this.runCloudFallbackTranscription(audioUrl, {
             ...options,
             localError: error && error.message ? error.message : String(error || ""),
@@ -40035,9 +42270,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     if (this.settings.aiProvider === "doubao") {
       try {
+        const doubaoResult = await this.runDoubaoTranscription(audioUrl, { withSegments: true });
         return {
-          transcription: await this.runDoubaoTranscription(audioUrl),
-          source: "doubao"
+          transcription: doubaoResult.transcription,
+          source: "doubao",
+          ...Array.isArray(doubaoResult.transcriptionSegments) && doubaoResult.transcriptionSegments.length ? { transcriptionSegments: doubaoResult.transcriptionSegments } : {}
         };
       } catch (error) {
         if (isRemoteAsrDownloadFailure(error) && this.canRunLocalTranscription()) {
@@ -40061,17 +42298,26 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     if (this.settings.aiProvider === "local") {
       if (this.settings.cloudFallbackEnabled === true || options.preserveLocalMediaForCloudFallback === true) {
-        return await runLocalWithCloudFallback({ sourcePrefix: "", includeQualityDetails: false });
+        return await runLocalWithCloudFallback({ sourcePrefix: "", includeQualityDetails: true });
       }
       try {
+        const localResult = await this.runLocalTranscription(audioUrl, { ...options, includeQualityDetails: true });
+        const normalizedLocal = localResult && typeof localResult === "object" ? localResult : { transcription: localResult };
         return {
-          transcription: await this.runLocalTranscription(audioUrl, options),
-          source: "local"
+          transcription: normalizedLocal.transcription,
+          source: "local",
+          ...Array.isArray(normalizedLocal.transcriptionSegments) && normalizedLocal.transcriptionSegments.length ? { transcriptionSegments: normalizedLocal.transcriptionSegments } : {}
         };
       } catch (error) {
         if (isAbortError(error) && !isRetryableTranscriptionError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
         if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH" || isRetryableTranscriptionError(error)) throw error;
-        if (!options.fileID && !options.allowCloudUrlFallback) throw error;
+        if (isXiaohongshuUrl(String(options.sourceUrl || "")) || isXiaohongshuMediaUrl(audioUrl)) {
+          if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
+          throw error;
+        }
+        const directFileId = String(options.fileID || options.audioFileID || "").trim();
+        const directDouyinUrlAllowed = options.allowCloudUrlFallback === true && (isDouyinUrl(String(options.sourceUrl || "")) || isDouyinUrl(audioUrl));
+        if (!directFileId && !directDouyinUrlAllowed) throw error;
         return await this.runCloudFallbackTranscription(audioUrl, {
           ...options,
           localError: error && error.message ? error.message : String(error || ""),
@@ -40763,8 +43009,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         stdout,
         stderr
       });
+      const transcriptionSegments = await readTranscriptSegmentsSidecar(outputPath);
       return options.includeQualityDetails === true ? {
         transcription,
+        ...transcriptionSegments.length ? { transcriptionSegments } : {},
         ...localResult.qualityStatus ? { qualityStatus: localResult.qualityStatus } : {},
         ...localResult.qualityWarning ? { qualityWarning: localResult.qualityWarning } : {}
       } : transcription;
@@ -40841,7 +43089,32 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
     }
   }
+  // Re-read the public note document to obtain a fresh signed media URL. This is
+  // a plain HTTPS document request with the mobile note UA: no BrowserWindow, no
+  // login probe, and it honours the per-run Xiaohongshu restriction.
+  async refreshXiaohongshuMediaUrls(sourceUrl) {
+    const pageUrl = String(sourceUrl || "").trim();
+    if (!isXiaohongshuUrl(pageUrl)) return [];
+    throwIfXiaohongshuRestricted({}, "media_refresh");
+    const response = await this.requestXiaohongshuStaticPage(pageUrl, {});
+    const html = String(response && response.text || "");
+    const identityUrl = resolveXiaohongshuIdentityUrl(
+      [pageUrl, String(response && response.url || "")],
+      html
+    );
+    const extracted = extractXiaohongshuMarkdownFromHtml(html, identityUrl, "", { includeComments: false });
+    const urls = [];
+    const addUrl = /* @__PURE__ */ __name((value) => {
+      const candidate = String(value || "").trim();
+      if (/^https?:\/\//i.test(candidate) && !urls.includes(candidate)) urls.push(candidate);
+    }, "addUrl");
+    if (extracted && extracted.xiaohongshuPrimaryNoteMatched === true) {
+      addUrl(extracted.videoUrl);
+    }
+    return urls;
+  }
   async downloadMediaToTempFile(audioUrl, options = {}) {
+    var _a, _b;
     const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl) ? await resolveRedirectUrl(audioUrl, 5, "GET") : audioUrl;
     throwIfAborted(options.signal);
     const mediaDownloadDeadlineAt = Date.now() + 15 * 60 * 1e3;
@@ -40877,8 +43150,28 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw error;
       }
     }, "refreshDouyinMediaUrlsWithinBudget");
+    const refreshXiaohongshuMediaUrlsWithinBudget = /* @__PURE__ */ __name(async () => {
+      const remainingMs = mediaDownloadDeadlineAt - Date.now();
+      if (remainingMs <= 0) throw createMediaDownloadTimeoutError("total");
+      try {
+        return await waitForPromiseWithAbort(
+          runBrowserTaskWithTimeout(
+            this.refreshXiaohongshuMediaUrls(sourceUrl),
+            remainingMs,
+            "Xiaohongshu media refresh"
+          ),
+          options.signal
+        );
+      } catch (error) {
+        if (error && error.code === "BROWSER_TASK_TIMEOUT") {
+          throw createMediaDownloadTimeoutError("total");
+        }
+        throw error;
+      }
+    }, "refreshXiaohongshuMediaUrlsWithinBudget");
     const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
     const canRecoverDouyin = isDouyinUrl(sourceUrl) || isDouyinUrl(audioUrl) || isDouyinMediaUrl(resolvedUrl);
+    const canRecoverXiaohongshu = Boolean(sourceUrl) && (isXiaohongshuUrl(sourceUrl) || isXiaohongshuMediaUrl(resolvedUrl) || isXiaohongshuMediaUrl(audioUrl));
     let downloadedUrl = resolvedUrl;
     let downloadedArrayBuffer;
     const reportDownloadAttempt = /* @__PURE__ */ __name((attempt = {}) => {
@@ -40922,44 +43215,86 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         getMediaDownloadRequestOptions()
       ));
     } catch (error) {
-      if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
-      let lastError = error;
-      try {
-        downloadedArrayBuffer = await runDownloadAttempt("browser-session", false, () => this.downloadMediaArrayBufferWithSession(
-          resolvedUrl,
-          requestHeaders,
-          getMediaDownloadRequestOptions()
-        ));
-      } catch (sessionError) {
-        lastError = sessionError;
-        const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
-        for (const refreshedUrl of refreshedUrls) {
-          if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
+      if (!canRecoverDouyin && canRecoverXiaohongshu && isRecoverableXiaohongshuMediaDownloadError(error)) {
+        let lastError = error;
+        const sameUrlAttempts = [
+          ["node-http", () => this.downloadArrayBuffer(resolvedUrl, requestHeaders, getMediaDownloadRequestOptions())],
+          ["xiaohongshu-session", () => this.downloadMediaArrayBufferWithSession(resolvedUrl, requestHeaders, getMediaDownloadRequestOptions())]
+        ];
+        for (const [transport, task] of sameUrlAttempts) {
           try {
-            downloadedArrayBuffer = await runDownloadAttempt("node-http", true, () => this.downloadArrayBuffer(
-              refreshedUrl,
-              getSocialRequestHeaders(sourceUrl || refreshedUrl),
-              getMediaDownloadRequestOptions()
-            ));
-            downloadedUrl = refreshedUrl;
+            downloadedArrayBuffer = await runDownloadAttempt(transport, false, task);
             break;
-          } catch (refreshedError) {
-            lastError = refreshedError;
-            if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
+          } catch (attemptError) {
+            if (isAbortError(attemptError) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+            lastError = attemptError;
+          }
+        }
+        if (!downloadedArrayBuffer) {
+          let refreshedUrls = [];
+          try {
+            refreshedUrls = await refreshXiaohongshuMediaUrlsWithinBudget();
+          } catch (refreshError) {
+            if (isAbortError(refreshError) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw createAbortError();
+            if (isXiaohongshuRateLimitError(refreshError)) throw refreshError;
+            lastError = refreshError;
+          }
+          for (const refreshedUrl of refreshedUrls.slice(0, 2)) {
+            if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
             try {
-              downloadedArrayBuffer = await runDownloadAttempt("browser-session", true, () => this.downloadMediaArrayBufferWithSession(
+              downloadedArrayBuffer = await runDownloadAttempt("xiaohongshu-session", true, () => this.downloadMediaArrayBufferWithSession(
                 refreshedUrl,
                 getSocialRequestHeaders(sourceUrl || refreshedUrl),
                 getMediaDownloadRequestOptions()
               ));
               downloadedUrl = refreshedUrl;
               break;
-            } catch (refreshedSessionError) {
-              lastError = refreshedSessionError;
+            } catch (refreshedError) {
+              lastError = refreshedError;
             }
           }
         }
-        if (!downloadedArrayBuffer) throw lastError;
+        if (!downloadedArrayBuffer) throw createXiaohongshuMediaUnavailableError(lastError);
+      } else {
+        if (!canRecoverDouyin || !isRecoverableDouyinMediaDownloadError(error)) throw error;
+        let lastError = error;
+        try {
+          downloadedArrayBuffer = await runDownloadAttempt("browser-session", false, () => this.downloadMediaArrayBufferWithSession(
+            resolvedUrl,
+            requestHeaders,
+            getMediaDownloadRequestOptions()
+          ));
+        } catch (sessionError) {
+          lastError = sessionError;
+          const refreshedUrls = sourceUrl ? (await refreshDouyinMediaUrlsWithinBudget()).slice(0, 3) : [];
+          for (const refreshedUrl of refreshedUrls) {
+            if (!refreshedUrl || refreshedUrl === resolvedUrl) continue;
+            try {
+              downloadedArrayBuffer = await runDownloadAttempt("node-http", true, () => this.downloadArrayBuffer(
+                refreshedUrl,
+                getSocialRequestHeaders(sourceUrl || refreshedUrl),
+                getMediaDownloadRequestOptions()
+              ));
+              downloadedUrl = refreshedUrl;
+              break;
+            } catch (refreshedError) {
+              lastError = refreshedError;
+              if (!isRecoverableDouyinMediaDownloadError(refreshedError)) continue;
+              try {
+                downloadedArrayBuffer = await runDownloadAttempt("browser-session", true, () => this.downloadMediaArrayBufferWithSession(
+                  refreshedUrl,
+                  getSocialRequestHeaders(sourceUrl || refreshedUrl),
+                  getMediaDownloadRequestOptions()
+                ));
+                downloadedUrl = refreshedUrl;
+                break;
+              } catch (refreshedSessionError) {
+                lastError = refreshedSessionError;
+              }
+            }
+          }
+          if (!downloadedArrayBuffer) throw lastError;
+        }
       }
     }
     const downloadedBuffer = Buffer.from(downloadedArrayBuffer);
@@ -41032,7 +43367,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     return transcription;
   }
-  async runDoubaoTranscription(audioUrl) {
+  async runDoubaoTranscription(audioUrl, options = {}) {
+    const formatResult = /* @__PURE__ */ __name((state) => options.withSegments === true ? { transcription: state.transcription, transcriptionSegments: state.transcriptionSegments || [] } : state.transcription, "formatResult");
     const taskKey = getDoubaoTaskKey(audioUrl);
     const pendingTasks = this.settings.pendingDoubaoTasks || {};
     const existingTask = pendingTasks[taskKey];
@@ -41041,7 +43377,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         const existingState = await this.queryDoubaoTranscription(existingTask.requestId);
         if (existingState.status === "success") {
           await this.clearPendingDoubaoTask(taskKey);
-          return existingState.transcription;
+          return formatResult(existingState);
         }
       } catch (error) {
         await this.clearPendingDoubaoTask(taskKey);
@@ -41064,7 +43400,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     });
     const submitState = parseDoubaoAsrTaskState(submitResponse);
     if (submitState.status === "success") {
-      return submitState.transcription;
+      return formatResult(submitState);
     }
     await this.savePendingDoubaoTask(taskKey, {
       requestId,
@@ -41084,7 +43420,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       if (state.status === "success") {
         await this.clearPendingDoubaoTask(taskKey);
-        return state.transcription;
+        return formatResult(state);
       }
     }
     throw createRetryableTranscriptionError("豆包语音识别仍在处理中，请稍后再次同步");
@@ -41218,6 +43554,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcriptionStatus: "success",
           transcriptionProvider: result.source,
           transcriptionSource: "local-fallback",
+          ...Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length ? { transcriptionSegments: result.transcriptionSegments } : {},
           cloudTranscriptionError: metadata.transcriptionError || "",
           cloudTranscriptionProvider: metadata.transcriptionProvider || metadata.transcriptionSource || "cloud-pretranscription"
         };
@@ -41259,6 +43596,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           transcription: result.transcription,
           transcriptionStatus: "success",
           transcriptionProvider: result.source,
+          ...Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length ? { transcriptionSegments: result.transcriptionSegments } : {},
           cloudTranscriptionProvider: result.cloudProvider || "",
           cloudTranscriptionRequestId: result.cloudRequestId || "",
           cloudTranscriptionUsedSeconds: result.cloudUsedSeconds || 0,
@@ -41939,7 +44277,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         try {
           const candidateUrl = candidate.url;
           const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || "").trim();
-          const useCloudForWebpage = platform !== "视频号" && !candidateDecryptKey && (metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true);
+          const useCloudForWebpage = isDouyinUrl(url) && !candidateDecryptKey && (metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true);
           if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.transcriptionStarted = true;
           const result = useCloudForWebpage ? await this.runCloudFallbackTranscription(candidateUrl, {
             binding,
@@ -41950,7 +44288,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             signal,
             onMediaDownloadDiagnostic: reportMediaDownloadAttempt
           }) : await this.runConfiguredTranscription(candidateUrl, {
-            allowCloudUrlFallback: platform !== "视频号",
+            // No cloud URL fallback here: the Douyin fallback is submitted by
+            // the caller gate after Pro/binding checks, and no other platform
+            // may use the cloud worker at all.
             title: metadata.title || "",
             source: source || "media-url",
             sourceUrl: url,
@@ -41975,6 +44315,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             mediaUrls: getCandidates().map((item) => item.url),
             subtitleUrl,
             transcription: result.transcription,
+            ...Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length ? { transcriptionSegments: result.transcriptionSegments } : {},
             transcriptionStatus: "success",
             transcriptionSource: result.source,
             conversionStatus: "success",
@@ -42615,6 +44956,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
+    if (isXiaohongshuUrl(url) && getActiveXiaohongshuRestriction()) {
+      const queued = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+        url,
+        binding,
+        signal,
+        title: title || metadata.title || "",
+        localError: "小红书平台限制了当前网络的访问"
+      });
+      if (queued && queued.record) return queued.record;
+      throwIfXiaohongshuRestricted(options, "batch_guard");
+    }
     const xiaohongshuBrowserDiagnostic = isXiaohongshuUrl(url) ? createXiaohongshuBrowserDiagnostic(record) : null;
     if (xiaohongshuBrowserDiagnostic) {
       this.lastXiaohongshuBrowserDiagnostic = xiaohongshuBrowserDiagnostic;
@@ -42691,7 +45043,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             updateCommentResult({ status: "skipped", reason: "pro_not_confirmed", proAccess: false });
           } else {
             updateCommentResult({ proAccess: true, stage: "login_check" });
-            const loggedIn = await this.checkXiaohongshuLogin({ signal, ...xiaohongshuBrowserOptions });
+            const loggedIn = await this.checkXiaohongshuLogin({ signal, ...xiaohongshuBrowserOptions, skipBrowserProbe: true });
             updateCommentResult({
               loginCheck: loggedIn ? "passed" : "unconfirmed",
               status: loggedIn ? "running" : "skipped",
@@ -43055,7 +45407,7 @@ ${finalized.markdown}
           }
         }
         try {
-          const rendered = await this.renderFeishuDocumentWithElectron(url);
+          const rendered = await renderFeishuUrlToSimpleMarkdownWithElectron(url);
           const feishuTitle = metadata.title || rendered.title || "飞书链接";
           let cleanedRenderedMarkdown = cleanMarkdownForStorage(rendered.markdown, {
             dedupe: true,
@@ -43236,6 +45588,7 @@ ${finalized.markdown}
           response = isXiaohongshuUrl(url) ? await this.requestXiaohongshuStaticPage(resolvedUrl, xiaohongshuBrowserOptions) : metadata.automaticWebpageExtraction ? await requestPublicWebpageText(resolvedUrl, { headers }) : await requestUrl({ url: resolvedUrl, method: "GET", headers });
         } catch (requestError) {
           if (!isXiaohongshuUrl(url)) throw requestError;
+          if (isXiaohongshuRateLimitError(requestError)) throw requestError;
           for (const candidate of xiaohongshuBrowserCandidates) {
             throwIfAborted(signal);
             try {
@@ -43270,12 +45623,22 @@ ${finalized.markdown}
           if (!isTrustedXiaohongshuCookieUrl(responseFinalUrl)) {
             throw new Error("小红书正文响应的最终地址无法确认为官方 HTTPS 内容页");
           }
-          resolvedUrl = responseFinalUrl;
-          xiaohongshuResolvedUrl = responseFinalUrl;
+          const responseFinalIsLoginLanding = isXiaohongshuLoginLandingUrl(responseFinalUrl);
+          if (responseFinalIsLoginLanding) {
+            appendXiaohongshuBrowserDiagnostic(xiaohongshuBrowserOptions, {
+              type: "stage",
+              stage: "static_content",
+              outcome: "login_landing_url_not_adopted",
+              url: responseFinalUrl
+            });
+          } else {
+            resolvedUrl = responseFinalUrl;
+            xiaohongshuResolvedUrl = responseFinalUrl;
+          }
           xiaohongshuBrowserCandidates = getXiaohongshuBrowserCandidates(
             url,
             targetIdentityUrl,
-            responseFinalUrl
+            responseFinalIsLoginLanding ? "" : responseFinalUrl
           );
           primarySocialMediaBrowserUrl = xiaohongshuBrowserCandidates[0] ? xiaohongshuBrowserCandidates[0].url : resolvedUrl;
         } else if (isDouyinUrl(url)) {
@@ -43310,7 +45673,8 @@ ${finalized.markdown}
             updateCommentResult({ stage: "login_check" });
             xiaohongshuLoggedIn = await this.checkXiaohongshuLogin({
               signal,
-              ...xiaohongshuBrowserOptions
+              ...xiaohongshuBrowserOptions,
+              skipBrowserProbe: true
             });
           } catch (error) {
             if (isAbortError(error)) throw error;
@@ -43814,6 +46178,7 @@ ${finalized.markdown}
                 }
               } catch (error) {
                 if (isAbortError(error)) throw error;
+                if (isXiaohongshuRateLimitError(error)) throw error;
                 renderedXiaohongshuError = error;
                 xiaohongshuBrowserAttempts.push(buildXiaohongshuBrowserAttemptDiagnostic(
                   candidate,
@@ -43856,6 +46221,7 @@ ${finalized.markdown}
                 if (mediaUrl) break;
               } catch (renderError) {
                 if (isAbortError(renderError)) throw renderError;
+                if (isXiaohongshuRateLimitError(renderError)) throw renderError;
               }
             }
           }
@@ -43935,8 +46301,11 @@ ${finalized.markdown}
               throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
             }
           }
-          const isXiaohongshuVideoNote = Boolean(extractedXiaohongshu.videoUrl || mediaUrl);
-          if (xiaohongshuCapabilities.imageOcr && !isVideoIntent && !isXiaohongshuVideoNote) {
+          if (shouldRunXiaohongshuImageOcr({
+            capabilities: xiaohongshuCapabilities,
+            extracted: extractedXiaohongshu,
+            mediaUrl
+          })) {
             extractedXiaohongshu = await this.enrichXiaohongshuExtractionWithOcr(extractedXiaohongshu, {
               pageUrl: resolvedUrl,
               binding
@@ -43996,6 +46365,7 @@ ${finalized.markdown}
             mediaUrl = mediaUrls[0] || mediaUrl;
           } catch (renderError) {
             if (isAbortError(renderError)) throw renderError;
+            if (isXiaohongshuRateLimitError(renderError)) throw renderError;
             mediaUrl = mediaUrl || "";
           }
         } else if (!isDouyinRecord && !hasUsableDouyinMedia && !mediaUrl && isVideoIntent && typeof this.renderSocialMediaUrl === "function") {
@@ -44004,6 +46374,7 @@ ${finalized.markdown}
             mediaUrls = sortMediaUrlsForTranscription([...mediaUrls, mediaUrl]);
           } catch (renderError) {
             if (isAbortError(renderError)) throw renderError;
+            if (isXiaohongshuRateLimitError(renderError)) throw renderError;
             mediaUrl = "";
           }
         }
@@ -44013,9 +46384,9 @@ ${finalized.markdown}
             pendingXiaohongshuFailureDiagnostic.browser = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
             throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
           }
-          const error = createRetryableTranscriptionError("小红书视频未转写：未获取到可用的视频资源。请复制诊断信息；原记录保留供重试。");
-          error.diagnostic = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
-          throw error;
+          throw createRetryableXiaohongshuContentError(
+            xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings)
+          );
         }
         if (pendingXiaohongshuFailureDiagnostic && !mediaUrl) {
           if (xiaohongshuBrowserDiagnostic) {
@@ -44027,7 +46398,7 @@ ${finalized.markdown}
         }
         if (mediaUrl) {
           if (isXiaohongshuUrl(url) && !xiaohongshuCapabilities.mediaTranscription) {
-            throw createRetryableTranscriptionError("转写未执行：Pro 已到期，请续期后重试。");
+            throw createXiaohongshuProRequiredError();
           }
           const selectedSupplementalMarkdown = isXiaohongshuUrl(url) && extractedXiaohongshu && String(extractedXiaohongshu.markdown || "").trim() ? extractedXiaohongshu.markdown : socialMediaSupplementalMarkdown;
           const supplementalMarkdownParts = isXiaohongshuUrl(url) ? splitSocialCommentsMarkdown(selectedSupplementalMarkdown) : { markdown: selectedSupplementalMarkdown, trailingMarkdown: "" };
@@ -44838,6 +47209,17 @@ ${finalized.markdown}
         updateCommentResult({ status: isAbortError(error) ? "aborted" : "not_attempted", reason: "content_failed", errorCode: getXiaohongshuCommentErrorCode(error) });
       }
       if (isAbortError(error)) throw error;
+      if (isXiaohongshuRateLimitError(error)) {
+        const rateLimitedFallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+          url,
+          binding,
+          signal,
+          title: title || metadata.title || "",
+          localError: "小红书拒绝了当前请求（平台限流或安全验证）"
+        });
+        if (rateLimitedFallback && rateLimitedFallback.record) return rateLimitedFallback.record;
+        throw error;
+      }
       if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
@@ -44853,6 +47235,20 @@ ${finalized.markdown}
         });
         if (xiaohongshuBrowserDiagnostic) {
           failureDiagnostic.browser = redactSensitiveObject(xiaohongshuBrowserDiagnostic);
+        }
+        const cloudFallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+          url,
+          binding,
+          signal,
+          title: title || metadata.title || "",
+          localError: describeXiaohongshuContentFailure(failureDiagnostic),
+          linkDiagnostic: failureDiagnostic
+        });
+        if (cloudFallback && cloudFallback.record) return cloudFallback.record;
+        if (cloudFallback && cloudFallback.gateMessage) {
+          const error2 = createRetryableXiaohongshuContentError(failureDiagnostic);
+          error2.message = [error2.message, cloudFallback.gateMessage].filter(Boolean).join("；");
+          throw error2;
         }
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
       }
@@ -45301,6 +47697,11 @@ ${finalized.markdown}
     if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || "pending";
+      if (isXiaohongshuUrl(getRecordUrl(recordForMarkdown))) {
+        throw createRetryableXiaohongshuContentError(
+          metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === "object" ? metadata.mediaResolutionDiagnostic : { reason: "xiaohongshu-content-incomplete" }
+        );
+      }
       const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
       const transcriptionError = channelsOutcome ? Object.assign(new Error(channelsOutcome.message), channelsOutcome) : createRetryableTranscriptionError(metadata.transcriptionError || `audio/video transcription is ${status}`);
       if (metadata.mediaResolutionDiagnostic && typeof metadata.mediaResolutionDiagnostic === "object") {
@@ -45662,6 +48063,7 @@ ${finalized.markdown}
   }
   async syncBinding(binding, shouldPrefixTitle) {
     this.ensureSerializedSaveData();
+    clearXiaohongshuRestriction();
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
     await this.replayPendingSyncLifecycleAttempts(binding);
     try {
@@ -45758,6 +48160,11 @@ ${finalized.markdown}
         if (!this.backgroundSyncActive) {
           this.showSyncProgress({ ...progress, stage: "processing", title: `${buildRecordTitleBase(record)} 云端转写中` });
         }
+        continue;
+      }
+      const recordSourceUrl = record && record.metadata && (record.metadata.url || record.metadata.originalUrl) || (record && typeof record.content === "string" ? record.content : "");
+      if (isXiaohongshuUrl(recordSourceUrl) && getActiveXiaohongshuRestriction()) {
+        skipped.push({ recordId, reason: "xiaohongshu-rate-limited" });
         continue;
       }
       const processingAbortController = new AbortController();
@@ -46525,11 +48932,23 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         });
       });
     });
+    new Setting(containerEl).setName("分段转写时间戳").setDesc("音视频笔记的「分段转写」里，点击 [00:00] 时间戳可让笔记内嵌播放器跳到对应位置。").addToggle((toggle) => toggle.setValue(this.plugin.settings.transcriptTimestampsEnabled === true).onChange(async (value) => {
+      await this.plugin.saveSettings({ ...this.plugin.settings, transcriptTimestampsEnabled: value === true });
+    }));
+    new Setting(containerEl).setName("播放器截图按钮").setDesc("在音视频笔记的内嵌视频下方显示「截图」按钮，手动保存当前画面到笔记附件目录。").addToggle((toggle) => toggle.setValue(this.plugin.settings.transcriptScreenshotEnabled === true).onChange(async (value) => {
+      await this.plugin.saveSettings({ ...this.plugin.settings, transcriptScreenshotEnabled: value === true });
+    }));
     new Setting(containerEl).setName("立即同步").setDesc("手动拉取云端收集箱，并写入当前 vault。").addButton((button) => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
-    new Setting(containerEl).setName("同步/安装失败诊断").setDesc("复制诊断信息，便于反馈和排查问题。").addButton((button) => button.setButtonText("复制诊断信息").onClick(async () => {
+    new Setting(containerEl).setName("同步/安装失败诊断").setDesc("默认只复制本次失败的摘要；排查组件安装问题时再复制完整诊断。").addButton((button) => button.setButtonText("复制本次失败").setCta().onClick(async () => {
+      try {
+        await this.plugin.copyCompactSyncDiagnosticText();
+      } catch (error) {
+        new Notice(`复制诊断信息失败：${error.message || error}`);
+      }
+    })).addButton((button) => button.setButtonText("复制完整诊断").onClick(async () => {
       try {
         await this.plugin.copySyncDiagnosticText({ detailed: true });
-        new Notice("诊断信息已复制");
+        new Notice("完整诊断信息已复制");
       } catch (error) {
         new Notice(`复制诊断信息失败：${error.message || error}`);
       }
@@ -46967,6 +49386,7 @@ WechatObsidianInboxPlugin.__test = {
   buildWebpageTransportDiagnostic,
   buildDouyinMediaResolutionDiagnostic,
   getXiaohongshuCapabilityMatrix,
+  shouldRunXiaohongshuImageOcr,
   runWithDouyinBrowserSessionLock,
   runWithXiaohongshuBrowserSessionLock,
   renderXiaohongshuPageWithElectron,
@@ -46979,6 +49399,18 @@ WechatObsidianInboxPlugin.__test = {
   buildXiaohongshuFailureDiagnostic,
   createRetryableXiaohongshuContentError,
   isRetryableXiaohongshuContentError,
+  isXiaohongshuLoginLandingUrl,
+  isXiaohongshuMediaUrl,
+  getXiaohongshuDocumentRequestHeaders,
+  isRecoverableXiaohongshuMediaDownloadError,
+  isXiaohongshuMediaFailure,
+  detectXiaohongshuSecurityRestriction,
+  markXiaohongshuRestriction,
+  getActiveXiaohongshuRestriction,
+  clearXiaohongshuRestriction,
+  createXiaohongshuRateLimitError,
+  createXiaohongshuProRequiredError,
+  isXiaohongshuRateLimitError,
   isPermanentlyExpiredXiaohongshuShortlinkRecord,
   isRemoteAsrDownloadFailure,
   getDoubaoTaskKey,
@@ -47057,6 +49489,7 @@ WechatObsidianInboxPlugin.__test = {
   normalizeGeneratedKeywords,
   parseGeneratedMetadataResponse,
   extractAiMetadataInputText,
+  shouldGenerateAiMetadata,
   cleanMarkdownForStorage,
   resolveRedirectUrlWithDiagnostics,
   resolveRedirectUrl,

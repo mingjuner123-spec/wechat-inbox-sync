@@ -69,7 +69,9 @@ async function run() {
   );
   fs.mkdirSync(path.join(tempRoot, 'models'), { recursive: true });
   fs.mkdirSync(path.join(tempRoot, 'bin'), { recursive: true });
-  fs.writeFileSync(path.join(tempRoot, 'models', 'ggml-small.bin'), 'model');
+  // The Windows installer provisions the large-v3-turbo model; the self-heal
+  // probe must look for the same file the installer actually writes.
+  fs.writeFileSync(path.join(tempRoot, 'models', 'ggml-large-v3-turbo-q5_0.bin'), 'model');
   fs.writeFileSync(path.join(tempRoot, 'bin', 'whisper-cli.exe'), 'whisper');
   fs.writeFileSync(path.join(tempRoot, 'bin', 'ffmpeg.exe'), 'ffmpeg');
   const expectedCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${virtualInstallRoot}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;

@@ -3051,6 +3051,14 @@ function isXiaohongshuLoginLanding(html, url = '', extracted = null) {
   if (!genericTitle) return false;
 
   const readableText = cleanSocialDescription(stripHtmlTags(stripScriptAndStyleBlocks(selectReadableHtml(source))));
+  // A public mobile-UA request can land on Xiaohongshu's app-only shell instead
+  // of the note: HTTP 200 at the note URL, generic "小红书" title, and only an
+  // "open in the app" prompt. It carries no login form, so without this check it
+  // is adopted as graphic-note content and the note is never transcribed or
+  // handed to the browser/cloud fallback.
+  const shellText = [readableText, extracted && extracted.pageDescription]
+    .filter(Boolean).join('\n').replace(/\s+/g, '');
+  if (/App内打开|仅支持在小红书APP内查看|打开APP查看/i.test(shellText)) return true;
   const authMethods = [
     /手机号登录|手机登录/.test(readableText),
     /验证码登录/.test(readableText),
