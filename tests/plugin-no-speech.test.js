@@ -77,10 +77,14 @@ async function run() {
   await assert.rejects(configured.runConfiguredTranscription(media.mediaUrl, { allowCloudUrlFallback: true }), { code: 'TRANSCRIPTION_NO_SPEECH' });
   assert.equal(cloudCalls, 0);
   configured.runLocalTranscription = async () => { throw new Error('native crash'); };
-  // URL fallback is a Douyin-only capability; every other platform link is
-  // refused instead of being submitted to the cloud worker.
-  await configured.runConfiguredTranscription('https://www.douyin.com/video/7644238277092174409', { allowCloudUrlFallback: true });
-  assert.equal(cloudCalls, 1, 'real failures retain existing fallback');
+  // The direct provider route is retired. A real failure now surfaces here and
+  // the caller submits the platform URL to the worker queue after its own
+  // Pro/binding checks, so no direct cloud call may happen on this path.
+  await assert.rejects(
+    configured.runConfiguredTranscription('https://www.douyin.com/video/7644238277092174409', { allowCloudUrlFallback: true }),
+    /native crash/,
+  );
+  assert.equal(cloudCalls, 0, 'no direct cloud transcription call remains');
 
   const p = fixture(); let attempts = 0;
   p.runConfiguredTranscription = async () => { attempts++; throw noSpeech(); };

@@ -3039,9 +3039,12 @@ assert.strictEqual(
   helpers.formatLocalComponentInstallFailureReason('Local ASR installer download returned outdated or invalid content'),
   '本地转写安装器校验失败：请先更新插件，并完全退出后重新打开 Obsidian，再点击“安装／更新本地组件”重试。若仍失败，请复制诊断信息联系开发者。',
 );
-assert.ok(pluginMainSource.includes('/transcriptions/cloud'));
-assert.ok(pluginMainSource.includes('runCloudFallbackTranscription'));
-assert.ok(pluginMainSource.includes('local-cloud-fallback'));
+// The direct provider route is retired: it needed a server-side key this
+// deployment never had. Every cloud transcription now goes through the worker
+// queue, so none of its markers may remain in the shipped source.
+assert.strictEqual(pluginMainSource.includes('/transcriptions/cloud'), false);
+assert.strictEqual(pluginMainSource.includes('runCloudFallbackTranscription'), false);
+assert.strictEqual(pluginMainSource.includes('local-cloud-fallback'), false);
 assert.ok(pluginMainSource.includes('云端兜底'));
 assert.strictEqual(pluginMainSource.includes("setName('语音转写')"), false);
 assert.strictEqual(pluginMainSource.includes("setName('豆包语音识别 API Key')"), false);
@@ -9992,31 +9995,18 @@ async function runAsyncHydrationTests() {
     };
   };
   try {
-    const webMediaFallbackResult = await webMediaFallbackPlugin.runConfiguredTranscription('https://www.douyin.com/video/7644238277092174409', {
-      allowCloudUrlFallback: true,
-      title: '抖音口播',
-      source: 'video',
-    });
-    assert.deepStrictEqual(webMediaFallbackResult, {
-      transcription: '云端兜底文案',
-      source: 'local-cloud-fallback',
-      cloudProvider: 'doubao',
-      cloudRequestId: 'cloud-url-1',
-      cloudUsedSeconds: 60,
-      cloudRemainingSeconds: 3540,
-    });
-    assert.deepStrictEqual(cloudFallbackRequests, [{
-      url: 'https://example.com/sync/transcriptions/cloud',
-      method: 'POST',
-      body: {
-        audioUrl: 'https://www.douyin.com/video/7644238277092174409',
-        durationSeconds: 60,
-        localError: 'whisper failed with exit code -1073740791',
-        source: 'video',
+    // The retired direct provider route must never be called again: it died in
+    // production on a missing server-side key. The failure surfaces instead and
+    // the caller hands the platform URL to the worker queue.
+    await assert.rejects(
+      webMediaFallbackPlugin.runConfiguredTranscription('https://www.douyin.com/video/7644238277092174409', {
+        allowCloudUrlFallback: true,
         title: '抖音口播',
-      },
-      auth: 'Bearer PRO-123',
-    }]);
+        source: 'video',
+      }),
+      /whisper failed/,
+    );
+    assert.deepStrictEqual(cloudFallbackRequests, [], 'retired direct cloud route must not be called');
   } finally {
     requestUrlMock = previousRequestUrlForWebMediaFallback;
   }
@@ -10084,21 +10074,22 @@ async function runAsyncHydrationTests() {
       status: 'bound',
     }],
   });
-  cloudWebpagePlugin.runConfiguredTranscription = async () => {
-    throw new Error('云端网页链接不应调用本地/插件转写');
+  // The direct provider call is retired: a webpage video is handled by the same
+  // local attempt plus worker-queue route as everything else, so a local failure
+  // must surface instead of being replaced by a provider call this deployment
+  // could never authenticate.
+  let cloudWebpageLocalCalls = 0;
+  cloudWebpagePlugin.runConfiguredTranscription = async (audioUrl) => {
+    cloudWebpageLocalCalls += 1;
+    assert.strictEqual(audioUrl, 'https://video.example.com/douyin.mp4');
+    throw new Error('本地转写失败');
   };
-  const cloudWebpageCalls = [];
-  cloudWebpagePlugin.runCloudFallbackTranscription = async (audioUrl, options) => {
-    cloudWebpageCalls.push([audioUrl, options.source, options.title, options.binding && options.binding.token]);
-    return {
-      transcription: '云端网页音视频转写结果',
-      source: 'cloud-webpage',
-      cloudProvider: 'doubao',
-      cloudRequestId: 'cloud-web-1',
-      cloudUsedSeconds: 60,
-      cloudRemainingSeconds: 540,
-    };
-  };
+  cloudWebpagePlugin.evaluateCloudFallbackUserGate = async () => ({ allowed: false, reason: 'test-gate' });
+  assert.strictEqual(
+    typeof cloudWebpagePlugin.runCloudFallbackTranscription,
+    'undefined',
+    'the retired direct provider call must not exist on the plugin',
+  );
   const cloudWebpageResult = await cloudWebpagePlugin.buildTranscriptRecordFromMedia({
     type: 'webpage',
     content: 'https://www.douyin.com/video/123',
@@ -10116,15 +10107,10 @@ async function runAsyncHydrationTests() {
     binding: cloudWebpagePlugin.settings.bindings[0],
     title: '抖音视频',
   });
-  assert.strictEqual(cloudWebpageResult.metadata.transcription, '云端网页音视频转写结果');
-  assert.strictEqual(cloudWebpageResult.metadata.transcriptionSource, 'cloud-webpage');
-  assert.strictEqual(cloudWebpageResult.metadata.cloudTranscriptionProvider, 'doubao');
-  assert.deepStrictEqual(cloudWebpageCalls, [[
-    'https://video.example.com/douyin.mp4',
-    'video',
-    '抖音视频',
-    'PRO-123',
-  ]]);
+  assert.strictEqual(cloudWebpageLocalCalls, 1, 'the media goes through the single local-then-queue route');
+  assert.strictEqual(cloudWebpageResult.metadata.transcription, '');
+  assert.strictEqual(cloudWebpageResult.metadata.transcriptionStatus, 'failed');
+  assert.match(cloudWebpageResult.metadata.transcriptionError, /本地转写失败/);
 
   const localPlatformParsePlugin = new PluginClass();
   localPlatformParsePlugin.settings = helpers.mergeSettings({

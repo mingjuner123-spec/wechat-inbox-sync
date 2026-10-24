@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.198';
+const PLUGIN_RUNTIME_VERSION = '1.3.199';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -22972,16 +22972,70 @@ class WechatObsidianInboxPlugin extends Plugin {
         };
       } catch (error) {
         if ((isAbortError(error) && !isRetryableTranscriptionError(error)) || options.signal?.aborted) throw createAbortError();
-        if (error.transcriptionSetupRequired
-          || error.code === 'TRANSCRIPTION_NO_SPEECH'
-          || isRetryableTranscriptionError(error)) throw error;
+        const xiaohongshuSourceUrl = String(options.sourceUrl || '').trim();
+        const isXiaohongshuFailure = isXiaohongshuUrl(xiaohongshuSourceUrl)
+          || isXiaohongshuMediaUrl(audioUrl)
+          || isRetryableXiaohongshuContentError(error);
+
+        // A Xiaohongshu media failure is recoverable from another network: a
+        // cloud node holds the logged-in browser the local attempt lacked.
+        // Submit the original share link before the retryable short-circuit
+        // below turns it into yet another user-retry record. Dead links, a
+        // missing local component, and a silent video stay local verdicts —
+        // no cloud node can improve any of them.
+        if (isXiaohongshuUrl(xiaohongshuSourceUrl)
+          && this.settings.cloudFallbackEnabled === true
+          && options.binding
+          && !(error && (error.linkExpired === true || error.code === 'XIAOHONGSHU_LINK_UNAVAILABLE'))
+          && error && error.transcriptionSetupRequired !== true
+          && !isSetupRequired(error)
+          && error.code !== 'TRANSCRIPTION_NO_SPEECH') {
+          const gate = await this.evaluateCloudFallbackUserGate({
+            binding: options.binding,
+            featureName: '小红书云端兜底',
+          });
+          if (gate.allowed) {
+            try {
+              const job = await this.submitCloudFallbackJob({
+                sourceType: 'xiaohongshu_url',
+                sourceUrl: xiaohongshuSourceUrl,
+                recordId: options.recordId,
+                retryCount: options.retryCount,
+                title: options.title,
+                durationSeconds: options.durationSeconds,
+                localError: error && error.message ? error.message : String(error || ''),
+                provider,
+                binding: options.binding,
+                signal: options.signal,
+              });
+              if (job.status === 'succeeded' && String(job.transcription || '').trim()) {
+                return {
+                  transcription: job.transcription,
+                  source: 'cloud-fallback',
+                  cloudProvider: job.provider || 'cloud',
+                  cloudRequestId: job.providerRequestId || '',
+                };
+              }
+              throw createCloudFallbackPendingError(job, error && error.message);
+            } catch (fallbackError) {
+              if (fallbackError && fallbackError.code === 'CLOUD_FALLBACK_QUEUED') throw fallbackError;
+              if (isAbortError(fallbackError) || options.signal?.aborted) throw createAbortError();
+              // Keep the Xiaohongshu content outcome below: a submission
+              // problem is not a transcription defect.
+            }
+          }
+        }
+
+        if (error.transcriptionSetupRequired || error.code === 'TRANSCRIPTION_NO_SPEECH') throw error;
 
         // A Xiaohongshu media failure keeps its content outcome whether or not
         // the cloud fallback setting is on: the message must never say “转写”.
-        if (isXiaohongshuUrl(String(options.sourceUrl || '')) || isXiaohongshuMediaUrl(audioUrl)) {
+        if (isXiaohongshuFailure) {
           if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
           throw error;
         }
+
+        if (isRetryableTranscriptionError(error)) throw error;
 
         // A downloaded Douyin candidate is retained only for this failed local
         // attempt. Upload failure deliberately falls through to the original
@@ -23083,27 +23137,12 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           throw createCloudFallbackPendingError(job, error && error.message);
         }
-        // Cloud transcription is a Douyin-only capability. Two sources may reach
-        // the cloud worker here:
-        //   1. a file the user uploaded (fileID) — the user's own media, not a
-        //      platform link;
-        //   2. a Douyin link, and only when the caller explicitly opts in.
-        // Every other platform link is refused: Xiaohongshu, Bilibili,
-        // Xiaoyuzhou and generic pages all serve their media from CDNs the
-        // cloud worker cannot download anonymously, so a submission could only
-        // fail and would relabel a media problem as “转写失败”.
-        const pageSourceUrl = String(options.sourceUrl || '').trim();
-        const legacyFileId = String(options.fileID || options.audioFileID || '').trim();
-        const isDouyinTranscriptionSource = isDouyinUrl(pageSourceUrl) || isDouyinUrl(audioUrl);
-        const legacyUrlFallbackAllowed = Boolean(legacyFileId)
-          || (options.allowCloudUrlFallback === true && isDouyinTranscriptionSource);
-        if (legacyUrlFallbackAllowed) {
-          return await this.runCloudFallbackTranscription(audioUrl, {
-            ...options,
-            localError: error && error.message ? error.message : String(error || ''),
-            source: options.source || 'local',
-          });
-        }
+        // The legacy direct cloud-ASR route is retired: it called the ASR
+        // provider directly with a server-side key this deployment never had,
+        // so every submission ended in a configuration error instead of a
+        // transcript. Media the worker can still take was already offered
+        // above as an `uploaded_file` job; everything else surfaces the
+        // original failure and stays retryable.
         throw error;
       } finally {
         if (retainedInputPath) {
@@ -23204,72 +23243,12 @@ class WechatObsidianInboxPlugin extends Plugin {
           if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
           throw error;
         }
-        // Same Douyin-only rule as the branch above; anything else surfaces the
-        // original failure instead of being submitted to /transcriptions/cloud.
-        const directFileId = String(options.fileID || options.audioFileID || '').trim();
-        const directDouyinUrlAllowed = options.allowCloudUrlFallback === true
-          && (isDouyinUrl(String(options.sourceUrl || '')) || isDouyinUrl(audioUrl));
-        if (!directFileId && !directDouyinUrlAllowed) throw error;
-        return await this.runCloudFallbackTranscription(audioUrl, {
-          ...options,
-          localError: error && error.message ? error.message : String(error || ''),
-          source: options.source || 'local',
-        });
+        // Same retirement rule as the branch above: no direct provider call,
+        // only the worker queue that the caller already tried.
+        throw error;
       }
     }
     throw new Error('未配置可用的音频转写方案');
-  }
-
-  async runCloudFallbackTranscription(audioUrl, options = {}) {
-    const binding = options.binding || this.getActiveBindings()[0] || null;
-    if (!binding) {
-      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：未绑定小程序`);
-    }
-    this.showSyncProgress({
-      stage: 'transcribing',
-      title: options.title || '',
-      message: '本地转写失败，正在尝试云端兜底',
-    });
-    const fileID = String(options.fileID || '').trim();
-    if (!fileID && !options.allowCloudUrlFallback) {
-      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：缺少云端文件 ID`);
-    }
-    try {
-      const requestBody = {
-        durationSeconds: options.durationSeconds || 60,
-        localError: options.localError || '',
-        source: options.source || 'local',
-        title: options.title || '',
-      };
-      if (fileID) {
-        requestBody.fileID = fileID;
-      } else {
-        requestBody.audioUrl = audioUrl;
-      }
-      const payload = await this.requestJson('/transcriptions/cloud', 'POST', requestBody, binding, {
-        signal: options.signal || null,
-      });
-      throwIfAborted(options.signal || null);
-      const data = payload && payload.data ? payload.data : {};
-      const transcription = String(data.transcription || '').trim();
-      if (!transcription) {
-        throw new Error('云端兜底返回空转写结果');
-      }
-      return {
-        transcription,
-        source: 'local-cloud-fallback',
-        cloudProvider: data.provider || 'cloud',
-        cloudRequestId: data.requestId || '',
-        cloudUsedSeconds: Number(data.usedSeconds) || 0,
-        cloudRemainingSeconds: Number(data.remainingSeconds) || 0,
-      };
-    } catch (cloudError) {
-      if (isAbortError(cloudError) || (options.signal && options.signal.aborted)) {
-        throw createAbortError();
-      }
-      const cloudMessage = cloudError && cloudError.message ? cloudError.message : String(cloudError || '');
-      throw new Error(`${options.localError || '本地转写失败'}；云端兜底失败：${cloudMessage}`);
-    }
   }
 
   async runLocalTranscription(audioUrl, options = {}) {
@@ -25230,27 +25209,34 @@ class WechatObsidianInboxPlugin extends Plugin {
     const candidates = getCandidates();
     if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
 
+    // The cloud nodes now serve two platform links: Douyin and Xiaohongshu.
+    // Douyin still needs the login and resolver the local attempt was meant to
+    // have; a Xiaohongshu failure is never a Douyin setup gap, so the gate for
+    // it is the plain binding/Pro/component check.
+    const fallbackSourceType = isDouyinUrl(url)
+      ? 'douyin_url'
+      : (isXiaohongshuUrl(url) ? 'xiaohongshu_url' : '');
     const fallbackGate = (!candidates.length
       && this.settings.cloudFallbackEnabled === true
-      && isDouyinUrl(url)
+      && fallbackSourceType
       && binding)
-      ? await this.evaluateCloudFallbackUserGate({
-        binding,
-        requireDouyinLogin: true,
-        requireDouyinResolver: true,
-      })
+      ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === 'douyin_url'
+        ? { binding, requireDouyinLogin: true, requireDouyinResolver: true }
+        : { binding })
       : null;
     if (!candidates.length) {
       if (fallbackGate && fallbackGate.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
-            sourceType: 'douyin_url',
+            sourceType: fallbackSourceType,
             sourceUrl: url,
             recordId: getRecordId(record),
             retryCount: record.retryCount,
             title: title || metadata.title || '',
             durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
-            localError: noMediaError || '抖音媒体地址获取失败',
+            localError: noMediaError || (fallbackSourceType === 'douyin_url'
+              ? '抖音媒体地址获取失败'
+              : '小红书媒体地址获取失败'),
             provider: this.settings.aiProvider || '',
             binding,
             signal,
@@ -25273,6 +25259,12 @@ class WechatObsidianInboxPlugin extends Plugin {
                 mediaResolutionDiagnostic: getMediaResolutionDiagnostic('transcription-ready'),
               }),
             };
+          }
+          // A Xiaohongshu graphic note has no audio: the cloud answer is the
+          // note itself, so the record completes as content instead of waiting
+          // for a transcript that will never come.
+          if (job.status === 'succeeded' && job.content) {
+            return this.buildCloudFallbackContentRecord(record, job, { url });
           }
           throw createCloudFallbackPendingError(job, noMediaError);
         } catch (cloudError) {
@@ -25332,28 +25324,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         try {
           const candidateUrl = candidate.url;
           const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || '').trim();
-          // Cloud transcription is a Douyin-only capability. A cloud
-          // pre-transcription flag on any other platform must not become a
-          // /transcriptions/cloud submission here.
-          const useCloudForWebpage = isDouyinUrl(url) && !candidateDecryptKey && (
-            metadata.transcriptionMode === 'cloud'
-            || metadata.cloudTranscriptionRequested === true
-          );
+          // Every candidate now goes through the same local-then-queue route:
+          // the retired direct provider call had no working key in production,
+          // and the caller gate submits the platform URL to the worker queue
+          // after the Pro/binding checks.
           if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') mediaDiagnosticTrace.transcriptionStarted = true;
-          const result = useCloudForWebpage
-             ? await this.runCloudFallbackTranscription(candidateUrl, {
-              binding,
-              title: title || metadata.title || '',
-              source: source || 'media-url',
-              localError: 'user selected cloud transcription',
-               allowCloudUrlFallback: true,
-               signal,
-              onMediaDownloadDiagnostic: reportMediaDownloadAttempt,
-             })
-            : await this.runConfiguredTranscription(candidateUrl, {
-              // No cloud URL fallback here: the Douyin fallback is submitted by
-              // the caller gate after Pro/binding checks, and no other platform
-              // may use the cloud worker at all.
+          const result = await this.runConfiguredTranscription(candidateUrl, {
               title: metadata.title || '',
               source: source || 'media-url',
               sourceUrl: url,
@@ -25468,7 +25444,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       // usable fallback source. No-speech and user-stop paths return above or
       // are retryable and therefore never enter this branch.
       const fallbackGate = (this.settings.cloudFallbackEnabled === true
-        && isDouyinUrl(url)
+        && fallbackSourceType
         && binding
         && !isAbortError(error)
         && error.transcriptionSetupRequired !== true
@@ -25479,7 +25455,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (fallbackGate && fallbackGate.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
-            sourceType: 'douyin_url',
+            sourceType: fallbackSourceType,
             sourceUrl: url,
             recordId: getRecordId(record),
             retryCount: record.retryCount,
@@ -25509,6 +25485,10 @@ class WechatObsidianInboxPlugin extends Plugin {
                 mediaResolutionDiagnostic: getMediaResolutionDiagnostic('transcription-ready'),
               }),
             };
+          }
+          // A Xiaohongshu graphic note answers with content, not a transcript.
+          if (job.status === 'succeeded' && job.content) {
+            return this.buildCloudFallbackContentRecord(record, job, { url });
           }
           throw createCloudFallbackPendingError(job, error.message || String(error));
         } catch (cloudError) {
@@ -27414,6 +27394,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         const isUnavailableXhs = isXiaohongshuUrl(url)
           && isUnavailableXiaohongshuPage(html, resolvedUrl);
+        // A Xiaohongshu share link carries no media type of its own. The tag on
+        // the record only opens the door to probing; the page's own evidence
+        // (`isVideoNote` / `videoUrl`, added below) confirms it, and a readable
+        // graphic note still ends as 图文.
         let isVideoIntent = metadata.webpageMediaType === 'audio_video'
           || isDouyinUrl(url)
           || isDouyinUrl(resolvedUrl)
@@ -27441,7 +27425,12 @@ class WechatObsidianInboxPlugin extends Plugin {
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html, xiaohongshuIdentityUrl, metadata.shareText || record.content || '', {
             includeComments: false,
           });
-          isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true;
+          // The page decides. A playable video URL is video intent even if the
+          // note's declared type says otherwise, so the check covers both
+          // signals rather than relying on them staying in sync.
+          isVideoIntent = isVideoIntent
+            || extractedXiaohongshu.isVideoNote === true
+            || Boolean(String(extractedXiaohongshu.videoUrl || '').trim());
           if (extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true) {
             mediaUrls = extractedXiaohongshu.videoUrl
               ? [extractedXiaohongshu.videoUrl]
@@ -27540,7 +27529,9 @@ class WechatObsidianInboxPlugin extends Plugin {
               mergeableXiaohongshuExtractions,
               bestRenderedXiaohongshuExtraction,
             );
-            isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true;
+            isVideoIntent = isVideoIntent
+              || extractedXiaohongshu.isVideoNote === true
+              || Boolean(String(extractedXiaohongshu.videoUrl || '').trim());
             html = bestRenderedXiaohongshuHtml;
             xiaohongshuIdentityUrl = bestRenderedXiaohongshuUrl || xiaohongshuIdentityUrl;
             mediaUrls = extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true
@@ -27761,10 +27752,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             pendingXiaohongshuFailureDiagnostic.browser = xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings);
             throw createRetryableXiaohongshuContentError(pendingXiaohongshuFailureDiagnostic);
           }
-          // The mini program tags every xhslink.com/a/ share as audio_video, so
-          // a plain graphic note can arrive with video intent and no media. That
-          // is a content extraction outcome, never a transcription failure:
-          // report it as such so the user is not told a transcript broke.
+          // Video intent with no media means the page never yielded a video:
+          // risk control, a login wall, or a video note whose state did not
+          // load. That is a content acquisition outcome, never a transcription
+          // failure, so the record says so and stays retryable.
           throw createRetryableXiaohongshuContentError(
             xhsDiagnostic.sanitize(xiaohongshuBrowserDiagnostic, this.settings),
           );
