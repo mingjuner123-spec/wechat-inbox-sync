@@ -22032,7 +22032,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.198";
+var PLUGIN_RUNTIME_VERSION = "1.3.199";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -42084,7 +42084,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     var _a;
     const provider = this.settings.aiProvider;
     const runLocalWithCloudFallback = /* @__PURE__ */ __name(async ({ sourcePrefix = "", includeQualityDetails = false } = {}) => {
-      var _a2, _b;
+      var _a2, _b, _c;
       const preserveLocalMedia = options.preserveLocalMediaForCloudFallback === true;
       let retainedInputPath = "";
       const localOptions = {
@@ -42112,11 +42112,48 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         };
       } catch (error) {
         if (isAbortError(error) && !isRetryableTranscriptionError(error) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
-        if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH" || isRetryableTranscriptionError(error)) throw error;
-        if (isXiaohongshuUrl(String(options.sourceUrl || "")) || isXiaohongshuMediaUrl(audioUrl)) {
+        const xiaohongshuSourceUrl = String(options.sourceUrl || "").trim();
+        const isXiaohongshuFailure = isXiaohongshuUrl(xiaohongshuSourceUrl) || isXiaohongshuMediaUrl(audioUrl) || isRetryableXiaohongshuContentError(error);
+        if (isXiaohongshuUrl(xiaohongshuSourceUrl) && this.settings.cloudFallbackEnabled === true && options.binding && !(error && (error.linkExpired === true || error.code === "XIAOHONGSHU_LINK_UNAVAILABLE")) && error && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH") {
+          const gate = await this.evaluateCloudFallbackUserGate({
+            binding: options.binding,
+            featureName: "小红书云端兜底"
+          });
+          if (gate.allowed) {
+            try {
+              const job = await this.submitCloudFallbackJob({
+                sourceType: "xiaohongshu_url",
+                sourceUrl: xiaohongshuSourceUrl,
+                recordId: options.recordId,
+                retryCount: options.retryCount,
+                title: options.title,
+                durationSeconds: options.durationSeconds,
+                localError: error && error.message ? error.message : String(error || ""),
+                provider,
+                binding: options.binding,
+                signal: options.signal
+              });
+              if (job.status === "succeeded" && String(job.transcription || "").trim()) {
+                return {
+                  transcription: job.transcription,
+                  source: "cloud-fallback",
+                  cloudProvider: job.provider || "cloud",
+                  cloudRequestId: job.providerRequestId || ""
+                };
+              }
+              throw createCloudFallbackPendingError(job, error && error.message);
+            } catch (fallbackError) {
+              if (fallbackError && fallbackError.code === "CLOUD_FALLBACK_QUEUED") throw fallbackError;
+              if (isAbortError(fallbackError) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw createAbortError();
+            }
+          }
+        }
+        if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH") throw error;
+        if (isXiaohongshuFailure) {
           if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
           throw error;
         }
+        if (isRetryableTranscriptionError(error)) throw error;
         if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true) {
           let uploadedArtifactReady = false;
           try {
@@ -42177,7 +42214,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             throw createCloudFallbackPendingError(job, error && error.message);
           } catch (fallbackError) {
             if (fallbackError && fallbackError.code === "CLOUD_FALLBACK_QUEUED") throw fallbackError;
-            if (isAbortError(fallbackError) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw createAbortError();
+            if (isAbortError(fallbackError) || ((_c = options.signal) == null ? void 0 : _c.aborted)) throw createAbortError();
             if (uploadedArtifactReady && isCloudFallbackSubmissionUncertain(fallbackError)) {
               fallbackError.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
               throw fallbackError;
@@ -42207,17 +42244,6 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             };
           }
           throw createCloudFallbackPendingError(job, error && error.message);
-        }
-        const pageSourceUrl = String(options.sourceUrl || "").trim();
-        const legacyFileId = String(options.fileID || options.audioFileID || "").trim();
-        const isDouyinTranscriptionSource = isDouyinUrl(pageSourceUrl) || isDouyinUrl(audioUrl);
-        const legacyUrlFallbackAllowed = Boolean(legacyFileId) || options.allowCloudUrlFallback === true && isDouyinTranscriptionSource;
-        if (legacyUrlFallbackAllowed) {
-          return await this.runCloudFallbackTranscription(audioUrl, {
-            ...options,
-            localError: error && error.message ? error.message : String(error || ""),
-            source: options.source || "local"
-          });
         }
         throw error;
       } finally {
@@ -42307,68 +42333,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           if (isXiaohongshuMediaFailure(error)) throw createXiaohongshuMediaUnavailableError(error);
           throw error;
         }
-        const directFileId = String(options.fileID || options.audioFileID || "").trim();
-        const directDouyinUrlAllowed = options.allowCloudUrlFallback === true && (isDouyinUrl(String(options.sourceUrl || "")) || isDouyinUrl(audioUrl));
-        if (!directFileId && !directDouyinUrlAllowed) throw error;
-        return await this.runCloudFallbackTranscription(audioUrl, {
-          ...options,
-          localError: error && error.message ? error.message : String(error || ""),
-          source: options.source || "local"
-        });
+        throw error;
       }
     }
     throw new Error("未配置可用的音频转写方案");
-  }
-  async runCloudFallbackTranscription(audioUrl, options = {}) {
-    const binding = options.binding || this.getActiveBindings()[0] || null;
-    if (!binding) {
-      throw new Error(`${options.localError || "本地转写失败"}；云端兜底失败：未绑定小程序`);
-    }
-    this.showSyncProgress({
-      stage: "transcribing",
-      title: options.title || "",
-      message: "本地转写失败，正在尝试云端兜底"
-    });
-    const fileID = String(options.fileID || "").trim();
-    if (!fileID && !options.allowCloudUrlFallback) {
-      throw new Error(`${options.localError || "本地转写失败"}；云端兜底失败：缺少云端文件 ID`);
-    }
-    try {
-      const requestBody = {
-        durationSeconds: options.durationSeconds || 60,
-        localError: options.localError || "",
-        source: options.source || "local",
-        title: options.title || ""
-      };
-      if (fileID) {
-        requestBody.fileID = fileID;
-      } else {
-        requestBody.audioUrl = audioUrl;
-      }
-      const payload = await this.requestJson("/transcriptions/cloud", "POST", requestBody, binding, {
-        signal: options.signal || null
-      });
-      throwIfAborted(options.signal || null);
-      const data = payload && payload.data ? payload.data : {};
-      const transcription = String(data.transcription || "").trim();
-      if (!transcription) {
-        throw new Error("云端兜底返回空转写结果");
-      }
-      return {
-        transcription,
-        source: "local-cloud-fallback",
-        cloudProvider: data.provider || "cloud",
-        cloudRequestId: data.requestId || "",
-        cloudUsedSeconds: Number(data.usedSeconds) || 0,
-        cloudRemainingSeconds: Number(data.remainingSeconds) || 0
-      };
-    } catch (cloudError) {
-      if (isAbortError(cloudError) || options.signal && options.signal.aborted) {
-        throw createAbortError();
-      }
-      const cloudMessage = cloudError && cloudError.message ? cloudError.message : String(cloudError || "");
-      throw new Error(`${options.localError || "本地转写失败"}；云端兜底失败：${cloudMessage}`);
-    }
   }
   async runLocalTranscription(audioUrl, options = {}) {
     const requestedOwner = options.operatorNode === true ? "operator" : "foreground";
@@ -44179,22 +44147,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const getCandidates = /* @__PURE__ */ __name(() => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
     const candidates = getCandidates();
     if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
-    const fallbackGate = !candidates.length && this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding ? await this.evaluateCloudFallbackUserGate({
-      binding,
-      requireDouyinLogin: true,
-      requireDouyinResolver: true
-    }) : null;
+    const fallbackSourceType = isDouyinUrl(url) ? "douyin_url" : isXiaohongshuUrl(url) ? "xiaohongshu_url" : "";
+    const fallbackGate = !candidates.length && this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding, requireDouyinLogin: true, requireDouyinResolver: true } : { binding }) : null;
     if (!candidates.length) {
       if (fallbackGate && fallbackGate.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
-            sourceType: "douyin_url",
+            sourceType: fallbackSourceType,
             sourceUrl: url,
             recordId: getRecordId(record),
             retryCount: record.retryCount,
             title: title || metadata.title || "",
             durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
-            localError: noMediaError || "抖音媒体地址获取失败",
+            localError: noMediaError || (fallbackSourceType === "douyin_url" ? "抖音媒体地址获取失败" : "小红书媒体地址获取失败"),
             provider: this.settings.aiProvider || "",
             binding,
             signal
@@ -44217,6 +44182,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-ready")
               })
             };
+          }
+          if (job.status === "succeeded" && job.content) {
+            return this.buildCloudFallbackContentRecord(record, job, { url });
           }
           throw createCloudFallbackPendingError(job, noMediaError);
         } catch (cloudError) {
@@ -44269,20 +44237,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         try {
           const candidateUrl = candidate.url;
           const candidateDecryptKey = String(candidate.decryptKey || candidate.decodeKey || "").trim();
-          const useCloudForWebpage = isDouyinUrl(url) && !candidateDecryptKey && (metadata.transcriptionMode === "cloud" || metadata.cloudTranscriptionRequested === true);
           if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.transcriptionStarted = true;
-          const result = useCloudForWebpage ? await this.runCloudFallbackTranscription(candidateUrl, {
-            binding,
-            title: title || metadata.title || "",
-            source: source || "media-url",
-            localError: "user selected cloud transcription",
-            allowCloudUrlFallback: true,
-            signal,
-            onMediaDownloadDiagnostic: reportMediaDownloadAttempt
-          }) : await this.runConfiguredTranscription(candidateUrl, {
-            // No cloud URL fallback here: the Douyin fallback is submitted by
-            // the caller gate after Pro/binding checks, and no other platform
-            // may use the cloud worker at all.
+          const result = await this.runConfiguredTranscription(candidateUrl, {
             title: metadata.title || "",
             source: source || "media-url",
             sourceUrl: url,
@@ -44390,11 +44346,11 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw error;
       }
       let finalError = error;
-      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && isDouyinUrl(url) && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate({ binding }) : null;
+      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate({ binding }) : null;
       if (fallbackGate2 && fallbackGate2.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
-            sourceType: "douyin_url",
+            sourceType: fallbackSourceType,
             sourceUrl: url,
             recordId: getRecordId(record),
             retryCount: record.retryCount,
@@ -44424,6 +44380,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
                 mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-ready")
               })
             };
+          }
+          if (job.status === "succeeded" && job.content) {
+            return this.buildCloudFallbackContentRecord(record, job, { url });
           }
           throw createCloudFallbackPendingError(job, error.message || String(error));
         } catch (cloudError) {
@@ -46102,7 +46061,7 @@ ${finalized.markdown}
           extractedXiaohongshu = extractXiaohongshuMarkdownFromHtml(html2, xiaohongshuIdentityUrl, metadata.shareText || record.content || "", {
             includeComments: false
           });
-          isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true;
+          isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true || Boolean(String(extractedXiaohongshu.videoUrl || "").trim());
           if (extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true) {
             mediaUrls = extractedXiaohongshu.videoUrl ? [extractedXiaohongshu.videoUrl] : [];
             mediaUrl = mediaUrls[0] || "";
@@ -46190,7 +46149,7 @@ ${finalized.markdown}
               mergeableXiaohongshuExtractions,
               bestRenderedXiaohongshuExtraction
             );
-            isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true;
+            isVideoIntent = isVideoIntent || extractedXiaohongshu.isVideoNote === true || Boolean(String(extractedXiaohongshu.videoUrl || "").trim());
             html2 = bestRenderedXiaohongshuHtml;
             xiaohongshuIdentityUrl = bestRenderedXiaohongshuUrl || xiaohongshuIdentityUrl;
             mediaUrls = extractedXiaohongshu.xiaohongshuPrimaryNoteMatched === true ? extractedXiaohongshu.videoUrl ? [extractedXiaohongshu.videoUrl] : [] : mediaUrls;
