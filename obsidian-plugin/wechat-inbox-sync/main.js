@@ -13872,10 +13872,14 @@ var require_transcript_segment_utils = __commonJS({
     }
     __name(formatTranscriptTimestamp, "formatTranscriptTimestamp");
     var BLOCK_MAX_CHARS = 80;
+    var BLOCK_SOFT_MAX_CHARS = 140;
     var BLOCK_MAX_DURATION_MS = 3e4;
     var BLOCK_GAP_BREAK_MS = 1200;
     var CJK_PATTERN = /[　-〿㐀-鿿＀-￯]$/;
     var CJK_START_PATTERN = /^[　-〿㐀-鿿＀-￯]/;
+    var CJK_ANY_PATTERN = /[　-〿㐀-鿿＀-￯]/;
+    var SENTENCE_END_PATTERN = /[。！？!?…；;]$/;
+    var QUESTION_TAIL_PATTERN = /(吗|呢|吧|么|嘛|对不对|是不是|好不好|行不行|有没有|能不能|可不可以)$/;
     function joinSegmentTexts(left, right) {
       const a = String(left || "");
       const b = String(right || "");
@@ -13884,13 +13888,33 @@ var require_transcript_segment_utils = __commonJS({
       return CJK_PATTERN.test(a) || CJK_START_PATTERN.test(b) ? `${a}${b}` : `${a} ${b}`;
     }
     __name(joinSegmentTexts, "joinSegmentTexts");
+    function hasCjk(text) {
+      return CJK_ANY_PATTERN.test(String(text || ""));
+    }
+    __name(hasCjk, "hasCjk");
+    function punctuationForGap(gapMs, previousText) {
+      if (!previousText || SENTENCE_END_PATTERN.test(String(previousText).trim())) return "";
+      if (gapMs >= 650) return "。";
+      if (gapMs >= 300) return "，";
+      return "";
+    }
+    __name(punctuationForGap, "punctuationForGap");
+    function ensureTerminalPunctuation(text) {
+      const trimmed = String(text || "").trim();
+      if (!trimmed || !hasCjk(trimmed) || SENTENCE_END_PATTERN.test(trimmed)) return trimmed;
+      return trimmed + (QUESTION_TAIL_PATTERN.test(trimmed) ? "？" : "。");
+    }
+    __name(ensureTerminalPunctuation, "ensureTerminalPunctuation");
     function groupTranscriptSegments(value) {
       const segments = normalizeTranscriptSegments2(value);
       const blocks = [];
       let current = null;
       for (const segment of segments) {
-        const startsNewBlock = !current || segment.speaker && current.speaker && segment.speaker !== current.speaker || !current.speaker && segment.speaker || segment.startMs - current.endMs >= BLOCK_GAP_BREAK_MS || segment.startMs - current.startMs >= BLOCK_MAX_DURATION_MS || current.text.length + segment.text.length > BLOCK_MAX_CHARS;
+        const gap = current ? segment.startMs - current.endMs : 0;
+        const wouldOverflow = current && current.text.length + segment.text.length > BLOCK_MAX_CHARS;
+        const startsNewBlock = !current || segment.speaker && current.speaker && segment.speaker !== current.speaker || !current.speaker && segment.speaker || gap >= BLOCK_GAP_BREAK_MS || segment.startMs - current.startMs >= BLOCK_MAX_DURATION_MS || wouldOverflow && (SENTENCE_END_PATTERN.test(current.text.trim()) || current.text.length >= BLOCK_SOFT_MAX_CHARS);
         if (startsNewBlock) {
+          if (current) current.text = ensureTerminalPunctuation(current.text);
           current = {
             startMs: segment.startMs,
             endMs: segment.endMs,
@@ -13900,18 +13924,22 @@ var require_transcript_segment_utils = __commonJS({
           blocks.push(current);
           continue;
         }
-        current.text = joinSegmentTexts(current.text, segment.text);
+        const mark = hasCjk(current.text) ? punctuationForGap(gap, current.text) : "";
+        current.text = mark ? `${current.text}${mark}${segment.text}` : joinSegmentTexts(current.text, segment.text);
         current.endMs = Math.max(current.endMs, segment.endMs);
       }
+      if (current) current.text = ensureTerminalPunctuation(current.text);
       return blocks;
     }
     __name(groupTranscriptSegments, "groupTranscriptSegments");
     function buildTranscriptSegmentsMarkdown2(value) {
       const blocks = groupTranscriptSegments(value);
       if (!blocks.length) return "";
+      const speakers = new Set(blocks.map((block) => block.speaker).filter(Boolean));
+      const showSpeakers = speakers.size > 1;
       const lines = blocks.map((block) => {
         const stamp = `[${formatTranscriptTimestamp(block.startMs)}]`;
-        const speaker = block.speaker ? `${block.speaker}：` : "";
+        const speaker = showSpeakers && block.speaker ? `${block.speaker}：` : "";
         return `- ${stamp} ${speaker}${block.text}`;
       });
       return ["## 分段转写", "", ...lines, ""].join("\n");
@@ -22048,7 +22076,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.202";
+var PLUGIN_RUNTIME_VERSION = "1.3.203";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
