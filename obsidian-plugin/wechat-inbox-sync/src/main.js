@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.201';
+const PLUGIN_RUNTIME_VERSION = '1.3.202';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -22733,6 +22733,26 @@ class WechatObsidianInboxPlugin extends Plugin {
       candidates.push(candidate);
     };
     const awemeId = extractDouyinAwemeId(pageUrl);
+    // Direct first: the public share page usually carries the media without
+    // any account, so a node that happens to have a cookie must not start from
+    // it. The logged-in session below is the second attempt, not the first.
+    if (awemeId) {
+      for (const shareUrl of getDouyinMobileSharePageUrls(awemeId)) {
+        throwIfAborted(signal);
+        try {
+          const response = await requestUrl({
+            url: shareUrl,
+            method: 'GET',
+            headers: getDouyinMobileShareRequestHeaders(shareUrl),
+          });
+          extractDouyinMediaUrlsFromShareHtml(String((response && response.text) || ''), awemeId)
+            .forEach(addCandidate);
+          if (candidates.length) break;
+        } catch (error) {
+          if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+        }
+      }
+    }
     if (awemeId && typeof this.fetchDouyinMediaResolutionWithSession === 'function') {
       try {
         const sessionResolution = await this.fetchDouyinMediaResolutionWithSession(pageUrl, awemeId);
@@ -26877,14 +26897,26 @@ class WechatObsidianInboxPlugin extends Plugin {
           const noteId = noteIdMatch ? noteIdMatch[1] : '';
           let noteContent = null;
           if (noteId) {
-            for (const candidateUrl of [redirectedUrl, url].filter(Boolean)) {
+            // A note page serves its body only to a logged-in session, so the
+            // logged-in fetch comes first and the anonymous one is a second
+            // chance for pages that are public anyway.
+            const noteShareUrl = `https://www.iesdouyin.com/share/note/${noteId}/?from_ssr=1`;
+            const notePageHeaders = {
+              ...getSocialRequestHeaders(noteShareUrl),
+              'User-Agent': DOUYIN_MOBILE_SHARE_USER_AGENT,
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            };
+            for (const pageUrl of [noteShareUrl, redirectedUrl, url].filter(Boolean)) {
               throwIfAborted(signal);
               try {
-                const response = await requestUrl({
-                  url: candidateUrl,
-                  method: 'GET',
-                  headers: getSocialRequestHeaders(candidateUrl),
-                });
+                const html = await readSessionFetchText(getDouyinSession(), pageUrl, notePageHeaders);
+                noteContent = extractDouyinNoteContent(html, noteId);
+                if (noteContent) break;
+              } catch (noteFetchError) {
+                if (isAbortError(noteFetchError)) throw noteFetchError;
+              }
+              try {
+                const response = await requestUrl({ url: pageUrl, method: 'GET', headers: notePageHeaders });
                 noteContent = extractDouyinNoteContent(String((response && response.text) || ''), noteId);
                 if (noteContent) break;
               } catch (noteFetchError) {
@@ -26912,6 +26944,17 @@ class WechatObsidianInboxPlugin extends Plugin {
                 conversionNote: '抖音图文笔记已按内容保存',
               },
             };
+          }
+          // The page yielded nothing. Decide what the user can act on: without
+          // a Douyin login the page is only a login shell, so the record says
+          // so instead of pretending the note was saved. The cloud is never
+          // asked here - a local login is the precondition to fix first.
+          let douyinLoggedIn = false;
+          try { douyinLoggedIn = (await this.checkDouyinLogin()) === true; } catch (_) { douyinLoggedIn = false; }
+          if (!douyinLoggedIn) {
+            const loginError = new Error('抖音图文笔记需要先登录抖音：当前未登录或登录已失效。请在插件设置中完成抖音登录后重试。');
+            loginError.code = 'DOUYIN_LOGIN_REQUIRED';
+            throw loginError;
           }
           const message = douyinDiagnostic.failureMessage('DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
           const failureDiagnostic = douyinDiagnostic.sanitize({
@@ -28011,15 +28054,13 @@ class WechatObsidianInboxPlugin extends Plugin {
               ? '插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。'
             : douyinDiagnostic.failureMessage(douyinFailureCode));
           if (this.settings.cloudFallbackEnabled === true && binding) {
-            // A stale local cookie is a property of this machine's browser, not
-            // of the account: the operator node resolves the link with its own
-            // logged-in session. Only a genuinely logged-out user has to log in
-            // first, because the node works on the same platform family.
-            const localAuthOnlyFailure = douyinFailureCode === 'DOUYIN_COOKIE_REFRESH_REQUIRED'
-              || douyinFailureCode === 'DOUYIN_CHALLENGE';
+            // A local login or cookie state is the user's own gap and is fixed
+            // on this machine, not by spending a paid operator node. The user
+            // asked for exactly this order: first make Douyin work locally
+            // (login / cookie), and only then let the cloud take over.
             const fallbackGate = await this.evaluateCloudFallbackUserGate({
               binding,
-              requireDouyinLogin: !localAuthOnlyFailure,
+              requireDouyinLogin: true,
               requireDouyinResolver: true,
               pluginDouyinLogin: hasPluginDouyinLogin,
             });
