@@ -52,6 +52,27 @@ function redactError(error) {
   return { code };
 }
 
+// The server stores only code, message, retryable and stage, so a bare
+// OPERATOR_NODE_FAILED leaves both the operator and the user guessing whether
+// the node lacked a login, hit risk control, or could not reach the platform.
+// The reason below is a fixed vocabulary derived from the error - never the
+// raw message, which can carry URLs, cookies or page fragments.
+const FAILURE_REASON_PATTERNS = [
+  [/LOGIN|COOKIE|未登录|登录/i, 'login-required'],
+  [/RISK|VERIFY|CAPTCHA|风控|验证/i, 'risk-control'],
+  [/NOT_FOUND|NOTFOUND|NOT_FOUND|UNDELIVER|INVALID|失效|不存在|已删除/i, 'content-unavailable'],
+  [/UNSUPPORTED|不支持/i, 'unsupported-content'],
+  [/TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|ECONNREFUSED|socket|network|网络/i, 'network'],
+  [/UPLOAD|SIGNED|PUT_/i, 'upload'],
+  [/ASR|WHISPER|TRANSCRIB/i, 'transcription'],
+];
+
+function classifyFailureReason(error) {
+  const text = `${String(error && error.code || '')} ${String(error && error.name || '')} ${String(error && error.message || '')}`;
+  const match = FAILURE_REASON_PATTERNS.find(([pattern]) => pattern.test(text));
+  return match ? match[1] : 'unknown';
+}
+
 function throwIfAborted(signal) {
   if (signal && signal.aborted) throw nodeError('OPERATOR_NODE_CANCELLED', '运营节点任务已取消', { name: 'AbortError' });
 }
@@ -377,7 +398,7 @@ function createOperatorMediaNode({
       message: shutdown ? '运营节点已停止，任务可由其他节点继续'
         : error && error.linkExpired === true && String(error.message || '').trim()
           ? String(error.message).trim()
-          : '运营节点任务处理失败',
+          : `运营节点任务处理失败（${String(stage || 'unknown').slice(0, 32)}：${classifyFailureReason(error)}）`,
       // A retired share link is answered by asking the user for a new one; every
       // other failure may succeed on another node or a later attempt.
       retryable: error && error.linkExpired === true ? false : true,
@@ -644,4 +665,5 @@ module.exports = {
   readOperatorNodeConfig,
   requestJsonViaNode,
   createOperatorMediaNode,
+  classifyFailureReason,
 };

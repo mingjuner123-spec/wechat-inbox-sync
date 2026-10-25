@@ -1,0 +1,115 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const Module = require('node:module');
+
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'plugin-failure-reduction-'));
+os.homedir = () => home;
+const originalLoad = Module._load;
+Module._load = function(name, ...args) {
+  if (name === 'obsidian') return {
+    Plugin: class {}, PluginSettingTab: class {}, Setting: class {}, Modal: class {},
+    Notice: class {}, requestUrl: async () => { throw new Error('Unexpected network'); },
+  };
+  return originalLoad.call(this, name, ...args);
+};
+const Plugin = require('../obsidian-plugin/wechat-inbox-sync/main');
+Module._load = originalLoad;
+const h = Plugin.__test;
+const { classifyFailureReason } = require('../obsidian-plugin/wechat-inbox-sync/src/operator-media-node');
+
+function run() {
+  // 1. Only a strictly newer numeric version is an update; a pre-release
+  // suffix never makes a build look newer.
+  assert.equal(h.isNewerPluginVersion('1.3.200', '1.3.199'), true);
+  assert.equal(h.isNewerPluginVersion('1.4.0', '1.3.199'), true);
+  assert.equal(h.isNewerPluginVersion('1.3.199', '1.3.199'), false);
+  assert.equal(h.isNewerPluginVersion('1.3.199', '1.3.200'), false);
+  assert.equal(h.isNewerPluginVersion('1.3.9', '1.3.10'), false);
+  assert.equal(h.isNewerPluginVersion('', '1.3.199'), false);
+  assert.equal(h.isNewerPluginVersion('not-a-version', '1.3.199'), false);
+
+  // 2. A Douyin note page carries its description and image list in the router
+  // state; the extractor turns them into a content note instead of a failed
+  // transcription.
+  {
+    const noteId = '7281122334455667788';
+    const page = `<html><body><script>window._ROUTER_DATA = ${JSON.stringify({
+      loaderData: {
+        [`note_${noteId}`]: {
+          videoInfoRes: {
+            item_list: [{
+              aweme_id: noteId,
+              desc: '今天分享三个整理笔记的小技巧 #效率',
+              item_title: '整理笔记的小技巧',
+              author: { nickname: '整理研究所' },
+              images: [
+                { url_list: ['https://p3.douyinpic.com/one.jpg'] },
+                { url_list: ['https://p3.douyinpic.com/two.jpg'] },
+              ],
+            }],
+          },
+        },
+      },
+    })};</script></body></html>`;
+    const extracted = h.extractDouyinNoteContent(page, noteId);
+    assert.ok(extracted, 'the note page must yield content');
+    assert.equal(extracted.title, '整理笔记的小技巧');
+    assert.equal(extracted.author, '整理研究所');
+    assert.deepEqual(extracted.imageUrls, [
+      'https://p3.douyinpic.com/one.jpg',
+      'https://p3.douyinpic.com/two.jpg',
+    ]);
+    assert.match(extracted.markdown, /整理笔记的小技巧|今天分享三个整理笔记/);
+    assert.match(extracted.markdown, /!\[抖音笔记图片 1\]\(https:\/\/p3\.douyinpic\.com\/one\.jpg\)/);
+  }
+
+  // 3. A page with no matching detail (login wall, challenge page) yields
+  // nothing, so the caller can still save the link instead of inventing text.
+  {
+    assert.equal(h.extractDouyinNoteContent('<html><body>验证</body></html>', '7281122334455667788'), null);
+    assert.equal(h.extractDouyinNoteContent('', '7281122334455667788'), null);
+  }
+
+  // 4. Two notes are the same source only when host and path agree; tracking
+  // parameters and a trailing slash must not create a duplicate.
+  assert.equal(
+    h.normalizeNoteSourceIdentity('https://www.xiaohongshu.com/explore/abc?xsec_token=xyz'),
+    h.normalizeNoteSourceIdentity('https://www.xiaohongshu.com/explore/abc/'),
+  );
+  assert.notEqual(
+    h.normalizeNoteSourceIdentity('https://www.xiaohongshu.com/explore/abc'),
+    h.normalizeNoteSourceIdentity('https://www.xiaohongshu.com/explore/def'),
+  );
+
+  // 5. The writer reads the existing note's own source link before deciding
+  // that a repeat sync is a duplicate.
+  {
+    const reads = new Map([
+      ['dup.md', '---\ntitle: 笔记\nurl: https://www.xiaohongshu.com/explore/abc\n---\n正文'],
+      ['other.md', '---\ntitle: 别的\n---\n见 https://example.com/a'],
+    ]);
+    const adapter = { read: async (filePath) => reads.get(path.basename(filePath)) || '' };
+    return (async () => {
+      assert.equal(
+        await h.readNoteSourceIdentity(adapter, '/vault/dup.md'),
+        h.normalizeNoteSourceIdentity('https://www.xiaohongshu.com/explore/abc'),
+      );
+      assert.equal(await h.readNoteSourceIdentity(adapter, '/vault/other.md'), h.normalizeNoteSourceIdentity('https://example.com/a'));
+      assert.equal(await h.readNoteSourceIdentity(adapter, '/vault/missing.md'), '');
+
+      // 6. Operator node failures now carry a reason bucket instead of a bare
+      // code, so the cloud job and the user can tell the causes apart.
+      assert.equal(classifyFailureReason(Object.assign(new Error('需要更新 Cookie'), { code: 'DOUYIN_COOKIE_REFRESH_REQUIRED' })), 'login-required');
+      assert.equal(classifyFailureReason(Object.assign(new Error('安全验证'), { code: 'DOUYIN_CHALLENGE' })), 'risk-control');
+      assert.equal(classifyFailureReason(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })), 'network');
+      assert.equal(classifyFailureReason(Object.assign(new Error('笔记已删除'), { code: 'XHS_NOT_FOUND' })), 'content-unavailable');
+      assert.equal(classifyFailureReason(new Error('???')), 'unknown');
+
+      console.log('plugin failure reduction tests passed');
+    })();
+  }
+}
+
+run().catch((error) => { console.error(error); process.exitCode = 1; });

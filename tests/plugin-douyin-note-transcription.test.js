@@ -30,7 +30,8 @@ function makePlugin(label) {
   fs.mkdirSync(root, { recursive: true });
   const plugin = new Plugin();
   plugin.settings = { inboxDir: 'Inbox', noteSaveMode: 'root', notePropertyFields: [], aiProvider: 'off' };
-  plugin.app = { vault: { adapter: {} } };
+  plugin.__noteRoot = root;
+  plugin.app = { vault: { adapter: makeVaultAdapter(root) } };
   plugin.showSyncProgress = () => {};
   plugin.ensureFolder = async () => {};
   plugin.nextRecordTitle = async () => '抖音笔记';
@@ -44,40 +45,47 @@ function makePlugin(label) {
   return { plugin, root };
 }
 
-async function assertWriteFailure(plugin, sourceUrl, expectedRequests) {
+function makeVaultAdapter(root) {
+  const full = (vaultPath) => path.join(root, String(vaultPath || '').replace(/^\/+/, ''));
+  return {
+    write: async (vaultPath, data) => {
+      fs.mkdirSync(path.dirname(full(vaultPath)), { recursive: true });
+      fs.writeFileSync(full(vaultPath), data);
+    },
+    read: async (vaultPath) => fs.readFileSync(full(vaultPath), 'utf8'),
+    exists: async (vaultPath) => fs.existsSync(full(vaultPath)),
+    remove: async (vaultPath) => { try { fs.unlinkSync(full(vaultPath)); } catch (_) {} },
+    getFullPath: (vaultPath) => full(vaultPath),
+  };
+}
+
+function readWrittenNotes(root) {
+  const results = [];
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const absolute = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(absolute);
+      else if (entry.name.endsWith('.md')) results.push(fs.readFileSync(absolute, 'utf8'));
+    }
+  };
+  visit(root);
+  return results;
+}
+
+async function assertNoteSaved(plugin, sourceUrl, pageHtml, expectedText) {
   let calls = 0;
-  requestUrl = async () => { calls += 1; return { status: 200 }; };
+  requestUrl = async () => { calls += 1; return { status: 200, text: pageHtml }; };
   const record = {
     _id: `note-${Math.random()}`, type: 'webpage', createdAt: new Date().toISOString(),
     content: sourceUrl, metadata: { url: sourceUrl, webpageMediaType: 'audio_video' },
   };
-  let failure;
-  await assert.rejects(plugin.writeRecord(record, new Date().toISOString()), error => {
-    failure = error;
-    return error.message === diagnostic.failureMessage('DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
-  });
-  assert.equal(calls, expectedRequests, 'no page GET or media download should follow a recognized note route');
-  assert.equal(failure.code, 'TRANSCRIPTION_FAILED');
-  assert.equal(failure.diagnostic.failureCode, 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
-  assert.equal(failure.diagnostic.stages[0].stage, 'note-route');
-  assert.equal(failure.diagnostic.stages[0].error.code, 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
-  assert.equal(failure.diagnostic.cookieState, 'unknown');
-
-  let queuedEvent;
-  plugin.queueSyncDiagnosticEvent = event => {
-    queuedEvent = reporter.normalizeDiagnosticEvent(event, { now: new Date().toISOString() });
-    return { queued: true };
-  };
-  assert.equal(plugin.queueSyncDiagnosticFailure({
-    recordId: record._id, attemptId: 'note-attempt', diagnosticId: 'note-diagnostic',
-    binding: { token: 'fixture-token' }, error: failure, stage: 'processing', retryCount: 0, sourceUrl,
-  }).queued, true);
-  const report = JSON.parse(queuedEvent.technicalReport.text);
-  assert.equal(report.failure.message, diagnostic.failureMessage('DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED'));
-  assert.equal(report.failure.mediaResolutionDiagnostic.failureCode, 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
-  assert.ok(report.failure.mediaResolutionDiagnostic.stages.some(stage => stage.stage === 'note-route'));
-  assert.equal(queuedEvent.sourceUrl, sourceUrl.split('?')[0]);
-  assert.doesNotMatch(JSON.stringify(queuedEvent), /fixture-token/);
+  const saved = await plugin.writeRecord(record, new Date().toISOString());
+  assert.ok(saved && saved.filePath, 'a Douyin note must be saved, not reported as a transcription failure');
+  assert.ok(calls >= 1, 'the note page itself is fetched once for its content');
+  const notes = readWrittenNotes(plugin.__noteRoot);
+  assert.equal(notes.length, 1);
+  assert.match(notes[0], expectedText);
+  return notes[0];
 }
 
 async function run() {
@@ -94,21 +102,45 @@ async function run() {
   assert.equal(diagnostic.noteRoute('https://www.douyin.com/video/1234567890123456789'), null);
   assert.equal(diagnostic.sanitize({ failureCode: 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED' }).failureCode, 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
 
+  const notePage = (noteId, description, images) => `<html><body><script>window._ROUTER_DATA = ${JSON.stringify({
+    loaderData: { [`note_${noteId}`]: { videoInfoRes: { item_list: [{
+      aweme_id: noteId,
+      desc: description,
+      item_title: '抖音图文标题',
+      images: images.map((url) => ({ url_list: [url] })),
+    }] } } },
+  })};</script></body></html>`;
+
   const direct = makePlugin('direct');
-  await assertWriteFailure(direct.plugin, note, 0);
+  const directNote = await assertNoteSaved(
+    direct.plugin,
+    note,
+    notePage('1234567890123456789', '今天的图文笔记正文 #生活', ['https://p3.douyinpic.com/a.jpg']),
+    /今天的图文笔记正文/,
+  );
+  assert.match(directNote, /!\[抖音笔记图片 1\]\(https:\/\/p3\.douyinpic\.com\/a\.jpg\)/);
+  assert.doesNotMatch(directNote, /暂不支持转写/, 'a readable note is content, never an unsupported-transcription failure');
+
+  const emptyNote = makePlugin('empty-note');
+  const emptySaved = await assertNoteSaved(
+    emptyNote.plugin,
+    note,
+    '<html><body>验证</body></html>',
+    /原始链接/,
+  );
+  assert.ok(emptySaved.includes(note), 'the link is kept when the page yields no text');
 
   const short = makePlugin('short');
   const replies = [
     { statusCode: 302, headers: { location: 'https://www.iesdouyin.com/share/note/1234567890123456789' } },
     { statusCode: 404, headers: {} },
   ];
-  const modeledGetResponse = { statusCode: 200, body: '<html>note page</html>' };
   let headCalls = 0;
   let attemptedGetCalls = 0;
   https.request = (_url, options, callback) => {
     if (options.method === 'GET') {
       attemptedGetCalls += 1;
-      return { end() { setImmediate(() => callback({ statusCode: modeledGetResponse.statusCode, headers: {}, resume() {} })); } };
+      return { end() { setImmediate(() => callback({ statusCode: 200, headers: {}, resume() {} })); } };
     }
     assert.equal(options.method, 'HEAD');
     headCalls += 1;
@@ -118,10 +150,15 @@ async function run() {
     req.end = () => setImmediate(() => callback({ ...replies.shift(), resume() {} }));
     return req;
   };
-  await assertWriteFailure(short.plugin, 'https://v.douyin.com/fixture-shortlink/', 0);
-  assert.equal(headCalls, 2, 'short-link resolver should follow the single 302 to a terminal HEAD 404');
-  assert.equal(modeledGetResponse.statusCode, 200, 'fixture models a note page whose GET is successful despite HEAD 404');
-  assert.equal(attemptedGetCalls, 0, 'recognized note must stop before GET, independent of the GET-200 page response');
+  await assertNoteSaved(
+    short.plugin,
+    'https://v.douyin.com/fixture-shortlink/',
+    notePage('1234567890123456789', '短链图文正文', ['https://p3.douyinpic.com/b.jpg']),
+    /短链图文正文/,
+  );
+  assert.ok(headCalls >= 1, 'short-link resolution still runs before the note page is read');
+  assert.equal(attemptedGetCalls, 0, 'the note page is read through requestUrl, never a raw GET');
+
   const videoShort = makePlugin('video-short');
   const videoReplies = [
     { statusCode: 302, headers: { location: 'https://www.douyin.com/video/1234567890123456789' } },

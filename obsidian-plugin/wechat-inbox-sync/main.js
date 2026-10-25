@@ -14817,6 +14817,21 @@ var require_operator_media_node = __commonJS({
       return { code };
     }
     __name(redactError, "redactError");
+    var FAILURE_REASON_PATTERNS = [
+      [/LOGIN|COOKIE|未登录|登录/i, "login-required"],
+      [/RISK|VERIFY|CAPTCHA|风控|验证/i, "risk-control"],
+      [/NOT_FOUND|NOTFOUND|NOT_FOUND|UNDELIVER|INVALID|失效|不存在|已删除/i, "content-unavailable"],
+      [/UNSUPPORTED|不支持/i, "unsupported-content"],
+      [/TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|ECONNREFUSED|socket|network|网络/i, "network"],
+      [/UPLOAD|SIGNED|PUT_/i, "upload"],
+      [/ASR|WHISPER|TRANSCRIB/i, "transcription"]
+    ];
+    function classifyFailureReason(error) {
+      const text = `${String(error && error.code || "")} ${String(error && error.name || "")} ${String(error && error.message || "")}`;
+      const match = FAILURE_REASON_PATTERNS.find(([pattern]) => pattern.test(text));
+      return match ? match[1] : "unknown";
+    }
+    __name(classifyFailureReason, "classifyFailureReason");
     function throwIfAborted2(signal) {
       if (signal && signal.aborted) throw nodeError("OPERATOR_NODE_CANCELLED", "运营节点任务已取消", { name: "AbortError" });
     }
@@ -15133,7 +15148,7 @@ var require_operator_media_node = __commonJS({
         backend: String(activeJob && activeJob.backend || "").trim() || void 0,
         error: {
           ...shutdown ? { code: "OPERATOR_NODE_STOPPED" } : redactError(error),
-          message: shutdown ? "运营节点已停止，任务可由其他节点继续" : error && error.linkExpired === true && String(error.message || "").trim() ? String(error.message).trim() : "运营节点任务处理失败",
+          message: shutdown ? "运营节点已停止，任务可由其他节点继续" : error && error.linkExpired === true && String(error.message || "").trim() ? String(error.message).trim() : `运营节点任务处理失败（${String(stage || "unknown").slice(0, 32)}：${classifyFailureReason(error)}）`,
           // A retired share link is answered by asking the user for a new one; every
           // other failure may succeed on another node or a later attempt.
           retryable: error && error.linkExpired === true ? false : true,
@@ -15386,7 +15401,8 @@ var require_operator_media_node = __commonJS({
       isOperatorNodeEnabled,
       readOperatorNodeConfig,
       requestJsonViaNode: requestJsonViaNode2,
-      createOperatorMediaNode: createOperatorMediaNode2
+      createOperatorMediaNode: createOperatorMediaNode2,
+      classifyFailureReason
     };
   }
 });
@@ -22032,7 +22048,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.199";
+var PLUGIN_RUNTIME_VERSION = "1.3.200";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -22196,6 +22212,8 @@ var NOTE_PROPERTY_FIELD_KEYS = [
 var DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
   settingsVersion: 2,
+  pluginUpdateCheckedAt: "",
+  pluginUpdateLatestVersion: "",
   token: "",
   pendingBindCode: "",
   pendingConnectionTicket: "",
@@ -25891,6 +25909,67 @@ function deriveDouyinTitleFromDescription(description = "") {
   return `${candidate.slice(0, 77).trim()}...`;
 }
 __name(deriveDouyinTitleFromDescription, "deriveDouyinTitleFromDescription");
+function collectDouyinNoteImageUrls(detail) {
+  const urls = [];
+  const push = /* @__PURE__ */ __name((value) => {
+    if (!value || urls.length >= 30) return;
+    if (typeof value === "string") {
+      if (/^https?:\/\//i.test(value) && !urls.includes(value)) urls.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(push);
+      return;
+    }
+    if (typeof value === "object") {
+      push(value.url_list || value.urlList || value.url || value.src);
+      if (value.display_image) push(value.display_image);
+      if (value.origin_image) push(value.origin_image);
+    }
+  }, "push");
+  push(detail && detail.images);
+  push(detail && detail.image_post_info && detail.image_post_info.images);
+  return urls;
+}
+__name(collectDouyinNoteImageUrls, "collectDouyinNoteImageUrls");
+function extractDouyinNoteContent(html, noteId) {
+  const source = String(html || "");
+  if (!source) return null;
+  const payloads = [];
+  try {
+    collectDouyinRouterStatePayloads(source).forEach((payload) => payloads.push(payload));
+  } catch (_) {
+  }
+  try {
+    collectDouyinStatePayloadsFromText(source).forEach((payload) => payloads.push(payload));
+  } catch (_) {
+  }
+  let detail = null;
+  for (const payload of payloads) {
+    detail = findDouyinDetailForAweme(payload, noteId);
+    if (detail) break;
+  }
+  if (!detail) {
+    try {
+      detail = extractDouyinDetailFromShareHtml(source, noteId);
+    } catch (_) {
+      detail = null;
+    }
+  }
+  if (!detail || typeof detail !== "object") return null;
+  const description = String(detail.desc || "").trim();
+  const imageUrls = collectDouyinNoteImageUrls(detail);
+  if (!description && !imageUrls.length) return null;
+  const title = String(detail.item_title || "").trim() || deriveDouyinTitleFromDescription(description) || "抖音笔记";
+  const author = String(detail.author && (detail.author.nickname || detail.author.name) || "").trim();
+  const markdown = [
+    description,
+    imageUrls.length ? "" : "",
+    ...imageUrls.map((imageUrl, index) => `![抖音笔记图片 ${index + 1}](${imageUrl})`)
+  ].filter((line, index) => line !== "" || index > 0).join("\n").trim();
+  return { title, description, author, imageUrls, markdown };
+}
+__name(extractDouyinNoteContent, "extractDouyinNoteContent");
 function isGenericDouyinTitle(title = "") {
   const compact = String(title || "").toLowerCase().replace(/[\s\-_|·•]+/g, "");
   return !compact || compact === "抖音" || compact === "douyin" || compact === "抖音短视频" || compact === "记录美好生活" || compact === "抖音记录美好生活";
@@ -36676,6 +36755,47 @@ function formatLocalComponentInstallFailureReason(error) {
   return cleanLines.slice(0, 6).join("\n") || "未知错误";
 }
 __name(formatLocalComponentInstallFailureReason, "formatLocalComponentInstallFailureReason");
+function isNewerPluginVersion(candidate, current) {
+  const parse = /* @__PURE__ */ __name((value) => String(value || "").trim().split("-")[0].split(".").map((part) => Number.parseInt(part, 10)).filter((part) => Number.isFinite(part)), "parse");
+  const next = parse(candidate);
+  const now = parse(current);
+  if (!next.length || !now.length) return false;
+  const length = Math.max(next.length, now.length);
+  for (let index = 0; index < length; index += 1) {
+    const left = next[index] || 0;
+    const right = now[index] || 0;
+    if (left > right) return true;
+    if (left < right) return false;
+  }
+  return false;
+}
+__name(isNewerPluginVersion, "isNewerPluginVersion");
+function normalizeNoteSourceIdentity(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = new URL(raw);
+    if (!["http:", "https:"].includes(parsed.protocol)) return raw.toLowerCase();
+    return `${parsed.hostname.toLowerCase()}${parsed.pathname.replace(/\/+$/, "")}`.toLowerCase();
+  } catch (error) {
+    return raw.toLowerCase();
+  }
+}
+__name(normalizeNoteSourceIdentity, "normalizeNoteSourceIdentity");
+async function readNoteSourceIdentity(adapter, filePath) {
+  try {
+    const content = await adapter.read(filePath);
+    const text = String(content || "").slice(0, 4096);
+    const frontmatter = text.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    const sourceMatch = frontmatter ? frontmatter[1].match(/^\s*(?:url|source|来源)\s*:\s*["']?([^"'\r\n]+)["']?\s*$/im) : null;
+    if (sourceMatch) return normalizeNoteSourceIdentity(sourceMatch[1]);
+    const inline = text.match(/https?:\/\/[^\s)"'<>]+/i);
+    return inline ? normalizeNoteSourceIdentity(inline[0]) : "";
+  } catch (error) {
+    return "";
+  }
+}
+__name(readNoteSourceIdentity, "readNoteSourceIdentity");
 var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin {
   ensureSerializedSaveData() {
     if (this.__serializedSaveData || typeof this.saveData !== "function") return;
@@ -36840,6 +36960,37 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       ...String(sourceUrl || "").trim() ? { sourceUrl: String(sourceUrl).trim() } : {}
     }, binding);
   }
+  // At most once a day, and only to decide whether to mention an update. Any
+  // failure (offline, blocked host, bad JSON) is silent: an update hint must
+  // never become its own source of errors.
+  async maybeCheckPluginUpdate() {
+    const now = Date.now();
+    const lastChecked = Date.parse(String(this.settings.pluginUpdateCheckedAt || "")) || 0;
+    if (now - lastChecked < 24 * 60 * 60 * 1e3) return;
+    this.settings.pluginUpdateCheckedAt = new Date(now).toISOString();
+    try {
+      await this.saveSettings();
+    } catch (_) {
+    }
+    try {
+      const response = await requestUrl({
+        url: "https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/manifest.json",
+        method: "GET",
+        throw: false
+      });
+      if (!response || response.status !== 200) return;
+      const parsed = JSON.parse(String(response.text || "{}"));
+      const latest = String(parsed && parsed.version || "").trim();
+      if (!latest || !isNewerPluginVersion(latest, PLUGIN_RUNTIME_VERSION)) return;
+      this.settings.pluginUpdateLatestVersion = latest;
+      try {
+        await this.saveSettings();
+      } catch (_) {
+      }
+      new Notice(`WeChat Inbox Sync ${latest} 已发布（当前 ${PLUGIN_RUNTIME_VERSION}）。请在“设置 → 第三方插件”中检查更新。`, 1e4);
+    } catch (_) {
+    }
+  }
   async onload() {
     this.ensureSerializedSaveData();
     const savedSettings = await this.loadData();
@@ -36953,6 +37104,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
     this.startAutoSync();
     this.getSyncDiagnosticReporter().kick();
+    void this.maybeCheckPluginUpdate().catch(() => {
+    });
   }
   async saveSettings(nextSettings) {
     this.ensureSerializedSaveData();
@@ -45467,6 +45620,44 @@ ${finalized.markdown}
         const redirectedUrl = redirectResult.url;
         const douyinNoteRoute = douyinDiagnostic.noteRoute(url) || douyinDiagnostic.noteRoute(redirectedUrl);
         if (douyinNoteRoute) {
+          const noteIdMatch = String(redirectedUrl || url).match(/\/note\/(\d{8,30})/) || String(url).match(/\/note\/(\d{8,30})/);
+          const noteId = noteIdMatch ? noteIdMatch[1] : "";
+          let noteContent = null;
+          if (noteId) {
+            for (const candidateUrl of [redirectedUrl, url].filter(Boolean)) {
+              throwIfAborted(signal);
+              try {
+                const response2 = await requestUrl({
+                  url: candidateUrl,
+                  method: "GET",
+                  headers: getSocialRequestHeaders(candidateUrl)
+                });
+                noteContent = extractDouyinNoteContent(String(response2 && response2.text || ""), noteId);
+                if (noteContent) break;
+              } catch (noteFetchError) {
+                if (isAbortError(noteFetchError)) throw noteFetchError;
+              }
+            }
+          }
+          if (noteContent) {
+            return {
+              ...record,
+              metadata: {
+                ...metadata,
+                title: metadata.title || noteContent.title || title || "抖音笔记",
+                author: metadata.author || noteContent.author || "",
+                url,
+                platform: "抖音",
+                contentCategory: "图文",
+                markdown: noteContent.markdown,
+                extractedDescription: metadata.extractedDescription || noteContent.description || "",
+                imageUrls: noteContent.imageUrls,
+                videoUrl: "",
+                conversionStatus: "success",
+                conversionNote: "抖音图文笔记已按内容保存"
+              }
+            };
+          }
           const message = douyinDiagnostic.failureMessage("DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED");
           const failureDiagnostic = douyinDiagnostic.sanitize({
             attemptId: douyinAttemptId,
@@ -45498,13 +45689,10 @@ ${finalized.markdown}
               title: metadata.title || title || "抖音笔记",
               url,
               platform: "抖音",
-              contentCategory: "笔记",
-              markdown: ["抖音笔记链接暂不支持转写。", "", `原始链接：${url}`, "", `> ${message}`].join("\n"),
-              transcriptionStatus: "failed",
-              transcriptionError: message,
-              transcriptionSource: "video",
-              conversionStatus: "failed",
-              conversionNote: message,
+              contentCategory: "图文",
+              markdown: ["抖音图文笔记：页面未返回可读正文，已保存链接。", "", `原始链接：${url}`, "", `> ${message}`].join("\n"),
+              conversionStatus: "success",
+              conversionNote: "抖音图文笔记已保存链接（正文未获取）",
               mediaResolutionDiagnostic: failureDiagnostic
             }
           };
@@ -46385,9 +46573,10 @@ ${finalized.markdown}
         if (isVideoIntent && isDouyinRecord) {
           let noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
           if (this.settings.cloudFallbackEnabled === true && binding) {
+            const localAuthOnlyFailure = douyinFailureCode === "DOUYIN_COOKIE_REFRESH_REQUIRED" || douyinFailureCode === "DOUYIN_CHALLENGE";
             const fallbackGate = await this.evaluateCloudFallbackUserGate({
               binding,
-              requireDouyinLogin: true,
+              requireDouyinLogin: !localAuthOnlyFailure,
               requireDouyinResolver: true,
               pluginDouyinLogin: hasPluginDouyinLogin
             });
@@ -47690,7 +47879,7 @@ ${finalized.markdown}
     });
     recordForMarkdown = noteIdentity.record;
     const displayTitle = noteIdentity.displayTitle || title;
-    const fileTitle = noteIdentity.titleSource ? await this.nextTitle(noteDir, noteIdentity.fileTitle) : title;
+    let fileTitle = noteIdentity.titleSource ? await this.nextTitle(noteDir, noteIdentity.fileTitle) : title;
     const recordUrl = String(recordForMarkdown && recordForMarkdown.metadata && recordForMarkdown.metadata.url || recordForMarkdown && recordForMarkdown.content || "").trim();
     const usePerNoteFolder = shouldStoreWebpageNoteInOwnFolder(
       recordUrl,
@@ -47715,9 +47904,28 @@ ${finalized.markdown}
     }
     const targetNoteDir = usePerNoteFolder ? normalizeVaultPath(`${noteDir}/${alignedImageFolder.folderName}`) : noteDir;
     if (usePerNoteFolder) await this.ensureFolder(targetNoteDir);
-    const filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
+    let filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     this.showSyncProgress({ ...progress, stage: "writing", title: fileTitle });
     const adapter = this.app.vault.adapter;
+    if (recordUrl && typeof adapter.exists === "function" && await adapter.exists(filePath)) {
+      const existingSource = await readNoteSourceIdentity(adapter, filePath);
+      if (existingSource && existingSource === normalizeNoteSourceIdentity(recordUrl)) {
+        return {
+          recordId: getRecordId(record),
+          filePath,
+          title: fileTitle,
+          committed: true,
+          duplicateSkipped: true,
+          conversionWarning: getRecordConversionWarning(recordForMarkdown),
+          mediaResolutionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.mediaResolutionDiagnostic || null : null,
+          conversionDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.conversionDiagnostic || null : null,
+          attachmentDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.attachmentDiagnostic || null : null,
+          feishuMediaDiagnostic: recordForMarkdown && recordForMarkdown.metadata ? recordForMarkdown.metadata.feishuMediaDiagnostic || null : null
+        };
+      }
+      fileTitle = await this.nextTitle(targetNoteDir, fileTitle);
+      filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
+    }
     const temporaryFilePath = normalizeVaultPath(
       `${targetNoteDir}/.wechat-inbox-sync-${crypto.randomBytes(12).toString("hex")}.tmp`
     );
@@ -49463,6 +49671,10 @@ WechatObsidianInboxPlugin.__test = {
   getChinaTimeParts,
   getDateFolderName,
   formatCreatedTime,
-  getTitleTimePart
+  getTitleTimePart,
+  isNewerPluginVersion,
+  extractDouyinNoteContent,
+  normalizeNoteSourceIdentity,
+  readNoteSourceIdentity
 };
 module.exports = WechatObsidianInboxPlugin;
