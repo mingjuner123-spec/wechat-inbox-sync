@@ -22048,7 +22048,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.200";
+var PLUGIN_RUNTIME_VERSION = "1.3.201";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -22212,8 +22212,6 @@ var NOTE_PROPERTY_FIELD_KEYS = [
 var DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
   settingsVersion: 2,
-  pluginUpdateCheckedAt: "",
-  pluginUpdateLatestVersion: "",
   token: "",
   pendingBindCode: "",
   pendingConnectionTicket: "",
@@ -36960,18 +36958,13 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       ...String(sourceUrl || "").trim() ? { sourceUrl: String(sourceUrl).trim() } : {}
     }, binding);
   }
-  // At most once a day, and only to decide whether to mention an update. Any
-  // failure (offline, blocked host, bad JSON) is silent: an update hint must
-  // never become its own source of errors.
+  // Once per app session, and only to decide whether to mention an update.
+  // Nothing is persisted: this check must never write settings, because a
+  // settings write is the one operation that can disturb a user's bindings.
+  // Any failure (offline, blocked host, bad JSON) is silent.
   async maybeCheckPluginUpdate() {
-    const now = Date.now();
-    const lastChecked = Date.parse(String(this.settings.pluginUpdateCheckedAt || "")) || 0;
-    if (now - lastChecked < 24 * 60 * 60 * 1e3) return;
-    this.settings.pluginUpdateCheckedAt = new Date(now).toISOString();
-    try {
-      await this.saveSettings();
-    } catch (_) {
-    }
+    if (this.__pluginUpdateChecked) return;
+    this.__pluginUpdateChecked = true;
     try {
       const response = await requestUrl({
         url: "https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/manifest.json",
@@ -36982,11 +36975,6 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       const parsed = JSON.parse(String(response.text || "{}"));
       const latest = String(parsed && parsed.version || "").trim();
       if (!latest || !isNewerPluginVersion(latest, PLUGIN_RUNTIME_VERSION)) return;
-      this.settings.pluginUpdateLatestVersion = latest;
-      try {
-        await this.saveSettings();
-      } catch (_) {
-      }
       new Notice(`WeChat Inbox Sync ${latest} 已发布（当前 ${PLUGIN_RUNTIME_VERSION}）。请在“设置 → 第三方插件”中检查更新。`, 1e4);
     } catch (_) {
     }
