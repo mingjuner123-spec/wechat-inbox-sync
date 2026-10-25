@@ -38,7 +38,7 @@ function makePlugin(label) {
   plugin.saveSourceMediaAttachment = async record => record;
   plugin.getConfiguredLocalAsrInstallRoot = () => root;
   plugin.getActiveBindings = () => [];
-  plugin.checkDouyinLogin = async () => { throw new Error('note route must stop before login/ASR resolution'); };
+  plugin.checkDouyinLogin = async () => true;
   plugin.fetchDouyinMediaResolutionWithSession = async () => { throw new Error('note route must stop before browser/API resolution'); };
   plugin.renderSocialMediaUrls = async () => { throw new Error('note route must stop before browser resolution'); };
   plugin.resolveDouyinMediaWithLocalResolver = async () => { throw new Error('note route must stop before yt-dlp'); };
@@ -129,6 +129,23 @@ async function run() {
     /原始链接/,
   );
   assert.ok(emptySaved.includes(note), 'the link is kept when the page yields no text');
+
+  // A logged-out user gets an actionable prompt, not a silent link-only note:
+  // the body of a Douyin note is only served to a logged-in session.
+  {
+    const loggedOut = makePlugin('logged-out');
+    loggedOut.plugin.checkDouyinLogin = async () => false;
+    let calls = 0;
+    requestUrl = async () => { calls += 1; return { status: 200, text: '<html><body></body></html>' }; };
+    await assert.rejects(
+      loggedOut.plugin.writeRecord({
+        _id: 'note-logged-out', type: 'webpage', createdAt: new Date().toISOString(),
+        content: note, metadata: { url: note, webpageMediaType: 'audio_video' },
+      }, new Date().toISOString()),
+      (error) => /登录抖音/.test(error.message) && error.retryable === true,
+    );
+    assert.equal(readWrittenNotes(loggedOut.plugin.__noteRoot).length, 0, 'nothing is saved without a readable body');
+  }
 
   const short = makePlugin('short');
   const replies = [
