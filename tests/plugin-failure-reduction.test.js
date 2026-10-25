@@ -107,6 +107,19 @@ function run() {
       assert.equal(classifyFailureReason(Object.assign(new Error('笔记已删除'), { code: 'XHS_NOT_FOUND' })), 'content-unavailable');
       assert.equal(classifyFailureReason(new Error('???')), 'unknown');
 
+      // 7. The update hint must never write settings: a settings write is what
+      // could disturb a user's bindings, and this check only shows a notice.
+      {
+        const plugin = new Plugin();
+        plugin.settings = { bindings: [{ token: 'PRO-1' }] };
+        let saved = 0;
+        plugin.saveSettings = async () => { saved += 1; };
+        plugin.showSyncProgress = () => {};
+        await plugin.maybeCheckPluginUpdate();
+        assert.equal(saved, 0, 'the version check must not persist settings');
+        assert.deepEqual(plugin.settings.bindings, [{ token: 'PRO-1' }]);
+      }
+
       console.log('plugin failure reduction tests passed');
     })();
   }
