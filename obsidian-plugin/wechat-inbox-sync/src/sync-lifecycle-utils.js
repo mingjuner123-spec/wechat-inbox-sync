@@ -347,17 +347,17 @@ function getSyncLifecycleOutcomeError(record) {
     return createSyncLifecycleOutcomeError('UNSUPPORTED_PLATFORM', '暂不支持此平台');
   }
   if (conversionStatus === 'wechat_captcha') {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信安全验证拦截');
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信安全验证拦截；可在插件命令「处理公众号访问验证」中完成验证后重试');
   }
 
   if (/mp\.weixin\.qq\.com\//.test(url)
     && /微信扫一扫可打开此内容/.test(markdown)
     && /使用完整服务|使用小程序/.test(markdown)) {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信仅返回打开引导页');
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：微信仅返回打开引导页；可在插件命令「处理公众号访问验证」中完成验证后重试');
   }
 
   if (/^https?:\/\/mp\.weixin\.qq\.com\//i.test(url) && isWechatArticleFailurePlaceholder(markdown)) {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取');
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取；可在插件命令「处理公众号访问验证」中完成验证后重试');
   }
 
   if (isLikelyWebpageShell(url, markdown)) {
