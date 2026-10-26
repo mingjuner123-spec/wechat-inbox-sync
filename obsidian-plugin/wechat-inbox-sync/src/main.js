@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.203';
+const PLUGIN_RUNTIME_VERSION = '1.3.204';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -17125,6 +17125,29 @@ function isNewerPluginVersion(candidate, current) {
   return false;
 }
 
+// The local transcribe script writes a run log next to its install root. When
+// another process holds that file, PowerShell's Add-Content fails and the whole
+// run aborts even though the audio itself was fine.
+const TRANSIENT_LOCAL_ASR_SCRIPT_PATTERN = /GetContentWriterArgumentError|Add-Content|being used by another process|EBUSY|EPERM|另一个进程|无法写入/i;
+
+function isTransientLocalAsrScriptError(error) {
+  if (!error || error.name === 'AbortError' || error.code === 'TRANSCRIPTION_NO_SPEECH') return false;
+  return TRANSIENT_LOCAL_ASR_SCRIPT_PATTERN.test(`${error.code || ''} ${error.message || ''}`);
+}
+
+// Raw script output is not a user-facing explanation. Name the outcome the user
+// can act on: a file with no speech is not a broken component.
+function normalizeLocalAsrFailure(error) {
+  if (!error || typeof error !== 'object') return error;
+  const message = String(error.message || '');
+  if (!/Whisper did not generate transcript text/i.test(message)) return error;
+  const next = new Error('本地转写没有得到任何文字：这段音视频可能是纯音乐、无声或背景音过强。换一段有人声的音频再试即可。');
+  next.code = error.code || 'TRANSCRIPTION_EMPTY_OUTPUT';
+  next.retryable = error.retryable === true;
+  next.cause = error;
+  return next;
+}
+
 function normalizeNoteSourceIdentity(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -23424,7 +23447,23 @@ class WechatObsidianInboxPlugin extends Plugin {
     const mutexToken = inheritedToken || { kind: requestedOwner };
     if (acquiredHere) this.localAsrMutexOwner = mutexToken;
     try {
-      return await this.runLocalTranscriptionCore(audioUrl, { ...options, _localAsrMutexToken: mutexToken });
+      try {
+        return await this.runLocalTranscriptionCore(audioUrl, { ...options, _localAsrMutexToken: mutexToken });
+      } catch (error) {
+        // The transcribe script keeps a run log beside its install root. A
+        // second process holding that file makes Add-Content fail and aborts an
+        // otherwise healthy run, so a locked log is retried once instead of
+        // being reported as a transcription defect.
+        if (!options._localAsrRetried && isTransientLocalAsrScriptError(error)) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          return await this.runLocalTranscriptionCore(audioUrl, {
+            ...options,
+            _localAsrMutexToken: mutexToken,
+            _localAsrRetried: true,
+          });
+        }
+        throw normalizeLocalAsrFailure(error);
+      }
     } finally {
       if (acquiredHere && this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
     }
@@ -31609,6 +31648,8 @@ WechatObsidianInboxPlugin.__test = {
   formatCreatedTime,
   getTitleTimePart,
   isNewerPluginVersion,
+  isTransientLocalAsrScriptError,
+  normalizeLocalAsrFailure,
   extractDouyinNoteContent,
   normalizeNoteSourceIdentity,
   readNoteSourceIdentity,
