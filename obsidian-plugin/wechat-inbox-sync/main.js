@@ -14811,6 +14811,7 @@ var require_operator_media_node = __commonJS({
     var WORKER_PROTOCOL_VERSION2 = "cfb-worker/v2";
     var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
     var XIAOHONGSHU_CAPABILITY = "xiaohongshu";
+    var WECHAT_ARTICLE_CAPABILITY = "wechat_article";
     var DEFAULT_POLL_INTERVAL_MS = 15e3;
     var DEFAULT_MAX_IDLE_POLL_INTERVAL_MS = 12e4;
     var DEFAULT_HEARTBEAT_INTERVAL_MS = 3e4;
@@ -14984,11 +14985,21 @@ var require_operator_media_node = __commonJS({
       }
     }
     __name(isXiaohongshuSourceUrl, "isXiaohongshuSourceUrl");
+    function isWechatArticleSourceUrl(value) {
+      try {
+        const url = new URL(String(value || "").trim());
+        return /^https?:$/.test(url.protocol) && /^mp\.weixin\.qq\.com$/i.test(url.hostname);
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isWechatArticleSourceUrl, "isWechatArticleSourceUrl");
     function resolveMediaSourcePlatform(job) {
       const sourceType = String(job && job.sourceType || "").trim().toLowerCase();
       const sourceUrl = String(job && job.sourceUrl || "").trim();
       if (sourceType === "douyin_url" && isDouyinSourceUrl(sourceUrl)) return "douyin";
       if (sourceType === "xiaohongshu_url" && isXiaohongshuSourceUrl(sourceUrl)) return "xiaohongshu";
+      if (sourceType === "wechat_article" && isWechatArticleSourceUrl(sourceUrl)) return "wechat_article";
       return "";
     }
     __name(resolveMediaSourcePlatform, "resolveMediaSourcePlatform");
@@ -15089,6 +15100,9 @@ var require_operator_media_node = __commonJS({
         const capabilities = ["media_acquire"];
         if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY) && plugin && typeof plugin.acquireOperatorXiaohongshuContent === "function") {
           capabilities.push(XIAOHONGSHU_CAPABILITY);
+        }
+        if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY) && plugin && typeof plugin.acquireOperatorWechatArticleContent === "function") {
+          capabilities.push(WECHAT_ARTICLE_CAPABILITY);
         }
         try {
           if (!rejectedCapabilities.has("local_asr") && plugin && typeof plugin.getLocalAsrInstallStatus === "function" && plugin.getLocalAsrInstallStatus().ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
@@ -15246,6 +15260,19 @@ var require_operator_media_node = __commonJS({
             const xiaohongshuCompletion = uploadedXiaohongshu && uploadedXiaohongshu.completion;
             if (!xiaohongshuCompletion) throw nodeError("OPERATOR_MEDIA_COMPLETE_INVALID", "运营节点媒体上传未完成", { retryable: true });
             return xiaohongshuCompletion;
+          }
+          if (phase === "media" && mediaPlatform === "wechat_article") {
+            if (!plugin || typeof plugin.acquireOperatorWechatArticleContent !== "function") {
+              throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点公众号抓取能力未就绪", { retryable: true });
+            }
+            const article = await plugin.acquireOperatorWechatArticleContent(job.sourceUrl, { signal: activeController.signal });
+            const articleContent = article && article.content;
+            if (!articleContent || !String(articleContent.markdown || "").trim()) {
+              throw nodeError("OPERATOR_WECHAT_ARTICLE_EMPTY", "运营节点未提取到公众号正文", { retryable: true });
+            }
+            activeJob.progress = 100;
+            stopHeartbeat();
+            return await complete(job, { phase: "media", outcome: "succeeded", content: articleContent });
           }
           if (phase === "media") {
             if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== "function" || typeof plugin.uploadWorkerMediaForJob !== "function") {
@@ -15439,6 +15466,8 @@ var require_operator_media_node = __commonJS({
       XIAOHONGSHU_CAPABILITY,
       isDouyinSourceUrl,
       isXiaohongshuSourceUrl,
+      isWechatArticleSourceUrl,
+      WECHAT_ARTICLE_CAPABILITY,
       resolveMediaSourcePlatform,
       isOperatorNodeEnabled,
       readOperatorNodeConfig,
@@ -22090,7 +22119,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.207";
+var PLUGIN_RUNTIME_VERSION = "1.3.208";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -38904,7 +38933,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (job.status === "succeeded" && job.content) {
         nextMetadata.markdown = String(job.content.markdown || "").trim() || metadata.markdown || "";
         nextMetadata.imageUrls = job.content.imageUrls.length ? job.content.imageUrls : Array.isArray(metadata.imageUrls) ? metadata.imageUrls : [];
-        nextMetadata.title = metadata.title || job.content.title || (isDouyinUrl(String(metadata.url || "")) ? "抖音笔记" : "小红书笔记");
+        const contentSourceUrl = String(metadata.url || "");
+        nextMetadata.title = metadata.title || job.content.title || (isDouyinUrl(contentSourceUrl) ? "抖音笔记" : /^https?:\/\/mp\.weixin\.qq\.com\//i.test(contentSourceUrl) ? "公众号文章" : "小红书笔记");
         nextMetadata.author = metadata.author || job.content.author || "";
         if (Array.isArray(job.content.tags) && job.content.tags.length) {
           nextMetadata.extractedKeywords = job.content.tags;
@@ -40401,6 +40431,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     requireDouyinLogin = false,
     requireDouyinResolver = false,
     pluginDouyinLogin = null,
+    requireTranscriptionComponent = true,
     featureName = "云端转写兜底"
   } = {}) {
     const activeBinding = binding || this.getActiveBindings()[0] || null;
@@ -40425,7 +40456,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       };
     }
     const readiness = this.getLocalTranscriptionComponentReadiness();
-    if (!readiness.asrStatus || readiness.asrStatus.ready !== true) {
+    if (requireTranscriptionComponent && (!readiness.asrStatus || readiness.asrStatus.ready !== true)) {
       return {
         allowed: false,
         code: "LOCAL_COMPONENT_SETUP_REQUIRED",
@@ -40464,7 +40495,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
    * the user's "save original images / keep links" setting still decides what
    * lands in the vault.
    */
-  buildCloudFallbackContentRecord(record, job, { url = "" } = {}) {
+  buildCloudFallbackContentRecord(record, job, { url = "", platform = "" } = {}) {
     const content = job && job.content;
     if (!content) return record;
     const metadata = record && record.metadata && typeof record.metadata === "object" ? record.metadata : {};
@@ -40480,7 +40511,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         markdown: String(content.markdown || "").trim() || metadata.markdown || "",
         imageUrls: cloudImages.length ? cloudImages : localImages,
         ...Array.isArray(content.tags) && content.tags.length ? { extractedKeywords: content.tags } : {},
-        platform: metadata.platform || "小红书",
+        platform: metadata.platform || platform || "小红书",
         contentCategory: "图文",
         // Every Xiaohongshu share arrives tagged as audio_video. A note that
         // turned out to be graphic must be untagged here, or the next sync
@@ -40557,6 +40588,51 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         job,
         localError,
         "云端兜底任务已提交，正在由云端电脑抓取小红书内容"
+      );
+    } catch (error) {
+      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
+      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+    }
+  }
+  // WeChat answers a captcha page to the user's network; the operator node
+  // fetches the article with its own network and may get through. The cloud
+  // answer is the article content, so this path does not need the local ASR
+  // component - only binding and Pro.
+  async maybeSubmitWechatArticleCloudFallback(record, {
+    url = "",
+    binding = null,
+    signal = null,
+    title = "",
+    localError = ""
+  } = {}) {
+    if (this.settings.cloudFallbackEnabled !== true) return null;
+    if (!binding || !binding.token) return null;
+    if (!isWechatArticleUrl(url)) return null;
+    const gate = await this.evaluateCloudFallbackUserGate({
+      binding,
+      requireTranscriptionComponent: false,
+      featureName: "公众号云端兜底"
+    });
+    if (!gate.allowed) return { gateMessage: gate.message };
+    try {
+      const job = await this.submitCloudFallbackJob({
+        sourceType: "wechat_article",
+        sourceUrl: url,
+        recordId: getRecordId(record),
+        retryCount: record && record.retryCount,
+        title: title || record && record.metadata && record.metadata.title || "公众号文章",
+        localError,
+        provider: this.settings.aiProvider || "",
+        binding,
+        signal
+      });
+      if (job.status === "succeeded" && job.content) {
+        return { record: this.buildCloudFallbackContentRecord(record, job, { url, platform: "公众号" }) };
+      }
+      throw createCloudFallbackPendingError(
+        job,
+        localError,
+        "云端兜底任务已提交，正在由云端节点抓取公众号正文"
       );
     } catch (error) {
       if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
@@ -42070,6 +42146,62 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
    * that requirement exists only on the user's own machine, where a login wall
    * is a local setup gap.
    */
+  /**
+   * Operator-node capture for a WeChat official-account article. The node
+   * fetches with its own network stack; a captcha answer is reported as a
+   * captcha, never as a generic failure.
+   */
+  async acquireOperatorWechatArticleContent(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || "").trim();
+    if (!/^https:\/\/mp\.weixin\.qq\.com\//i.test(pageUrl)) {
+      const error = new Error("运营节点只接受公众号文章 HTTPS 链接");
+      error.code = "OPERATOR_MEDIA_SOURCE_INVALID";
+      error.retryable = false;
+      throw error;
+    }
+    throwIfAborted(signal);
+    const headers = {
+      "User-Agent": WECHAT_ARTICLE_MOBILE_USER_AGENT,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9"
+    };
+    let html = "";
+    try {
+      html = String(await this.downloadWebpageHtmlViaNode(pageUrl, headers) || "");
+    } catch (error) {
+      if (isAbortError(error) || signal && signal.aborted) throw createAbortError();
+    }
+    if (!html) {
+      const error = new Error("运营节点未能获取公众号页面");
+      error.code = "OPERATOR_WECHAT_ARTICLE_EMPTY";
+      error.retryable = true;
+      throw error;
+    }
+    const diagnosis = diagnoseWechatArticleHtml(html);
+    if (diagnosis.pageKind !== "article") {
+      const error = new Error(diagnosis.pageKind === "captcha" ? "公众号要求安全验证，云端节点同样被拦截" : "公众号页面未返回正文");
+      error.code = diagnosis.pageKind === "captcha" ? "OPERATOR_WECHAT_ARTICLE_CAPTCHA" : "OPERATOR_WECHAT_ARTICLE_EMPTY";
+      error.retryable = true;
+      throw error;
+    }
+    const markdown = String(htmlToMarkdown(html) || "").trim();
+    if (!markdown) {
+      const error = new Error("公众号正文为空");
+      error.code = "OPERATOR_WECHAT_ARTICLE_EMPTY";
+      error.retryable = true;
+      throw error;
+    }
+    return {
+      kind: "content",
+      content: {
+        markdown,
+        title: extractHtmlTitle(html) || "",
+        author: "",
+        imageUrls: [],
+        tags: []
+      }
+    };
+  }
   /**
    * Operator-node capture for a Douyin graphic note. A note has no media to
    * download, so the answer is the note content itself; a video link returns
@@ -47580,6 +47712,16 @@ ${finalized.markdown}
         throw error;
       }
       if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
+      if (!isAbortError(error) && isWechatArticleUrl(url) && (isRetryableWechatArticleContentError(error) || /环境异常|安全验证|访问频繁|操作频繁/.test(String(error.message || "")))) {
+        const wechatFallback = await this.maybeSubmitWechatArticleCloudFallback(record, {
+          url,
+          binding,
+          signal,
+          title: title || metadata.title || "",
+          localError: String(error && (error.message || error) || "公众号正文提取失败")
+        });
+        if (wechatFallback && wechatFallback.record) return wechatFallback.record;
+      }
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
       }
