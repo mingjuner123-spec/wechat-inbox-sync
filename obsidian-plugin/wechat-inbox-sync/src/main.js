@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.205';
+const PLUGIN_RUNTIME_VERSION = '1.3.206';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -17490,6 +17490,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: 'login-douyin',
+      name: '登录抖音（解析与云端兜底需要）',
+      callback: () => this.loginDouyin(),
+    });
+
+    this.addCommand({
       id: 'restore-locally-quarantined-records',
       name: '恢复本机忽略的历史失败内容',
       callback: async () => {
@@ -21179,7 +21185,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         return {
           allowed: false,
           code: 'DOUYIN_LOGIN_REQUIRED',
-          message: '未登录抖音：请先在插件设置中完成抖音登录后重试；云端兜底只处理平台侧取不到媒体的情况。',
+          message: '未登录抖音：请先在插件设置 → 抖音登录 中登录（或运行命令「登录抖音」）后重试；云端兜底只处理平台侧取不到媒体的情况。',
         };
       }
     }
@@ -27050,7 +27056,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           let douyinLoggedIn = false;
           try { douyinLoggedIn = (await this.checkDouyinLogin()) === true; } catch (_) { douyinLoggedIn = false; }
           if (!douyinLoggedIn) {
-            const loginError = new Error('抖音图文笔记需要先登录抖音：当前未登录或登录已失效。请在插件设置中完成抖音登录后重试。');
+            const loginError = new Error('抖音图文笔记需要先登录抖音：当前未登录或登录已失效。请在插件设置 → 抖音登录 中登录（或运行命令「登录抖音」）后重试。');
             loginError.code = 'DOUYIN_LOGIN_REQUIRED';
             throw loginError;
           }

@@ -17057,13 +17057,13 @@ var require_sync_lifecycle_utils = __commonJS({
         return createSyncLifecycleOutcomeError("UNSUPPORTED_PLATFORM", "暂不支持此平台");
       }
       if (conversionStatus === "wechat_captcha") {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信安全验证拦截");
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信安全验证拦截；可在插件命令「处理公众号访问验证」中完成验证后重试");
       }
       if (/mp\.weixin\.qq\.com\//.test(url) && /微信扫一扫可打开此内容/.test(markdown) && /使用完整服务|使用小程序/.test(markdown)) {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信仅返回打开引导页");
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：微信仅返回打开引导页；可在插件命令「处理公众号访问验证」中完成验证后重试");
       }
       if (/^https?:\/\/mp\.weixin\.qq\.com\//i.test(url) && isWechatArticleFailurePlaceholder(markdown)) {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取");
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取；可在插件命令「处理公众号访问验证」中完成验证后重试");
       }
       if (isLikelyWebpageShell(url, markdown)) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页");
@@ -22090,7 +22090,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.205";
+var PLUGIN_RUNTIME_VERSION = "1.3.206";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -37115,6 +37115,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       callback: /* @__PURE__ */ __name(() => this.loginXiaohongshu(), "callback")
     });
     this.addCommand({
+      id: "login-douyin",
+      name: "登录抖音（解析与云端兜底需要）",
+      callback: /* @__PURE__ */ __name(() => this.loginDouyin(), "callback")
+    });
+    this.addCommand({
       id: "restore-locally-quarantined-records",
       name: "恢复本机忽略的历史失败内容",
       callback: /* @__PURE__ */ __name(async () => {
@@ -40412,7 +40417,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         return {
           allowed: false,
           code: "DOUYIN_LOGIN_REQUIRED",
-          message: "未登录抖音：请先在插件设置中完成抖音登录后重试；云端兜底只处理平台侧取不到媒体的情况。"
+          message: "未登录抖音：请先在插件设置 → 抖音登录 中登录（或运行命令「登录抖音」）后重试；云端兜底只处理平台侧取不到媒体的情况。"
         };
       }
     }
@@ -45804,7 +45809,7 @@ ${finalized.markdown}
             douyinLoggedIn = false;
           }
           if (!douyinLoggedIn) {
-            const loginError = new Error("抖音图文笔记需要先登录抖音：当前未登录或登录已失效。请在插件设置中完成抖音登录后重试。");
+            const loginError = new Error("抖音图文笔记需要先登录抖音：当前未登录或登录已失效。请在插件设置 → 抖音登录 中登录（或运行命令「登录抖音」）后重试。");
             loginError.code = "DOUYIN_LOGIN_REQUIRED";
             throw loginError;
           }
