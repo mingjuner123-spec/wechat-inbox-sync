@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.204';
+const PLUGIN_RUNTIME_VERSION = '1.3.205';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -19452,7 +19452,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         nextMetadata.imageUrls = job.content.imageUrls.length
           ? job.content.imageUrls
           : (Array.isArray(metadata.imageUrls) ? metadata.imageUrls : []);
-        nextMetadata.title = metadata.title || job.content.title || '小红书笔记';
+        nextMetadata.title = metadata.title || job.content.title
+          || (isDouyinUrl(String(metadata.url || '')) ? '抖音笔记' : '小红书笔记');
         nextMetadata.author = metadata.author || job.content.author || '';
         if (Array.isArray(job.content.tags) && job.content.tags.length) {
           nextMetadata.extractedKeywords = job.content.tags;
@@ -22828,6 +22829,61 @@ class WechatObsidianInboxPlugin extends Plugin {
    * that requirement exists only on the user's own machine, where a login wall
    * is a local setup gap.
    */
+  /**
+   * Operator-node capture for a Douyin graphic note. A note has no media to
+   * download, so the answer is the note content itself; a video link returns
+   * null and the caller continues with media acquisition.
+   */
+  async acquireOperatorDouyinNoteContent(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || '').trim();
+    if (!isDouyinUrl(pageUrl)) return null;
+    throwIfAborted(signal);
+    let noteId = (pageUrl.match(/\/note\/(\d{8,30})/) || [])[1] || '';
+    if (!noteId) {
+      try {
+        const redirect = await resolveRedirectUrlWithDiagnostics(pageUrl);
+        const resolvedUrl = String(redirect && redirect.url || '').trim();
+        noteId = (resolvedUrl.match(/\/note\/(\d{8,30})/) || [])[1] || '';
+      } catch (error) {
+        if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+        return null;
+      }
+    }
+    if (!noteId) return null;
+    const shareUrl = `https://www.iesdouyin.com/share/note/${noteId}/?from_ssr=1`;
+    const headers = {
+      ...getSocialRequestHeaders(shareUrl),
+      'User-Agent': DOUYIN_MOBILE_SHARE_USER_AGENT,
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    };
+    let html = '';
+    try {
+      html = await readSessionFetchText(getDouyinSession(), shareUrl, headers);
+    } catch (error) {
+      if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+    }
+    if (!html) {
+      try {
+        const response = await requestUrl({ url: shareUrl, method: 'GET', headers });
+        html = String((response && response.text) || '');
+      } catch (error) {
+        if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+      }
+    }
+    const note = html ? extractDouyinNoteContent(html, noteId) : null;
+    if (!note || !String(note.markdown || '').trim()) return null;
+    return {
+      kind: 'content',
+      content: {
+        markdown: note.markdown,
+        title: note.title,
+        author: note.author,
+        imageUrls: note.imageUrls,
+        tags: [],
+      },
+    };
+  }
+
   async acquireOperatorXiaohongshuContent(sourceUrl, { signal = null } = {}) {
     const pageUrl = String(sourceUrl || '').trim();
     if (!isTrustedXiaohongshuTransportUrl(pageUrl)) {
@@ -26934,17 +26990,20 @@ class WechatObsidianInboxPlugin extends Plugin {
           const noteIdMatch = String(redirectedUrl || url).match(/\/note\/(\d{8,30})/)
             || String(url).match(/\/note\/(\d{8,30})/);
           const noteId = noteIdMatch ? noteIdMatch[1] : '';
+          const noteShareUrl = noteId ? `https://www.iesdouyin.com/share/note/${noteId}/?from_ssr=1` : '';
+          // The cloud only accepts douyin.com sources, so the job carries the
+          // canonical note URL; the node reads the share surface itself.
+          const noteCloudUrl = noteId ? `https://www.douyin.com/note/${noteId}` : '';
+          const notePageHeaders = {
+            ...getSocialRequestHeaders(noteShareUrl || url),
+            'User-Agent': DOUYIN_MOBILE_SHARE_USER_AGENT,
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          };
           let noteContent = null;
           if (noteId) {
             // A note page serves its body only to a logged-in session, so the
             // logged-in fetch comes first and the anonymous one is a second
             // chance for pages that are public anyway.
-            const noteShareUrl = `https://www.iesdouyin.com/share/note/${noteId}/?from_ssr=1`;
-            const notePageHeaders = {
-              ...getSocialRequestHeaders(noteShareUrl),
-              'User-Agent': DOUYIN_MOBILE_SHARE_USER_AGENT,
-              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            };
             for (const pageUrl of [noteShareUrl, redirectedUrl, url].filter(Boolean)) {
               throwIfAborted(signal);
               try {
@@ -26996,6 +27055,37 @@ class WechatObsidianInboxPlugin extends Plugin {
             throw loginError;
           }
           const message = douyinDiagnostic.failureMessage('DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
+          // Logged in, but this page still served no readable body. The
+          // operator node holds its own session, so hand it the note URL and
+          // let it try; the user keeps the "login first" precondition either
+          // way. The answer comes back as content on the job poll.
+          if (this.settings.cloudFallbackEnabled === true && binding) {
+            const noteFallbackGate = await this.evaluateCloudFallbackUserGate({
+              binding,
+              requireDouyinLogin: true,
+              requireDouyinResolver: true,
+              pluginDouyinLogin: douyinLoggedIn,
+            });
+            if (noteFallbackGate.allowed) {
+              try {
+                const noteJob = await this.submitCloudFallbackJob({
+                  sourceType: 'douyin_url',
+                  sourceUrl: noteCloudUrl || noteShareUrl,
+                  recordId: getRecordId(record),
+                  retryCount: record.retryCount,
+                  title: title || metadata.title || '抖音笔记',
+                  localError: message,
+                  provider: this.settings.aiProvider || '',
+                  binding,
+                  signal,
+                });
+                throw createCloudFallbackPendingError(noteJob, message);
+              } catch (noteSubmitError) {
+                if (noteSubmitError && noteSubmitError.code === 'CLOUD_FALLBACK_QUEUED') throw noteSubmitError;
+                // A submit failure keeps the link-only note below.
+              }
+            }
+          }
           const failureDiagnostic = douyinDiagnostic.sanitize({
             attemptId: douyinAttemptId,
             recordRef: crypto.createHash('sha256').update(String(record.id || record._id || url)).digest('hex').slice(0, 16),

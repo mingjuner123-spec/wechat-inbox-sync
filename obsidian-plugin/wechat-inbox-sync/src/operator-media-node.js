@@ -478,6 +478,22 @@ function createOperatorMediaNode({
         if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== 'function' || typeof plugin.uploadWorkerMediaForJob !== 'function') {
           throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点媒体能力未就绪', { retryable: true });
         }
+        // A Douyin graphic note has no media to download; its answer is the
+        // note content, handled the same way as a Xiaohongshu graphic note.
+        if (typeof plugin.acquireOperatorDouyinNoteContent === 'function') {
+          let noteCapture = null;
+          try {
+            noteCapture = await plugin.acquireOperatorDouyinNoteContent(job.sourceUrl, { signal: activeController.signal });
+          } catch (noteError) {
+            if (noteError && noteError.name === 'AbortError') throw noteError;
+            noteCapture = null;
+          }
+          if (noteCapture && noteCapture.content) {
+            activeJob.progress = 100;
+            stopHeartbeat();
+            return await complete(job, { phase: 'media', outcome: 'succeeded', content: noteCapture.content });
+          }
+        }
         tempPath = await plugin.acquireOperatorDouyinMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
         activeJob.progress = 45;
         const uploaded = await plugin.uploadWorkerMediaForJob(tempPath, job, {
