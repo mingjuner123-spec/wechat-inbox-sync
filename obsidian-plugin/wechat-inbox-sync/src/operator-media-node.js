@@ -13,6 +13,7 @@ const DEFAULT_CAPABILITIES = Object.freeze(['media_acquire', 'local_asr']);
 // Advertised only while the plugin really exposes the Xiaohongshu capture path
 // and the deployment's node registry accepted the capability.
 const XIAOHONGSHU_CAPABILITY = 'xiaohongshu';
+const WECHAT_ARTICLE_CAPABILITY = 'wechat_article';
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 // An idle node backs off to one claim per two minutes. This stays well under
 // the worker capacity TTL, so a queued job is still noticed promptly.
@@ -200,11 +201,21 @@ function isXiaohongshuSourceUrl(value) {
 // is the only thing that decides which capture path may run. An unknown pair is
 // rejected instead of being guessed at, because claiming a job here takes it
 // away from every other node.
+function isWechatArticleSourceUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    return /^https?:$/.test(url.protocol) && /^mp\.weixin\.qq\.com$/i.test(url.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
 function resolveMediaSourcePlatform(job) {
   const sourceType = String(job && job.sourceType || '').trim().toLowerCase();
   const sourceUrl = String(job && job.sourceUrl || '').trim();
   if (sourceType === 'douyin_url' && isDouyinSourceUrl(sourceUrl)) return 'douyin';
   if (sourceType === 'xiaohongshu_url' && isXiaohongshuSourceUrl(sourceUrl)) return 'xiaohongshu';
+  if (sourceType === 'wechat_article' && isWechatArticleSourceUrl(sourceUrl)) return 'wechat_article';
   return '';
 }
 
@@ -313,6 +324,10 @@ function createOperatorMediaNode({
     if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY)
       && plugin && typeof plugin.acquireOperatorXiaohongshuContent === 'function') {
       capabilities.push(XIAOHONGSHU_CAPABILITY);
+    }
+    if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY)
+      && plugin && typeof plugin.acquireOperatorWechatArticleContent === 'function') {
+      capabilities.push(WECHAT_ARTICLE_CAPABILITY);
     }
     try {
       if (!rejectedCapabilities.has('local_asr')
@@ -473,6 +488,19 @@ function createOperatorMediaNode({
         const xiaohongshuCompletion = uploadedXiaohongshu && uploadedXiaohongshu.completion;
         if (!xiaohongshuCompletion) throw nodeError('OPERATOR_MEDIA_COMPLETE_INVALID', '运营节点媒体上传未完成', { retryable: true });
         return xiaohongshuCompletion;
+      }
+      if (phase === 'media' && mediaPlatform === 'wechat_article') {
+        if (!plugin || typeof plugin.acquireOperatorWechatArticleContent !== 'function') {
+          throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点公众号抓取能力未就绪', { retryable: true });
+        }
+        const article = await plugin.acquireOperatorWechatArticleContent(job.sourceUrl, { signal: activeController.signal });
+        const articleContent = article && article.content;
+        if (!articleContent || !String(articleContent.markdown || '').trim()) {
+          throw nodeError('OPERATOR_WECHAT_ARTICLE_EMPTY', '运营节点未提取到公众号正文', { retryable: true });
+        }
+        activeJob.progress = 100;
+        stopHeartbeat();
+        return await complete(job, { phase: 'media', outcome: 'succeeded', content: articleContent });
       }
       if (phase === 'media') {
         if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== 'function' || typeof plugin.uploadWorkerMediaForJob !== 'function') {
@@ -676,6 +704,8 @@ module.exports = {
   XIAOHONGSHU_CAPABILITY,
   isDouyinSourceUrl,
   isXiaohongshuSourceUrl,
+  isWechatArticleSourceUrl,
+  WECHAT_ARTICLE_CAPABILITY,
   resolveMediaSourcePlatform,
   isOperatorNodeEnabled,
   readOperatorNodeConfig,
