@@ -146,6 +146,33 @@ function run() {
         assert.equal(normalized.retryable, false);
       }
 
+      // 10. The installed Windows transcribe script is hardened in place so a
+      // locked run log stops aborting the run; the original is kept beside it.
+      {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asr-script-'));
+        const scriptPath = path.join(root, 'transcribe.ps1');
+        fs.writeFileSync(scriptPath, [
+          'param([string]$InputPath, [string]$OutputPath)',
+          '$ErrorActionPreference = "Stop"',
+          '$Root = Split-Path -Parent $MyInvocation.MyCommand.Path',
+          '$RunLog = Join-Path $Root "transcribe-last.log"',
+          '@("time=x") | Set-Content -LiteralPath $RunLog -Encoding UTF8',
+          'Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value @("status=pending")',
+          'Add-Content -LiteralPath $RunLog -Encoding UTF8 -Value "status=success"',
+        ].join('\n'));
+        assert.equal(h.hardenLocalAsrRunLogScript(root, 'win32'), 'patched');
+        const patched = fs.readFileSync(scriptPath, 'utf8');
+        assert.match(patched, /wechat-inbox-log-write-tolerance-v1/);
+        assert.equal((patched.match(/-ErrorAction SilentlyContinue/g) || []).length, 3);
+        assert.ok(fs.existsSync(`${scriptPath}.bak-log-tolerance`), 'the original script is kept');
+        assert.equal(h.hardenLocalAsrRunLogScript(root, 'win32'), 'already');
+        assert.equal(h.hardenLocalAsrRunLogScript(root, 'darwin'), 'not-applicable');
+
+        const unknownRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asr-script-unknown-'));
+        fs.writeFileSync(path.join(unknownRoot, 'transcribe.ps1'), 'param()\nWrite-Host hi\n');
+        assert.equal(h.hardenLocalAsrRunLogScript(unknownRoot, 'win32'), 'unknown-script');
+      }
+
       console.log('plugin failure reduction tests passed');
     })();
   }
