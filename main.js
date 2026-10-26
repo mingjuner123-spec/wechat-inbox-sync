@@ -22090,7 +22090,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.206";
+var PLUGIN_RUNTIME_VERSION = "1.3.207";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -36827,6 +36827,41 @@ function normalizeLocalAsrFailure(error) {
   return next;
 }
 __name(normalizeLocalAsrFailure, "normalizeLocalAsrFailure");
+var LOCAL_ASR_LOG_TOLERANCE_MARKER = "# wechat-inbox-log-write-tolerance-v1";
+function hardenLocalAsrRunLogScript(installRoot, platform = process.platform) {
+  if (platform !== "win32") return "not-applicable";
+  const root = String(installRoot || "").trim();
+  if (!root) return "missing-root";
+  const scriptPath = path.join(root, "transcribe.ps1");
+  try {
+    if (!fs.existsSync(scriptPath)) return "missing";
+    const source = fs.readFileSync(scriptPath, "utf8");
+    if (source.includes(LOCAL_ASR_LOG_TOLERANCE_MARKER)) return "already";
+    if (!/Add-Content -LiteralPath \$RunLog -Encoding UTF8/.test(source)) return "unknown-script";
+    let patched = source.replace(
+      /Add-Content -LiteralPath \$RunLog -Encoding UTF8(?! -ErrorAction)/g,
+      "Add-Content -LiteralPath $RunLog -Encoding UTF8 -ErrorAction SilentlyContinue"
+    ).replace(
+      /Set-Content -LiteralPath \$RunLog -Encoding UTF8(?! -ErrorAction)/g,
+      "Set-Content -LiteralPath $RunLog -Encoding UTF8 -ErrorAction SilentlyContinue"
+    );
+    if (patched === source) return "unsupported";
+    patched = patched.replace(
+      /(\$RunLog = Join-Path \$Root "transcribe-last\.log"\r?\n)/,
+      `$1${LOCAL_ASR_LOG_TOLERANCE_MARKER}
+`
+    );
+    const backupPath = `${scriptPath}.bak-log-tolerance`;
+    if (!fs.existsSync(backupPath)) fs.writeFileSync(backupPath, source, "utf8");
+    const tempPath = `${scriptPath}.tmp-${process.pid}-${Date.now()}`;
+    fs.writeFileSync(tempPath, patched, "utf8");
+    fs.renameSync(tempPath, scriptPath);
+    return "patched";
+  } catch (_error) {
+    return "failed";
+  }
+}
+__name(hardenLocalAsrRunLogScript, "hardenLocalAsrRunLogScript");
 function normalizeNoteSourceIdentity(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -42664,6 +42699,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw error;
     }
     await this.recoverStaleLocalTranscriptionCommand();
+    try {
+      hardenLocalAsrRunLogScript(this.getConfiguredLocalAsrInstallRoot(), process.platform);
+    } catch (_) {
+    }
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
     if (installStatus.scriptOutdated) {
@@ -49853,6 +49892,7 @@ WechatObsidianInboxPlugin.__test = {
   formatCreatedTime,
   getTitleTimePart,
   isNewerPluginVersion,
+  hardenLocalAsrRunLogScript,
   isTransientLocalAsrScriptError,
   normalizeLocalAsrFailure,
   extractDouyinNoteContent,
