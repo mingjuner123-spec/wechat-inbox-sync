@@ -120,6 +120,32 @@ function run() {
         assert.deepEqual(plugin.settings.bindings, [{ token: 'PRO-1' }]);
       }
 
+      // 8. A locked transcribe run log is a transient script failure: the run
+      // is retried once instead of being reported as a broken transcription.
+      {
+        const plugin = new Plugin();
+        let calls = 0;
+        plugin.runLocalTranscriptionCore = async () => {
+          calls += 1;
+          const error = new Error('Add-Content : cannot get content writer');
+          error.code = 'LOCAL_ASR_FAILED';
+          throw error;
+        };
+        await assert.rejects(plugin.runLocalTranscription('https://example.com/a.mp3', {}), /Add-Content/);
+        assert.equal(calls, 2, 'a locked log is retried exactly once');
+      }
+
+      // 9. Whisper producing no text becomes a sentence the user can act on,
+      // not a raw script dump.
+      {
+        const raw = Object.assign(new Error('Whisper did not generate transcript text. See C:/x/transcribe-last.log'), { code: 'LOCAL_ASR_FAILED' });
+        assert.equal(h.isTransientLocalAsrScriptError(raw), false);
+        const normalized = h.normalizeLocalAsrFailure(raw);
+        assert.match(normalized.message, /纯音乐|无声/);
+        assert.equal(normalized.code, 'LOCAL_ASR_FAILED');
+        assert.equal(normalized.retryable, false);
+      }
+
       console.log('plugin failure reduction tests passed');
     })();
   }

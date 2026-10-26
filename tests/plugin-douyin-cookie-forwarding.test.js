@@ -35,10 +35,9 @@ assert.equal(cookieRows.some(line => line.includes('untrusted-domain')), false);
 
 const freshCookieMessage = failureMessage('DOUYIN_COOKIE_REFRESH_REQUIRED');
 assert.match(freshCookieMessage, /更新网页访问校验信息（Cookie）/);
-assert.match(freshCookieMessage, /不等于未登录/);
-assert.match(freshCookieMessage, /打开这条作品/);
-assert.match(freshCookieMessage, /正常播放后再重试/);
-assert.match(freshCookieMessage, /显示已登录不代表作品访问校验已通过/);
-assert.doesNotMatch(freshCookieMessage, /重新登录后重试/);
+assert.match(freshCookieMessage, /插件设置 → 抖音登录/);
+assert.match(freshCookieMessage, /重新登录/);
+assert.match(freshCookieMessage, /不代表作品访问校验已通过/);
+assert.doesNotMatch(freshCookieMessage, /不等于未登录/);
 
 console.log('plugin-douyin-cookie-forwarding.test.js passed');

@@ -139,7 +139,7 @@ function failureMessage(code) {
   return ({
     DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED: '这条链接是抖音笔记页面，当前不支持该类型转写。请分享具体视频作品链接；要保存文字，可复制到小程序后保存。',
     DOUYIN_CHALLENGE: '抖音解析返回安全验证要求，请打开插件内抖音窗口完成验证后重试。',
-    DOUYIN_COOKIE_REFRESH_REQUIRED: '抖音解析器未能读取作品信息，提示需要更新网页访问校验信息（Cookie）；这不等于未登录。请在插件内打开这条作品，确认能正常播放后再重试；显示已登录不代表作品访问校验已通过。',
+    DOUYIN_COOKIE_REFRESH_REQUIRED: '抖音解析器未能读取作品信息，提示需要更新网页访问校验信息（Cookie）。请在插件设置 → 抖音登录 中重新登录一次，再在这里重试；显示“已登录”不代表作品访问校验已通过。',
     DOUYIN_LOGIN_REQUIRED: '抖音解析器返回登录要求，请在插件内确认登录后重试。',
     DOUYIN_BROWSER_TIMEOUT: '抖音隐藏网页处理超时，尚未获取视频地址；请复制诊断查看停滞阶段。',
     DOUYIN_BROWSER_LOAD_FAILED: '抖音网页加载失败，网络错误已记录；请复制诊断查看原因。',
