@@ -22119,7 +22119,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.208";
+var PLUGIN_RUNTIME_VERSION = "1.3.209";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -42154,10 +42154,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async acquireOperatorWechatArticleContent(sourceUrl, { signal = null } = {}) {
     const pageUrl = String(sourceUrl || "").trim();
     if (!/^https:\/\/mp\.weixin\.qq\.com\//i.test(pageUrl)) {
-      const error = new Error("运营节点只接受公众号文章 HTTPS 链接");
-      error.code = "OPERATOR_MEDIA_SOURCE_INVALID";
-      error.retryable = false;
-      throw error;
+      const error2 = new Error("运营节点只接受公众号文章 HTTPS 链接");
+      error2.code = "OPERATOR_MEDIA_SOURCE_INVALID";
+      error2.retryable = false;
+      throw error2;
     }
     throwIfAborted(signal);
     const headers = {
@@ -42168,39 +42168,56 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let html = "";
     try {
       html = String(await this.downloadWebpageHtmlViaNode(pageUrl, headers) || "");
-    } catch (error) {
-      if (isAbortError(error) || signal && signal.aborted) throw createAbortError();
+    } catch (error2) {
+      if (isAbortError(error2) || signal && signal.aborted) throw createAbortError();
     }
     if (!html) {
-      const error = new Error("运营节点未能获取公众号页面");
-      error.code = "OPERATOR_WECHAT_ARTICLE_EMPTY";
-      error.retryable = true;
-      throw error;
+      const error2 = new Error("运营节点未能获取公众号页面");
+      error2.code = "OPERATOR_WECHAT_ARTICLE_EMPTY";
+      error2.retryable = true;
+      throw error2;
     }
-    const diagnosis = diagnoseWechatArticleHtml(html);
-    if (diagnosis.pageKind !== "article") {
-      const error = new Error(diagnosis.pageKind === "captcha" ? "公众号要求安全验证，云端节点同样被拦截" : "公众号页面未返回正文");
-      error.code = diagnosis.pageKind === "captcha" ? "OPERATOR_WECHAT_ARTICLE_CAPTCHA" : "OPERATOR_WECHAT_ARTICLE_EMPTY";
-      error.retryable = true;
-      throw error;
-    }
-    const markdown = String(htmlToMarkdown(html) || "").trim();
-    if (!markdown) {
-      const error = new Error("公众号正文为空");
-      error.code = "OPERATOR_WECHAT_ARTICLE_EMPTY";
-      error.retryable = true;
-      throw error;
-    }
-    return {
-      kind: "content",
-      content: {
-        markdown,
-        title: extractHtmlTitle(html) || "",
-        author: "",
-        imageUrls: [],
-        tags: []
+    const diagnosis = html ? diagnoseWechatArticleHtml(html) : { pageKind: "unknown" };
+    if (diagnosis.pageKind === "article") {
+      const markdown = String(htmlToMarkdown(html) || "").trim();
+      if (markdown) {
+        return {
+          kind: "content",
+          content: {
+            markdown,
+            title: extractHtmlTitle(html) || "",
+            author: "",
+            imageUrls: [],
+            tags: []
+          }
+        };
       }
-    };
+    }
+    if (typeof this.renderWechatArticleWithElectron === "function") {
+      throwIfAborted(signal);
+      try {
+        const rendered = await this.renderWechatArticleWithElectron(pageUrl, { signal });
+        const renderedMarkdown = String(rendered && rendered.markdown || "").trim();
+        if (renderedMarkdown) {
+          return {
+            kind: "content",
+            content: {
+              markdown: renderedMarkdown,
+              title: String(rendered && rendered.title || "").trim(),
+              author: "",
+              imageUrls: [],
+              tags: []
+            }
+          };
+        }
+      } catch (renderError) {
+        if (isAbortError(renderError) || signal && signal.aborted) throw createAbortError();
+      }
+    }
+    const error = new Error(diagnosis.pageKind === "captcha" ? "公众号要求安全验证，云端节点同样被拦截" : "公众号页面未返回正文");
+    error.code = diagnosis.pageKind === "captcha" ? "OPERATOR_WECHAT_ARTICLE_CAPTCHA" : "OPERATOR_WECHAT_ARTICLE_EMPTY";
+    error.retryable = true;
+    throw error;
   }
   /**
    * Operator-node capture for a Douyin graphic note. A note has no media to

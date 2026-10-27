@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.208';
+const PLUGIN_RUNTIME_VERSION = '1.3.209';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -22952,34 +22952,54 @@ class WechatObsidianInboxPlugin extends Plugin {
       error.retryable = true;
       throw error;
     }
-    const diagnosis = diagnoseWechatArticleHtml(html);
-    if (diagnosis.pageKind !== 'article') {
-      const error = new Error(diagnosis.pageKind === 'captcha'
-        ? '公众号要求安全验证，云端节点同样被拦截'
-        : '公众号页面未返回正文');
-      error.code = diagnosis.pageKind === 'captcha'
-        ? 'OPERATOR_WECHAT_ARTICLE_CAPTCHA'
-        : 'OPERATOR_WECHAT_ARTICLE_EMPTY';
-      error.retryable = true;
-      throw error;
+    const diagnosis = html ? diagnoseWechatArticleHtml(html) : { pageKind: 'unknown' };
+    if (diagnosis.pageKind === 'article') {
+      const markdown = String(htmlToMarkdown(html) || '').trim();
+      if (markdown) {
+        return {
+          kind: 'content',
+          content: {
+            markdown,
+            title: extractHtmlTitle(html) || '',
+            author: '',
+            imageUrls: [],
+            tags: [],
+          },
+        };
+      }
     }
-    const markdown = String(htmlToMarkdown(html) || '').trim();
-    if (!markdown) {
-      const error = new Error('公众号正文为空');
-      error.code = 'OPERATOR_WECHAT_ARTICLE_EMPTY';
-      error.retryable = true;
-      throw error;
+    // WeChat serves an empty shell or a guide page to plain HTTP clients. The
+    // node's own browser renders the page with the same session it uses for
+    // other platforms, which is the only path that can pass without a human.
+    if (typeof this.renderWechatArticleWithElectron === 'function') {
+      throwIfAborted(signal);
+      try {
+        const rendered = await this.renderWechatArticleWithElectron(pageUrl, { signal });
+        const renderedMarkdown = String(rendered && rendered.markdown || '').trim();
+        if (renderedMarkdown) {
+          return {
+            kind: 'content',
+            content: {
+              markdown: renderedMarkdown,
+              title: String(rendered && rendered.title || '').trim(),
+              author: '',
+              imageUrls: [],
+              tags: [],
+            },
+          };
+        }
+      } catch (renderError) {
+        if (isAbortError(renderError) || (signal && signal.aborted)) throw createAbortError();
+      }
     }
-    return {
-      kind: 'content',
-      content: {
-        markdown,
-        title: extractHtmlTitle(html) || '',
-        author: '',
-        imageUrls: [],
-        tags: [],
-      },
-    };
+    const error = new Error(diagnosis.pageKind === 'captcha'
+      ? '公众号要求安全验证，云端节点同样被拦截'
+      : '公众号页面未返回正文');
+    error.code = diagnosis.pageKind === 'captcha'
+      ? 'OPERATOR_WECHAT_ARTICLE_CAPTCHA'
+      : 'OPERATOR_WECHAT_ARTICLE_EMPTY';
+    error.retryable = true;
+    throw error;
   }
 
   /**
