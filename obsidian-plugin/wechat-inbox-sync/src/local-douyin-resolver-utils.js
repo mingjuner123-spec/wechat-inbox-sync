@@ -28,17 +28,33 @@ function isResolverAuthorizationError(error) {
 
 function resolverReceiptPath(executablePath) { return `${executablePath}.verified.json`; }
 
+// The reason matters to the user: "not installed" needs a download, while
+// "verification failed" needs a reinstall, and the two used to read the same.
 function getVerifiedResolverStatus(executablePath, platform, arch) {
+  let receipt = null;
   try {
-    if (fs.statSync(resolverReceiptPath(executablePath)).size > 4096) return { ready: false };
-    const receipt = JSON.parse(fs.readFileSync(resolverReceiptPath(executablePath), 'utf8'));
-    const stat = fs.statSync(executablePath);
-    if (receipt.schema !== 1 || receipt.platform !== platform || receipt.arch !== arch
-      || !isValidSha256(receipt.sha256) || !stat.isFile() || stat.size <= 0
-      || stat.size > MAX_RESOLVER_BYTES || stat.size !== receipt.byteLength) return { ready: false };
+    if (fs.statSync(resolverReceiptPath(executablePath)).size > 4096) return { ready: false, reason: 'receipt-invalid' };
+    receipt = JSON.parse(fs.readFileSync(resolverReceiptPath(executablePath), 'utf8'));
+  } catch (_error) {
+    return { ready: false, reason: 'not-installed' };
+  }
+  let stat;
+  try {
+    stat = fs.statSync(executablePath);
+  } catch (_error) {
+    return { ready: false, reason: 'executable-missing' };
+  }
+  if (!stat.isFile() || stat.size <= 0) return { ready: false, reason: 'executable-missing' };
+  if (stat.size > MAX_RESOLVER_BYTES || stat.size !== receipt.byteLength) return { ready: false, reason: 'size-mismatch' };
+  if (receipt.schema !== 1 || !isValidSha256(receipt.sha256)) return { ready: false, reason: 'receipt-invalid' };
+  if (receipt.platform !== platform || receipt.arch !== arch) return { ready: false, reason: 'platform-mismatch' };
+  try {
     const sha256 = crypto.createHash('sha256').update(fs.readFileSync(executablePath)).digest('hex');
-    return { ready: sha256 === receipt.sha256, executablePath, version: receipt.version };
-  } catch { return { ready: false }; }
+    if (sha256 !== receipt.sha256) return { ready: false, reason: 'hash-mismatch' };
+    return { ready: true, executablePath, version: receipt.version };
+  } catch (_error) {
+    return { ready: false, reason: 'read-failed' };
+  }
 }
 
 // Uses the OS HTTPS trust store; certificate verification is never disabled.

@@ -20160,15 +20160,29 @@ var require_local_douyin_resolver_utils = __commonJS({
     }
     __name(resolverReceiptPath, "resolverReceiptPath");
     function getVerifiedResolverStatus2(executablePath, platform, arch) {
+      let receipt = null;
       try {
-        if (fs2.statSync(resolverReceiptPath(executablePath)).size > 4096) return { ready: false };
-        const receipt = JSON.parse(fs2.readFileSync(resolverReceiptPath(executablePath), "utf8"));
-        const stat = fs2.statSync(executablePath);
-        if (receipt.schema !== 1 || receipt.platform !== platform || receipt.arch !== arch || !isValidSha256(receipt.sha256) || !stat.isFile() || stat.size <= 0 || stat.size > MAX_RESOLVER_BYTES2 || stat.size !== receipt.byteLength) return { ready: false };
+        if (fs2.statSync(resolverReceiptPath(executablePath)).size > 4096) return { ready: false, reason: "receipt-invalid" };
+        receipt = JSON.parse(fs2.readFileSync(resolverReceiptPath(executablePath), "utf8"));
+      } catch (_error) {
+        return { ready: false, reason: "not-installed" };
+      }
+      let stat;
+      try {
+        stat = fs2.statSync(executablePath);
+      } catch (_error) {
+        return { ready: false, reason: "executable-missing" };
+      }
+      if (!stat.isFile() || stat.size <= 0) return { ready: false, reason: "executable-missing" };
+      if (stat.size > MAX_RESOLVER_BYTES2 || stat.size !== receipt.byteLength) return { ready: false, reason: "size-mismatch" };
+      if (receipt.schema !== 1 || !isValidSha256(receipt.sha256)) return { ready: false, reason: "receipt-invalid" };
+      if (receipt.platform !== platform || receipt.arch !== arch) return { ready: false, reason: "platform-mismatch" };
+      try {
         const sha256 = crypto2.createHash("sha256").update(fs2.readFileSync(executablePath)).digest("hex");
-        return { ready: sha256 === receipt.sha256, executablePath, version: receipt.version };
-      } catch {
-        return { ready: false };
+        if (sha256 !== receipt.sha256) return { ready: false, reason: "hash-mismatch" };
+        return { ready: true, executablePath, version: receipt.version };
+      } catch (_error) {
+        return { ready: false, reason: "read-failed" };
       }
     }
     __name(getVerifiedResolverStatus2, "getVerifiedResolverStatus");
@@ -22119,7 +22133,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.210";
+var PLUGIN_RUNTIME_VERSION = "1.3.211";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -40532,13 +40546,6 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         message: "待安装组件：云端兜底只在本地转写组件已安装并实际尝试失败后使用。请先在插件设置中安装／更新本地组件，再在小程序同步历史中重试。"
       };
     }
-    if (requireDouyinResolver && (!readiness.resolverStatus || readiness.resolverStatus.ready !== true)) {
-      return {
-        allowed: false,
-        code: "DOUYIN_RESOLVER_NOT_INSTALLED",
-        message: "待安装组件：抖音解析组件未安装或未通过校验，云端兜底不会替代本地解析。请先在插件设置中安装／更新本地组件后重试。"
-      };
-    }
     if (requireDouyinLogin) {
       let loggedIn = pluginDouyinLogin;
       if (loggedIn === null || loggedIn === void 0) {
@@ -40555,6 +40562,15 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
           message: "未登录抖音：请先在插件设置 → 抖音登录 中登录（或运行命令「登录抖音」）后重试；云端兜底只处理平台侧取不到媒体的情况。"
         };
       }
+    }
+    if (requireDouyinResolver && (!readiness.resolverStatus || readiness.resolverStatus.ready !== true)) {
+      const resolverReason = String(readiness.resolverStatus && readiness.resolverStatus.reason || "not-installed");
+      const detail = resolverReason === "not-installed" || resolverReason === "executable-missing" ? "抖音解析组件未安装" : `抖音解析组件校验未通过（${resolverReason}），需要重新安装`;
+      return {
+        allowed: false,
+        code: "DOUYIN_RESOLVER_NOT_INSTALLED",
+        message: `待安装组件：${detail}，云端兜底不会替代本地解析。请在插件设置 → 安装／更新本地组件 中处理（需要 Pro 权益）后重试。`
+      };
     }
     return { allowed: true, binding: activeBinding };
   }
@@ -41172,6 +41188,29 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     }
     new Notice(`Pro 已开通，但${fallbackComponentText}需要${actionText}。请在插件设置的 Pro 高级功能里处理本地转写组件。`, 1e4);
     return false;
+  }
+  // Douyin links fail at media resolution, before any transcription runs, so
+  // the first-use install never covered them. Install the resolver once when a
+  // sync reports it missing, then tell the user to retry.
+  async maybeAutoInstallDouyinResolver() {
+    if (this.__douyinResolverAutoInstallTried) return;
+    this.__douyinResolverAutoInstallTried = true;
+    try {
+      const readiness = this.getLocalTranscriptionComponentReadiness();
+      if (readiness.resolverStatus && readiness.resolverStatus.ready === true) return;
+      new Notice("检测到抖音解析组件缺失，正在自动安装（需要 Pro 权益）…", 8e3);
+      await this.installLocalTranscriptionComponents({
+        reason: "douyin-resolver-missing",
+        readiness,
+        requireResolver: true
+      });
+      const next = this.getLocalTranscriptionComponentReadiness();
+      if (next.resolverStatus && next.resolverStatus.ready === true) {
+        new Notice("抖音解析组件已安装，请重新同步这条抖音链接。", 1e4);
+      }
+    } catch (error) {
+      new Notice(`抖音解析组件自动安装失败：${error && (error.message || error) || "未知错误"}。可在插件设置中手动安装。`, 12e3);
+    }
   }
   async installLocalTranscriptionComponents(options = {}) {
     const scope = ["Asr", "Ocr", "Resolver"].map((key) => ({ required: !!(options.allComponents || options["require" + key] || options["force" + key]), force: options["force" + key] === true }));
@@ -42915,6 +42954,17 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     } catch (error) {
       error.transcriptionSetupRequired = true;
       throw error;
+    }
+    try {
+      const readiness = this.getLocalTranscriptionComponentReadiness();
+      if (!readiness.resolverStatus || readiness.resolverStatus.ready !== true) {
+        await this.installLocalTranscriptionComponents({
+          reason: "transcription-first-use",
+          readiness,
+          requireResolver: true
+        });
+      }
+    } catch (_error) {
     }
     await this.recoverStaleLocalTranscriptionCommand();
     try {
@@ -46589,6 +46639,7 @@ ${finalized.markdown}
                 } else {
                   douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
                   douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
+                  if (douyinLocalResolverNotInstalled) void this.maybeAutoInstallDouyinResolver();
                   localResolverStage.attempted = !douyinLocalResolverNotInstalled;
                   localResolverStage.rejectionReason = douyinLocalResolverNotInstalled ? "not-installed" : douyinLocalResolverLoginRequired ? "login-required" : localUrls.length && localResolution.identityOutcome !== "target-id-matched" ? "identity-unverified" : "resolver-no-media";
                   if (localResolution && localResolution.error && !douyinLocalResolverNotInstalled) {
