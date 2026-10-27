@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.210';
+const PLUGIN_RUNTIME_VERSION = '1.3.211';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -21284,13 +21284,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         message: '待安装组件：云端兜底只在本地转写组件已安装并实际尝试失败后使用。请先在插件设置中安装／更新本地组件，再在小程序同步历史中重试。',
       };
     }
-    if (requireDouyinResolver && (!readiness.resolverStatus || readiness.resolverStatus.ready !== true)) {
-      return {
-        allowed: false,
-        code: 'DOUYIN_RESOLVER_NOT_INSTALLED',
-        message: '待安装组件：抖音解析组件未安装或未通过校验，云端兜底不会替代本地解析。请先在插件设置中安装／更新本地组件后重试。',
-      };
-    }
+    // Login comes before the resolver check: a logged-out user cannot resolve
+    // anything, and that is the action they should take first.
     if (requireDouyinLogin) {
       let loggedIn = pluginDouyinLogin;
       if (loggedIn === null || loggedIn === undefined) {
@@ -21303,6 +21298,17 @@ class WechatObsidianInboxPlugin extends Plugin {
           message: '未登录抖音：请先在插件设置 → 抖音登录 中登录（或运行命令「登录抖音」）后重试；云端兜底只处理平台侧取不到媒体的情况。',
         };
       }
+    }
+    if (requireDouyinResolver && (!readiness.resolverStatus || readiness.resolverStatus.ready !== true)) {
+      const resolverReason = String(readiness.resolverStatus && readiness.resolverStatus.reason || 'not-installed');
+      const detail = resolverReason === 'not-installed' || resolverReason === 'executable-missing'
+        ? '抖音解析组件未安装'
+        : `抖音解析组件校验未通过（${resolverReason}），需要重新安装`;
+      return {
+        allowed: false,
+        code: 'DOUYIN_RESOLVER_NOT_INSTALLED',
+        message: `待安装组件：${detail}，云端兜底不会替代本地解析。请在插件设置 → 安装／更新本地组件 中处理（需要 Pro 权益）后重试。`,
+      };
     }
     return { allowed: true, binding: activeBinding };
   }
@@ -21974,6 +21980,30 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     new Notice(`Pro 已开通，但${fallbackComponentText}需要${actionText}。请在插件设置的 Pro 高级功能里处理本地转写组件。`, 10000);
     return false;
+  }
+
+  // Douyin links fail at media resolution, before any transcription runs, so
+  // the first-use install never covered them. Install the resolver once when a
+  // sync reports it missing, then tell the user to retry.
+  async maybeAutoInstallDouyinResolver() {
+    if (this.__douyinResolverAutoInstallTried) return;
+    this.__douyinResolverAutoInstallTried = true;
+    try {
+      const readiness = this.getLocalTranscriptionComponentReadiness();
+      if (readiness.resolverStatus && readiness.resolverStatus.ready === true) return;
+      new Notice('检测到抖音解析组件缺失，正在自动安装（需要 Pro 权益）…', 8000);
+      await this.installLocalTranscriptionComponents({
+        reason: 'douyin-resolver-missing',
+        readiness,
+        requireResolver: true,
+      });
+      const next = this.getLocalTranscriptionComponentReadiness();
+      if (next.resolverStatus && next.resolverStatus.ready === true) {
+        new Notice('抖音解析组件已安装，请重新同步这条抖音链接。', 10000);
+      }
+    } catch (error) {
+      new Notice(`抖音解析组件自动安装失败：${error && (error.message || error) || '未知错误'}。可在插件设置中手动安装。`, 12000);
+    }
   }
 
   async installLocalTranscriptionComponents(options = {}) {
@@ -23792,6 +23822,23 @@ class WechatObsidianInboxPlugin extends Plugin {
       // instead of retrying alternate media or replacing it with a cloud error.
       error.transcriptionSetupRequired = true;
       throw error;
+    }
+    // The first-use install above covers ASR/OCR. A Douyin link also needs the
+    // resolver, and users who only ever saw the transcription prompt never got
+    // it. Install it best-effort here so the next Douyin sync can resolve
+    // locally instead of failing on a missing component.
+    try {
+      const readiness = this.getLocalTranscriptionComponentReadiness();
+      if (!readiness.resolverStatus || readiness.resolverStatus.ready !== true) {
+        await this.installLocalTranscriptionComponents({
+          reason: 'transcription-first-use',
+          readiness,
+          requireResolver: true,
+        });
+      }
+    } catch (_error) {
+      // Non-Douyin media transcribes fine without it; a resolver failure must
+      // not block the transcription that triggered this install.
     }
     await this.recoverStaleLocalTranscriptionCommand();
     try {
@@ -27911,6 +27958,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               } else {
                 douyinLocalResolverLoginRequired = Boolean(localResolution && localResolution.loginRequired);
                 douyinLocalResolverNotInstalled = Boolean(localResolution && localResolution.notInstalled);
+                if (douyinLocalResolverNotInstalled) void this.maybeAutoInstallDouyinResolver();
                 localResolverStage.attempted = !douyinLocalResolverNotInstalled;
                 localResolverStage.rejectionReason = douyinLocalResolverNotInstalled
                   ? 'not-installed'

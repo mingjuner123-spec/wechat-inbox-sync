@@ -204,6 +204,25 @@ function run() {
         assert.equal(rolledBack.settings.settingsRevision, 11);
       }
 
+      // 12. The resolver status names the failure so the user is told whether to
+      // install or to reinstall.
+      {
+        const resolverUtils = require('../obsidian-plugin/wechat-inbox-sync/src/local-douyin-resolver-utils');
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'resolver-status-'));
+        const exe = path.join(dir, 'yt-dlp.exe');
+        assert.equal(resolverUtils.getVerifiedResolverStatus(exe, 'win32', 'x64').reason, 'not-installed');
+        fs.writeFileSync(`${exe}.verified.json`, JSON.stringify({ schema: 1, platform: 'win32', arch: 'x64', sha256: 'a'.repeat(64), byteLength: 3 }));
+        assert.equal(resolverUtils.getVerifiedResolverStatus(exe, 'win32', 'x64').reason, 'executable-missing');
+        fs.writeFileSync(exe, 'abc');
+        assert.equal(resolverUtils.getVerifiedResolverStatus(exe, 'win32', 'x64').reason, 'hash-mismatch');
+        const crypto = require('node:crypto');
+        const sha = crypto.createHash('sha256').update('abc').digest('hex');
+        fs.writeFileSync(`${exe}.verified.json`, JSON.stringify({ schema: 1, platform: 'win32', arch: 'x64', sha256: sha, byteLength: 3, version: '1' }));
+        const ok = resolverUtils.getVerifiedResolverStatus(exe, 'win32', 'x64');
+        assert.equal(ok.ready, true);
+        assert.equal(ok.version, '1');
+      }
+
       console.log('plugin failure reduction tests passed');
     })();
   }
