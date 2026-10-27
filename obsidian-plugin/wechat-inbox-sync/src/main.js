@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.209';
+const PLUGIN_RUNTIME_VERSION = '1.3.210';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -530,6 +530,9 @@ const NOTE_PROPERTY_FIELD_KEYS = [
 const DEFAULT_SETTINGS = {
   apiBase: OFFICIAL_SYNC_API_BASE,
   settingsVersion: 2,
+  // Monotonic settings revision. An older data.json (for example a restored
+  // backup) carries a lower value, which is how the rollback guard notices it.
+  settingsRevision: 0,
   token: '',
   pendingBindCode: '',
   pendingConnectionTicket: '',
@@ -17450,6 +17453,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       && normalizeOutbox(savedDiagnosticOutbox).length !== savedDiagnosticOutbox.length,
     );
     this.settings = mergeSettings(savedSettings);
+    try {
+      await this.applySettingsRollbackGuard();
+    } catch (_error) {
+      // A guard failure must never stop the plugin from loading.
+    }
     if (!savedSettings
       || !savedSettings.clientId
       || shouldPersistNormalizedInboxDir(savedSettings, this.settings)
@@ -17580,6 +17588,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async saveSettings(nextSettings) {
     this.ensureSerializedSaveData();
+    // A caller that forgets the argument must not silently rebuild settings
+    // from defaults: that is exactly how bindings were once wiped.
+    if (!nextSettings || typeof nextSettings !== 'object') nextSettings = this.settings || {};
     if (this.syncDiagnosticPersistencePromise) {
       await this.syncDiagnosticPersistencePromise.catch(() => {});
     }
@@ -17591,8 +17602,72 @@ class WechatObsidianInboxPlugin extends Plugin {
       ...(nextSettings || {}),
       ...(Array.isArray(latestOutbox) ? { syncDiagnosticOutbox: latestOutbox } : {}),
     });
+    this.settings.settingsRevision = (Number(this.settings.settingsRevision) || 0) + 1;
     if (this.autoSyncController) this.autoSyncController.setEnabled(this.settings.autoSyncEnabled);
     await this.saveData(this.settings);
+    this.writeSettingsGuard(this.settings);
+  }
+
+  // A settings file can be replaced from outside this vault: a restored
+  // backup, a copy from another machine, an interrupted sync. Every save
+  // therefore leaves a small guard copy next to data.json, and startup refuses
+  // to accept a snapshot that is older than the guard or that has lost the
+  // binding while the guard still has one.
+  getSettingsGuardPath() {
+    return path.join(this.getPluginBaseDir(), 'settings-guard.json');
+  }
+
+  writeSettingsGuard(settings) {
+    try {
+      const guard = {
+        schema: 1,
+        revision: Number(settings && settings.settingsRevision) || 0,
+        updatedAt: new Date().toISOString(),
+        bindings: Array.isArray(settings && settings.bindings) ? settings.bindings : [],
+        token: String(settings && settings.token || ''),
+        clientId: String(settings && settings.clientId || ''),
+        apiBase: String(settings && settings.apiBase || ''),
+      };
+      const target = this.getSettingsGuardPath();
+      const temporary = `${target}.tmp-${process.pid}-${Date.now()}`;
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(temporary, JSON.stringify(guard, null, 2), 'utf8');
+      fs.renameSync(temporary, target);
+    } catch (_error) {
+      // The guard is a safety net, never a reason a save fails.
+    }
+  }
+
+  async applySettingsRollbackGuard() {
+    let guard = null;
+    try {
+      guard = JSON.parse(fs.readFileSync(this.getSettingsGuardPath(), 'utf8'));
+    } catch (_error) {
+      guard = null;
+    }
+    if (!guard || typeof guard !== 'object') {
+      this.writeSettingsGuard(this.settings);
+      return;
+    }
+    const guardRevision = Number(guard.revision) || 0;
+    const currentRevision = Number(this.settings.settingsRevision) || 0;
+    const guardBindings = Array.isArray(guard.bindings) ? guard.bindings.filter((item) => item && item.token) : [];
+    const currentBindings = Array.isArray(this.settings.bindings) ? this.settings.bindings : [];
+    const bindingLost = guardBindings.length > 0 && !currentBindings.some((item) => item && item.token);
+    const revisionWentBack = currentRevision < guardRevision;
+    if (!bindingLost && !revisionWentBack) return;
+    const repaired = { ...this.settings };
+    if (guardBindings.length) {
+      repaired.bindings = guardBindings;
+      repaired.token = String(guard.token || '') || getPrimaryBoundToken(guardBindings);
+    }
+    if (guard.clientId) repaired.clientId = String(guard.clientId);
+    if (guard.apiBase) repaired.apiBase = normalizeApiBase(guard.apiBase);
+    repaired.settingsRevision = Math.max(guardRevision, currentRevision);
+    try {
+      new Notice('检测到本机设置被回退（例如恢复了旧备份），已自动恢复绑定与设备标识。', 10000);
+    } catch (_error) { /* notice is optional */ }
+    await this.saveSettings(repaired);
   }
 
   startAutoSync() {

@@ -173,6 +173,37 @@ function run() {
         assert.equal(h.hardenLocalAsrRunLogScript(unknownRoot, 'win32'), 'unknown-script');
       }
 
+      // 11. Settings can never roll back: a no-argument save keeps the current
+      // settings, and startup repairs a snapshot that lost its binding.
+      {
+        const plugin = new Plugin();
+        let saved = null;
+        plugin.saveData = async (value) => { saved = JSON.parse(JSON.stringify(value)); };
+        plugin.settings = { bindings: [{ token: 'PRO-1' }], clientId: 'c1', apiBase: 'https://example.com/sync', settingsRevision: 5 };
+        plugin.writeSettingsGuard = () => {};
+        await plugin.saveSettings();
+        assert.equal(saved.bindings.length, 1, 'a no-argument save must not rebuild defaults');
+        assert.equal(saved.settingsRevision, 6, 'every save advances the revision');
+
+        const guardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'settings-guard-'));
+        fs.writeFileSync(path.join(guardDir, 'settings-guard.json'), JSON.stringify({
+          schema: 1,
+          revision: 10,
+          bindings: [{ token: 'PRO-1' }],
+          token: 'PRO-1',
+          clientId: 'c1',
+          apiBase: 'https://example.com/sync',
+        }));
+        const rolledBack = new Plugin();
+        rolledBack.saveData = async (value) => { saved = JSON.parse(JSON.stringify(value)); };
+        rolledBack.getPluginBaseDir = () => guardDir;
+        rolledBack.settings = { bindings: [], clientId: '', apiBase: 'https://example.com/sync', settingsRevision: 0 };
+        await rolledBack.applySettingsRollbackGuard();
+        assert.equal(rolledBack.settings.bindings.length, 1, 'the guard restores the lost binding');
+        assert.equal(rolledBack.settings.clientId, 'c1', 'the guard restores the bound client id');
+        assert.equal(rolledBack.settings.settingsRevision, 11);
+      }
+
       console.log('plugin failure reduction tests passed');
     })();
   }

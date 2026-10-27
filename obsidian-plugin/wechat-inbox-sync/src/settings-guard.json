@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "revision": 3,
+  "updatedAt": "2026-10-27T02:22:39.018Z",
+  "bindings": [
+    {
+      "token": "ABC-123",
+      "label": "微信 1",
+      "enabled": true,
+      "status": "bound",
+      "boundAt": "",
+      "lastSyncAt": "",
+      "unboundAt": "",
+      "lastError": ""
+    }
+  ],
+  "token": "ABC-123",
+  "clientId": "obsidian-f43670a03274f723f2e02f01fbd3d900",
+  "apiBase": "https://example.com/sync"
+}
