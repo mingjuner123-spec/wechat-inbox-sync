@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.212';
+const PLUGIN_RUNTIME_VERSION = '1.3.213';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -22797,6 +22797,22 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  // Nodes such as the US server have a system ffmpeg but no plugin-managed
+  // ASR component. Media preparation only needs the binary, so fall back to
+  // the system one before declaring the transcoder unavailable.
+  resolveSystemFfmpegPath() {
+    if (this.__systemFfmpegPath !== undefined) return this.__systemFfmpegPath;
+    let resolved = '';
+    try {
+      const probe = childProcess.execFileSync('ffmpeg', ['-version'], { timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+      if (probe && String(probe).toLowerCase().includes('ffmpeg')) resolved = 'ffmpeg';
+    } catch (_error) {
+      resolved = '';
+    }
+    this.__systemFfmpegPath = resolved;
+    return resolved;
+  }
+
   async transcodeCloudFallbackMediaToMp3(inputPath, { signal = null } = {}) {
     throwIfAborted(signal);
     const normalizedPath = String(inputPath || '').trim();
@@ -22809,7 +22825,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       return { path: normalizedPath, owned: false };
     }
     const installStatus = this.getLocalAsrInstallStatus();
-    const ffmpegPath = String(installStatus && installStatus.ffmpegPath || '').trim();
+    const ffmpegPath = String(installStatus && installStatus.ffmpegPath || '').trim() || this.resolveSystemFfmpegPath();
     if (!ffmpegPath) {
       const error = new Error('本地转写组件缺少 ffmpeg，无法准备云端音频');
       error.code = 'CLOUD_MEDIA_TRANSCODER_UNAVAILABLE';

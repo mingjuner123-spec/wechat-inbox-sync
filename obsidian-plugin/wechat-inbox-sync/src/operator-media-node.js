@@ -338,7 +338,8 @@ function createOperatorMediaNode({
       && plugin && typeof plugin.getLocalAsrInstallStatus === 'function') {
       try {
         const asrStatus = plugin.getLocalAsrInstallStatus();
-        if (asrStatus && asrStatus.ffmpegPath) capabilities.push(MEDIA_TRANSCODE_CAPABILITY);
+        const systemFfmpeg = typeof plugin.resolveSystemFfmpegPath === 'function' ? plugin.resolveSystemFfmpegPath() : '';
+        if ((asrStatus && asrStatus.ffmpegPath) || systemFfmpeg) capabilities.push(MEDIA_TRANSCODE_CAPABILITY);
       } catch (_error) { /* capability stays off */ }
     }
     if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY)
