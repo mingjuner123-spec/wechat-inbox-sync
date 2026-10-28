@@ -15111,7 +15111,8 @@ var require_operator_media_node = __commonJS({
         if (!rejectedCapabilities.has(MEDIA_TRANSCODE_CAPABILITY) && plugin && typeof plugin.getLocalAsrInstallStatus === "function") {
           try {
             const asrStatus = plugin.getLocalAsrInstallStatus();
-            if (asrStatus && asrStatus.ffmpegPath) capabilities.push(MEDIA_TRANSCODE_CAPABILITY);
+            const systemFfmpeg = typeof plugin.resolveSystemFfmpegPath === "function" ? plugin.resolveSystemFfmpegPath() : "";
+            if (asrStatus && asrStatus.ffmpegPath || systemFfmpeg) capabilities.push(MEDIA_TRANSCODE_CAPABILITY);
           } catch (_error) {
           }
         }
@@ -22169,7 +22170,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.212";
+var PLUGIN_RUNTIME_VERSION = "1.3.213";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -42047,6 +42048,21 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       throw error;
     }
   }
+  // Nodes such as the US server have a system ffmpeg but no plugin-managed
+  // ASR component. Media preparation only needs the binary, so fall back to
+  // the system one before declaring the transcoder unavailable.
+  resolveSystemFfmpegPath() {
+    if (this.__systemFfmpegPath !== void 0) return this.__systemFfmpegPath;
+    let resolved = "";
+    try {
+      const probe = childProcess.execFileSync("ffmpeg", ["-version"], { timeout: 5e3, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      if (probe && String(probe).toLowerCase().includes("ffmpeg")) resolved = "ffmpeg";
+    } catch (_error) {
+      resolved = "";
+    }
+    this.__systemFfmpegPath = resolved;
+    return resolved;
+  }
   async transcodeCloudFallbackMediaToMp3(inputPath, { signal = null } = {}) {
     throwIfAborted(signal);
     const normalizedPath = String(inputPath || "").trim();
@@ -42059,7 +42075,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       return { path: normalizedPath, owned: false };
     }
     const installStatus = this.getLocalAsrInstallStatus();
-    const ffmpegPath = String(installStatus && installStatus.ffmpegPath || "").trim();
+    const ffmpegPath = String(installStatus && installStatus.ffmpegPath || "").trim() || this.resolveSystemFfmpegPath();
     if (!ffmpegPath) {
       const error = new Error("本地转写组件缺少 ffmpeg，无法准备云端音频");
       error.code = "CLOUD_MEDIA_TRANSCODER_UNAVAILABLE";
