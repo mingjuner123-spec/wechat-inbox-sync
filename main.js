@@ -14812,6 +14812,7 @@ var require_operator_media_node = __commonJS({
     var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
     var XIAOHONGSHU_CAPABILITY = "xiaohongshu";
     var WECHAT_ARTICLE_CAPABILITY = "wechat_article";
+    var MEDIA_TRANSCODE_CAPABILITY = "media_transcode";
     var DEFAULT_POLL_INTERVAL_MS = 15e3;
     var DEFAULT_MAX_IDLE_POLL_INTERVAL_MS = 12e4;
     var DEFAULT_HEARTBEAT_INTERVAL_MS = 3e4;
@@ -14847,6 +14848,12 @@ var require_operator_media_node = __commonJS({
     }
     __name(redactError, "redactError");
     var FAILURE_REASON_PATTERNS = [
+      // More specific media-production failures come first: their messages often
+      // contain the generic words the later patterns match.
+      [/CLOUD_MEDIA_TRANSCODER_UNAVAILABLE|ffmpeg not found|缺少 ffmpeg/i, "transcoder-missing"],
+      [/CLOUD_MEDIA_TRANSCODE|TRANSCODE_FAILED|exit code -22/i, "transcode-failed"],
+      [/WORKER_OPERATION_TIMEOUT|操作超时/i, "worker-timeout"],
+      [/CLOUD_MEDIA_TOO_LARGE|TOO_LARGE/i, "media-too-large"],
       [/LOGIN|COOKIE|未登录|登录/i, "login-required"],
       [/RISK|VERIFY|CAPTCHA|风控|验证/i, "risk-control"],
       [/NOT_FOUND|NOTFOUND|NOT_FOUND|UNDELIVER|INVALID|失效|不存在|已删除/i, "content-unavailable"],
@@ -15100,6 +15107,13 @@ var require_operator_media_node = __commonJS({
         const capabilities = ["media_acquire"];
         if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY) && plugin && typeof plugin.acquireOperatorXiaohongshuContent === "function") {
           capabilities.push(XIAOHONGSHU_CAPABILITY);
+        }
+        if (!rejectedCapabilities.has(MEDIA_TRANSCODE_CAPABILITY) && plugin && typeof plugin.getLocalAsrInstallStatus === "function") {
+          try {
+            const asrStatus = plugin.getLocalAsrInstallStatus();
+            if (asrStatus && asrStatus.ffmpegPath) capabilities.push(MEDIA_TRANSCODE_CAPABILITY);
+          } catch (_error) {
+          }
         }
         if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY) && plugin && typeof plugin.acquireOperatorWechatArticleContent === "function") {
           capabilities.push(WECHAT_ARTICLE_CAPABILITY);
@@ -15468,6 +15482,7 @@ var require_operator_media_node = __commonJS({
       isXiaohongshuSourceUrl,
       isWechatArticleSourceUrl,
       WECHAT_ARTICLE_CAPABILITY,
+      MEDIA_TRANSCODE_CAPABILITY,
       resolveMediaSourcePlatform,
       isOperatorNodeEnabled,
       readOperatorNodeConfig,
@@ -16913,6 +16928,27 @@ var require_sync_lifecycle_utils = __commonJS({
       return error;
     }
     __name(createSyncLifecycleOutcomeError, "createSyncLifecycleOutcomeError");
+    function buildWebpageExtractionFailureDiagnostic(source, metadata, markdown) {
+      const url = String(metadata.url || source.content || "").trim();
+      let host = "";
+      try {
+        host = new URL(url).hostname.slice(0, 80);
+      } catch (_error) {
+      }
+      const conversionDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === "object" ? metadata.conversionDiagnostic : {};
+      return {
+        source: "webpage-extraction",
+        host,
+        conversionStatus: String(metadata.conversionStatus || "").trim().toLowerCase(),
+        transcriptionStatus: String(metadata.transcriptionStatus || "").trim().toLowerCase(),
+        markdownChars: String(markdown || "").length,
+        httpStatus: Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus) || 0,
+        finalKind: String(conversionDiagnostic.finalKind || "").slice(0, 40),
+        finalState: String(conversionDiagnostic.finalState || "").slice(0, 40),
+        note: String(metadata.conversionNote || metadata.conversionError || "").slice(0, 200)
+      };
+    }
+    __name(buildWebpageExtractionFailureDiagnostic, "buildWebpageExtractionFailureDiagnostic");
     function buildPdfExtractionFailureDiagnostic(metadata = {}) {
       const source = metadata.pdfExtractionDiagnostic && typeof metadata.pdfExtractionDiagnostic === "object" ? metadata.pdfExtractionDiagnostic : {};
       const diagnostic = {
@@ -17095,12 +17131,12 @@ var require_sync_lifecycle_utils = __commonJS({
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "公众号正文提取失败：仅保存了标题、简介或封面，需要重新提取；可在插件命令「处理公众号访问验证」中完成验证后重试");
       }
       if (isLikelyWebpageShell(url, markdown)) {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页");
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：仅获取到打开或登录引导页", buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
       }
       const recordType = String(source.type || "").trim().toLowerCase();
       const isWebpageRecord = ["webpage", "link"].includes(recordType) || /^https?:\/\//i.test(url);
       if (isWebpageRecord && conversionStatus === "success" && !transcription && meaningfulLength === 0 && !hasUsableImages) {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：没有获得可写入的正文");
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败：没有获得可写入的正文", buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
       }
       if (fileExt === "pdf" && conversionStatus === "attachment_saved") {
         return createSyncLifecycleOutcomeError(
@@ -17116,7 +17152,7 @@ var require_sync_lifecycle_utils = __commonJS({
         );
       }
       if (["failed", "link_saved"].includes(conversionStatus)) {
-        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败");
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "内容解析失败", buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
       }
       return null;
     }
@@ -22133,7 +22169,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.211";
+var PLUGIN_RUNTIME_VERSION = "1.3.212";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -45320,12 +45356,23 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   async prepareWechatChannelsMedia(record, url, binding = null, title = "", options = {}) {
     var _a;
     throwIfAborted(options.signal);
-    const response = await this.requestJson("/media/prepare", "POST", {
-      url,
-      recordId: getRecordId(record),
-      source: "wechat-channels-local-transcription",
-      title: title || ((_a = record == null ? void 0 : record.metadata) == null ? void 0 : _a.title) || ""
-    }, binding, { noCache: true, ...options.signal ? { signal: options.signal } : {} });
+    let response = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        response = await this.requestJson("/media/prepare", "POST", {
+          url,
+          recordId: getRecordId(record),
+          source: "wechat-channels-local-transcription",
+          title: title || ((_a = record == null ? void 0 : record.metadata) == null ? void 0 : _a.title) || ""
+        }, binding, { noCache: true, ...options.signal ? { signal: options.signal } : {} });
+        break;
+      } catch (error) {
+        const text = `${error && error.code || ""} ${error && error.message || ""}`;
+        const transient = /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
+        if (!transient || attempt === 1 || options.signal && options.signal.aborted) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    }
     throwIfAborted(options.signal);
     const data = (response == null ? void 0 : response.data) || {};
     const mediaUrl = String(data.mediaUrl || data.audioUrl || "").trim();
@@ -46202,6 +46249,17 @@ ${finalized.markdown}
         if (isXiaohongshuUrl(url) && !isXiaohongshuUrl(resolvedUrl)) {
           const externalRedirectError = new Error("小红书短链接跳转到了非官方网站，已停止请求");
           externalRedirectError.code = "XIAOHONGSHU_CONTENT_UNAVAILABLE";
+          try {
+            const redirected = new URL(resolvedUrl);
+            const original = new URL(url);
+            externalRedirectError.diagnostic = {
+              source: "xiaohongshu-redirect",
+              originalHost: original.hostname.slice(0, 80),
+              resolvedHost: redirected.hostname.slice(0, 80),
+              resolvedScheme: redirected.protocol
+            };
+          } catch (_error) {
+          }
           throw externalRedirectError;
         }
         const headers = getSocialRequestHeaders(resolvedUrl);

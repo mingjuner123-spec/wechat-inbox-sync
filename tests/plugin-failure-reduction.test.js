@@ -106,6 +106,9 @@ function run() {
       assert.equal(classifyFailureReason(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })), 'network');
       assert.equal(classifyFailureReason(Object.assign(new Error('笔记已删除'), { code: 'XHS_NOT_FOUND' })), 'content-unavailable');
       assert.equal(classifyFailureReason(new Error('???')), 'unknown');
+      assert.equal(classifyFailureReason(Object.assign(new Error('ffmpeg not found'), { code: 'CLOUD_MEDIA_TRANSCODER_UNAVAILABLE' })), 'transcoder-missing');
+      assert.equal(classifyFailureReason(Object.assign(new Error('ffmpeg failed with exit code -22'), { code: 'CLOUD_MEDIA_TRANSCODE_FAILED' })), 'transcode-failed');
+      assert.equal(classifyFailureReason(Object.assign(new Error('Worker operation timed out'), { code: 'WORKER_OPERATION_TIMEOUT' })), 'worker-timeout');
 
       // 7. The update hint must never write settings: a settings write is what
       // could disturb a user's bindings, and this check only shows a notice.
