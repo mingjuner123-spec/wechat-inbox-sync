@@ -360,7 +360,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.211';
+const PLUGIN_RUNTIME_VERSION = '1.3.212';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -26428,12 +26428,25 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async prepareWechatChannelsMedia(record, url, binding = null, title = '', options = {}) {
     throwIfAborted(options.signal);
-    const response = await this.requestJson('/media/prepare', 'POST', {
-      url,
-      recordId: getRecordId(record),
-      source: 'wechat-channels-local-transcription',
-      title: title || record?.metadata?.title || '',
-    }, binding, { noCache: true, ...(options.signal ? { signal: options.signal } : {}) });
+    // The Channels provider intermittently times out or answers 5xx. One
+    // retry turns most of those into a success instead of a failed sync.
+    let response = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        response = await this.requestJson('/media/prepare', 'POST', {
+          url,
+          recordId: getRecordId(record),
+          source: 'wechat-channels-local-transcription',
+          title: title || record?.metadata?.title || '',
+        }, binding, { noCache: true, ...(options.signal ? { signal: options.signal } : {}) });
+        break;
+      } catch (error) {
+        const text = `${error && error.code || ''} ${error && error.message || ''}`;
+        const transient = /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
+        if (!transient || attempt === 1 || (options.signal && options.signal.aborted)) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+    }
     throwIfAborted(options.signal);
     const data = response?.data || {};
     const mediaUrl = String(data.mediaUrl || data.audioUrl || '').trim();
@@ -27453,6 +27466,18 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (isXiaohongshuUrl(url) && !isXiaohongshuUrl(resolvedUrl)) {
           const externalRedirectError = new Error('小红书短链接跳转到了非官方网站，已停止请求');
           externalRedirectError.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
+          // The rejection is only useful if the next report says where the
+          // short link actually landed; host and scheme are safe to keep.
+          try {
+            const redirected = new URL(resolvedUrl);
+            const original = new URL(url);
+            externalRedirectError.diagnostic = {
+              source: 'xiaohongshu-redirect',
+              originalHost: original.hostname.slice(0, 80),
+              resolvedHost: redirected.hostname.slice(0, 80),
+              resolvedScheme: redirected.protocol,
+            };
+          } catch (_error) { /* unparsable redirect keeps the plain error */ }
           throw externalRedirectError;
         }
         const headers = getSocialRequestHeaders(resolvedUrl);

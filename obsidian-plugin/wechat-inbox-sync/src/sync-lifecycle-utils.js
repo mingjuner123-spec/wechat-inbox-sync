@@ -137,6 +137,28 @@ function createSyncLifecycleOutcomeError(code, message, diagnostic = null) {
   return error;
 }
 
+// "内容解析失败" alone cannot tell captcha from an empty page or an HTTP
+// rejection. Keep the facts that separate them with the failure.
+function buildWebpageExtractionFailureDiagnostic(source, metadata, markdown) {
+  const url = String(metadata.url || source.content || '').trim();
+  let host = '';
+  try { host = new URL(url).hostname.slice(0, 80); } catch (_error) { /* keep empty */ }
+  const conversionDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === 'object'
+    ? metadata.conversionDiagnostic
+    : {};
+  return {
+    source: 'webpage-extraction',
+    host,
+    conversionStatus: String(metadata.conversionStatus || '').trim().toLowerCase(),
+    transcriptionStatus: String(metadata.transcriptionStatus || '').trim().toLowerCase(),
+    markdownChars: String(markdown || '').length,
+    httpStatus: Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus) || 0,
+    finalKind: String(conversionDiagnostic.finalKind || '').slice(0, 40),
+    finalState: String(conversionDiagnostic.finalState || '').slice(0, 40),
+    note: String(metadata.conversionNote || metadata.conversionError || '').slice(0, 200),
+  };
+}
+
 function buildPdfExtractionFailureDiagnostic(metadata = {}) {
   const source = metadata.pdfExtractionDiagnostic && typeof metadata.pdfExtractionDiagnostic === 'object'
     ? metadata.pdfExtractionDiagnostic
@@ -361,7 +383,7 @@ function getSyncLifecycleOutcomeError(record) {
   }
 
   if (isLikelyWebpageShell(url, markdown)) {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败：仅获取到打开或登录引导页');
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败：仅获取到打开或登录引导页', buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
   }
 
   const recordType = String(source.type || '').trim().toLowerCase();
@@ -371,7 +393,7 @@ function getSyncLifecycleOutcomeError(record) {
     && !transcription
     && meaningfulLength === 0
     && !hasUsableImages) {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败：没有获得可写入的正文');
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败：没有获得可写入的正文', buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
   }
 
   if (fileExt === 'pdf' && conversionStatus === 'attachment_saved') {
@@ -390,7 +412,7 @@ function getSyncLifecycleOutcomeError(record) {
   }
 
   if (['failed', 'link_saved'].includes(conversionStatus)) {
-    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败');
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '内容解析失败', buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
   }
 
   return null;

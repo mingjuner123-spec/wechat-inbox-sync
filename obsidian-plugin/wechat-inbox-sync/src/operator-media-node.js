@@ -14,6 +14,7 @@ const DEFAULT_CAPABILITIES = Object.freeze(['media_acquire', 'local_asr']);
 // and the deployment's node registry accepted the capability.
 const XIAOHONGSHU_CAPABILITY = 'xiaohongshu';
 const WECHAT_ARTICLE_CAPABILITY = 'wechat_article';
+const MEDIA_TRANSCODE_CAPABILITY = 'media_transcode';
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 // An idle node backs off to one claim per two minutes. This stays well under
 // the worker capacity TTL, so a queued job is still noticed promptly.
@@ -59,6 +60,12 @@ function redactError(error) {
 // The reason below is a fixed vocabulary derived from the error - never the
 // raw message, which can carry URLs, cookies or page fragments.
 const FAILURE_REASON_PATTERNS = [
+  // More specific media-production failures come first: their messages often
+  // contain the generic words the later patterns match.
+  [/CLOUD_MEDIA_TRANSCODER_UNAVAILABLE|ffmpeg not found|缺少 ffmpeg/i, 'transcoder-missing'],
+  [/CLOUD_MEDIA_TRANSCODE|TRANSCODE_FAILED|exit code -22/i, 'transcode-failed'],
+  [/WORKER_OPERATION_TIMEOUT|操作超时/i, 'worker-timeout'],
+  [/CLOUD_MEDIA_TOO_LARGE|TOO_LARGE/i, 'media-too-large'],
   [/LOGIN|COOKIE|未登录|登录/i, 'login-required'],
   [/RISK|VERIFY|CAPTCHA|风控|验证/i, 'risk-control'],
   [/NOT_FOUND|NOTFOUND|NOT_FOUND|UNDELIVER|INVALID|失效|不存在|已删除/i, 'content-unavailable'],
@@ -324,6 +331,15 @@ function createOperatorMediaNode({
     if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY)
       && plugin && typeof plugin.acquireOperatorXiaohongshuContent === 'function') {
       capabilities.push(XIAOHONGSHU_CAPABILITY);
+    }
+    // ffmpeg is what turns a downloaded video into the audio the ASR stage
+    // needs. A node without it must not claim media jobs.
+    if (!rejectedCapabilities.has(MEDIA_TRANSCODE_CAPABILITY)
+      && plugin && typeof plugin.getLocalAsrInstallStatus === 'function') {
+      try {
+        const asrStatus = plugin.getLocalAsrInstallStatus();
+        if (asrStatus && asrStatus.ffmpegPath) capabilities.push(MEDIA_TRANSCODE_CAPABILITY);
+      } catch (_error) { /* capability stays off */ }
     }
     if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY)
       && plugin && typeof plugin.acquireOperatorWechatArticleContent === 'function') {
@@ -706,6 +722,7 @@ module.exports = {
   isXiaohongshuSourceUrl,
   isWechatArticleSourceUrl,
   WECHAT_ARTICLE_CAPABILITY,
+  MEDIA_TRANSCODE_CAPABILITY,
   resolveMediaSourcePlatform,
   isOperatorNodeEnabled,
   readOperatorNodeConfig,
