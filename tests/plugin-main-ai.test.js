@@ -14804,7 +14804,10 @@ async function runClipboardTextWebpagePromotionTests() {
   assert.strictEqual(failedSyncResult.written.length, 0);
   assert.strictEqual(failedSyncResult.failed.length, 1);
   assert.match(failedSyncResult.failed[0].message, /剪切板链接网页提取失败/);
-  assert.deepStrictEqual(failedSyncCalls, [['/records?status=pending', 'GET']]);
+  assert.deepStrictEqual(failedSyncCalls, [
+    ['/records?status=pending', 'GET'],
+    ['/transcriptions/fallback/jobs/recover', 'POST'],
+  ]);
 
   for (const content of [
     '纯文字，不应该调用网页提取',
