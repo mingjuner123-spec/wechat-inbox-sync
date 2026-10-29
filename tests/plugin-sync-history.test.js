@@ -381,6 +381,9 @@ function createPlugin() {
     clientId: 'plugin-history-test',
   });
   plugin.showSyncProgress = () => {};
+  // This suite isolates ordinary record lifecycle requests. Server discovery
+  // and its interaction with lifecycle fencing are covered by delivery tests.
+  plugin.discoverCloudFallbackJobs = async () => ({ jobs: [], invalidatedJobIds: [] });
   plugin.findExistingRecordNotePath = async () => '';
   plugin.savedSettingsSnapshots = [];
   plugin.saveData = async (settings) => {

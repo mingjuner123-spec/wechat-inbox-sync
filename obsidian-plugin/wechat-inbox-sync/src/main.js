@@ -105,6 +105,9 @@ const {
   normalizeCloudFallbackRecordSnapshot,
   isCloudFallbackJobTerminal,
   isCloudFallbackJobPending,
+  sameCloudFallbackDelivery,
+  selectCloudFallbackDelivery,
+  cloudFallbackRecordSourceFingerprint,
   normalizeCloudFallbackSourceType,
   isCloudFallbackUrlSourceType,
   isControlledCloudFallbackFileId,
@@ -360,7 +363,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.213';
+const PLUGIN_RUNTIME_VERSION = '1.3.214';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3798,6 +3801,8 @@ function isCloudFallbackRecordGenerationCurrent(record) {
 }
 
 function isCloudFallbackJobForRecord(job, record) {
+  if (job?.recordSourceFingerprint && (record?.type || record?.content || record?.metadata)
+    && job.recordSourceFingerprint !== cloudFallbackRecordSourceFingerprint(record)) return false;
   const jobRetryCount = getCloudFallbackJobRecordRetryCount(job);
   if (jobRetryCount === null) return getCloudFallbackRecordRetryCount(record) === 0;
   return jobRetryCount === getCloudFallbackRecordRetryCount(record);
@@ -19253,7 +19258,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       fileID,
       recordId,
     });
-    const retryCount = Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const processingContext = this.currentProcessingContext?.recordId === recordId ? this.currentProcessingContext : null;
+    const retryCount = options.retryCount === undefined && processingContext?.recordSnapshot
+      ? getCloudFallbackRecordRetryCount(processingContext.recordSnapshot)
+      : Math.max(0, Math.floor(Number(options.retryCount) || 0));
     const scopedJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs)
       .filter((item) => item.bindingFingerprint === bindingFingerprint
         && item.clientId === clientId
@@ -19271,6 +19279,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     const requestBody = {
       sourceType,
       recordId,
+      recordRetryCount: retryCount,
+      ...(processingContext?.recordSnapshot ? { recordSourceFingerprint: cloudFallbackRecordSourceFingerprint(processingContext.recordSnapshot) } : {}),
       clientRequestId: this.buildCloudFallbackClientRequestId({
         ...options,
         sourceType,
@@ -19315,17 +19325,27 @@ class WechatObsidianInboxPlugin extends Plugin {
       clientId,
       sourceFingerprint,
       recordRetryCount: retryCount,
+      ...(processingContext?.recordSnapshot ? { recordSnapshot: processingContext.recordSnapshot } : {}),
+      ...(processingContext?.attemptId ? { syncAttemptId: processingContext.attemptId, syncLeaseUntil: processingContext.leaseUntil || '' } : {}),
     });
     if (!job) throw new Error('云端兜底未返回有效任务');
     this.rememberCloudFallbackJobContext(job, { recordId, binding });
-    await this.upsertCloudFallbackJob(job);
-    await this.clearCloudFallbackSubmission({
-      bindingFingerprint,
-      clientId,
-      recordId,
-      recordRetryCount: retryCount,
-      clientRequestId: requestBody.clientRequestId,
-    });
+    try {
+      await this.upsertCloudFallbackJob(job);
+      await this.clearCloudFallbackSubmission({
+        bindingFingerprint,
+        clientId,
+        recordId,
+        recordRetryCount: retryCount,
+        clientRequestId: requestBody.clientRequestId,
+      });
+    } catch (error) {
+      // The server already accepted this operation. A settings failure must
+      // never cause the caller to upload/submit another media candidate.
+      const queued = createCloudFallbackPendingError(job, '', '云端已接收任务；本地恢复信息保存失败，将重新领取云端结果');
+      queued.persistenceWarning = true;
+      throw queued;
+    }
     // A freshly queued job is the best signal that the next poll may find a
     // result, so shorten an idle backoff without bypassing failure cooldowns.
     if (this.autoSyncController && typeof this.autoSyncController.wake === 'function') {
@@ -19448,8 +19468,56 @@ class WechatObsidianInboxPlugin extends Plugin {
     return { acknowledged };
   }
 
+  async discoverCloudFallbackJobs(binding) {
+    const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const clientId = String(this.settings?.clientId || '').trim();
+    if (!bindingFingerprint || !clientId) return { jobs: [], invalidatedJobIds: [] };
+    this.cloudFallbackRecoveryCursors ||= new Map();
+    const key = `${bindingFingerprint}:${clientId}`;
+    let cursor = this.cloudFallbackRecoveryCursors.get(key) || '';
+    const jobs = [], invalidatedJobIds = [];
+    // Bound each poll; a large account resumes its scan on the next poll.
+    for (let page = 0; page < 5; page += 1) {
+      try {
+        const response = await this.requestJson('/transcriptions/fallback/jobs/recover', 'POST', { cursor }, binding, { noCache: true });
+        const data = response?.data || response;
+        if (!Array.isArray(data?.jobs)) break;
+        if (Array.isArray(data.invalidatedJobIds)) invalidatedJobIds.push(...data.invalidatedJobIds.filter(id => typeof id === 'string'));
+        for (const value of data.jobs) {
+          const job = normalizeCloudFallbackJob({ ...value, bindingFingerprint, clientId });
+          if (job?.deliveryKey && (!job.recordSnapshot || isCloudFallbackJobForRecord(job, job.recordSnapshot))) jobs.push(job);
+        }
+        const next = String(data.nextCursor || '');
+        if (next && next <= cursor) break;
+        cursor = next;
+        this.cloudFallbackRecoveryCursors.set(key, cursor);
+        if (!cursor) break;
+      } catch (_) {
+        // Old servers do not expose recovery. Preserve the existing GET path
+        // and all local recovery evidence on unsupported routes/network errors.
+        break;
+      }
+    }
+    return { jobs, invalidatedJobIds };
+  }
+
   async pollCloudFallbackJobs(binding, records = []) {
-    const allJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    let allJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs);
+    const discovery = typeof this.discoverCloudFallbackJobs === 'function' ? await this.discoverCloudFallbackJobs(binding) : {};
+    const discovered = discovery.jobs || [];
+    const invalidated = new Set(discovery.invalidatedJobIds || []);
+    const discoveryBinding = getSyncLifecycleBindingFingerprint(binding && binding.token);
+    const discoveryClient = String(this.settings?.clientId || '').trim();
+    allJobs = allJobs.filter(job => !(job.bindingFingerprint === discoveryBinding && job.clientId === discoveryClient && invalidated.has(job.jobId)));
+    if (discovered.length) {
+      discovered.forEach((job, index) => {
+        const cached = allJobs.find(item => item.jobId === job.jobId && sameCloudFallbackDelivery(item, job));
+        if (cached) discovered[index] = normalizeCloudFallbackJob({ ...job, sourceFingerprint: cached.sourceFingerprint,
+          syncAttemptId: cached.syncAttemptId, syncLeaseUntil: cached.syncLeaseUntil });
+      });
+      const foundIds = new Set(discovered.map(job => [job.bindingFingerprint, job.clientId, job.jobId].join(':')));
+      allJobs = normalizeCloudFallbackJobs([...discovered, ...allJobs.filter(job => !foundIds.has([job.bindingFingerprint, job.clientId, job.jobId].join(':')))]);
+    }
     const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
     const clientId = String(this.settings && this.settings.clientId || '').trim();
     const recordsById = new Map((Array.isArray(records) ? records : [])
@@ -19465,11 +19533,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         // filtering is strict whenever the current record is available.
         return !currentRecord || isCloudFallbackJobForRecord(job, currentRecord);
       })());
-    if (!currentJobs.length) return { records, jobs: [] };
+    if (!currentJobs.length) {
+      if (invalidated.size) await this.persistCloudFallbackJobs(allJobs);
+      return { records, jobs: [] };
+    }
     const refreshedJobs = [];
-    let changed = false;
+    let changed = discovered.length > 0 || invalidated.size > 0;
     for (const current of currentJobs) {
-      if (isCloudFallbackJobTerminal(current)) {
+      if (isCloudFallbackJobTerminal(current) && !(current.status === 'succeeded' && !current.transcription && !current.content)) {
         refreshedJobs.push(current);
         continue;
       }
@@ -19498,6 +19569,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           syncLeaseUntil: current.syncLeaseUntil,
           recordSnapshot: current.recordSnapshot,
           recordRetryCount: current.recordRetryCount,
+          deliveryKey: data?.deliveryKey || current.deliveryKey,
+          recordSourceFingerprint: data?.recordSourceFingerprint || current.recordSourceFingerprint,
         });
         if (refreshed) {
           refreshedJobs.push(refreshed);
@@ -19519,20 +19592,20 @@ class WechatObsidianInboxPlugin extends Plugin {
       ]);
     }
     const latestByRecord = new Map();
-    const timestamp = (job) => job ? (Date.parse(job.updatedAt || job.createdAt || '') || 0) : 0;
     refreshedJobs.forEach((job) => {
       if (!job.recordId) return;
-      const previous = latestByRecord.get(job.recordId);
-      const newerTimestamp = timestamp(job) > timestamp(previous);
-      const sameTimestampActive = timestamp(job) === timestamp(previous)
-        && isCloudFallbackJobPending(job)
-        && !isCloudFallbackJobPending(previous);
-      if (!previous || newerTimestamp || sameTimestampActive) latestByRecord.set(job.recordId, job);
+      const group = refreshedJobs.filter(item => item.recordId === job.recordId);
+      const record = recordsById.get(job.recordId) || group.find(item => item.recordSnapshot)?.recordSnapshot;
+      const selected = selectCloudFallbackDelivery(group, record || { retryCount: job.recordRetryCount || 0 });
+      if (selected) latestByRecord.set(job.recordId, selected);
     });
     const applyJobToRecord = (record, job) => {
       const recordId = getRecordId(record);
       const metadata = record && record.metadata && typeof record.metadata === 'object' ? record.metadata : {};
-      if (metadata.cloudFallbackJobId && metadata.cloudFallbackJobId !== job.jobId) return record;
+      if (metadata.cloudFallbackJobId && metadata.cloudFallbackJobId !== job.jobId) {
+        const previous = refreshedJobs.find(item => item.jobId === metadata.cloudFallbackJobId);
+        if (!sameCloudFallbackDelivery(previous, job)) return record;
+      }
       const recordRetryCount = getCloudFallbackJobRecordRetryCount(job) === null
         ? getCloudFallbackRecordRetryCount(record)
         : getCloudFallbackJobRecordRetryCount(job);
@@ -19543,6 +19616,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const nextMetadata = {
         ...metadata,
         cloudFallbackJobId: job.jobId,
+        ...(job.deliveryKey ? { cloudFallbackDeliveryKey: job.deliveryKey } : {}),
         cloudFallbackStatus: job.status,
         cloudFallbackRetryable: job.retryable === true,
         cloudFallbackRecordRetryCount: recordRetryCount,
@@ -19586,6 +19660,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         nextMetadata.transcriptionStatus = 'success';
         nextMetadata.conversionStatus = 'success';
         nextMetadata.transcriptionError = '';
+      } else if (job.status === 'succeeded') {
+        // Discovery deliberately omits the result body. If GET is offline,
+        // wait for that body instead of running local transcription again.
+        nextMetadata.cloudFallbackStatus = 'queued';
+        nextMetadata.transcriptionStatus = 'pending';
+        nextMetadata.conversionStatus = 'pending';
       } else if (job.status === 'no_speech') {
         nextMetadata.transcription = '';
         nextMetadata.transcriptionStatus = 'no_speech';
@@ -19611,10 +19691,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     // so listPendingRecords may temporarily omit it. Keep the original local
     // record snapshot with the job and resume the normal write/complete path
     // as soon as the cloud result is ready.
-    refreshedJobs.forEach((job) => {
-      if (job.status !== 'succeeded' || (!String(job.transcription || '').trim() && !job.content)) return;
-      if (!job.recordId || existingRecordIds.has(job.recordId) || !job.recordSnapshot) return;
-      const syntheticRecord = applyJobToRecord({ ...job.recordSnapshot }, job);
+    latestByRecord.forEach((job) => {
+      if (!isCloudFallbackJobTerminal(job) && !(job.status === 'failed' && job.retryable !== true)) return;
+      const snapshot = job.recordSnapshot || refreshedJobs.find(other => sameCloudFallbackDelivery(job, other) && other.recordSnapshot)?.recordSnapshot;
+      if (!job.recordId || existingRecordIds.has(job.recordId) || !snapshot) return;
+      const syntheticRecord = applyJobToRecord({ ...snapshot }, job);
       nextRecords.push(syntheticRecord);
       existingRecordIds.add(job.recordId);
     });
@@ -25953,7 +26034,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           };
         } catch (candidateError) {
           if (isAbortError(candidateError) || signal?.aborted) throw createAbortError();
-          if (candidateError && candidateError.code === 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN') throw candidateError;
+          if (candidateError && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(candidateError.code)) throw candidateError;
           lastError = candidateError;
           if (candidateError.code === 'TRANSCRIPTION_NO_SPEECH'
             && (candidateError.noSpeechEvidence === 'non-speech-markers'
@@ -30229,10 +30310,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     return { replayed, retained };
   }
 
-  async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised) {
-    if (!lifecycleAdvertised) return { enabled: false };
+  async claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised, fallbackRecord = null) {
+    const deliveryKey = fallbackRecord?.metadata?.cloudFallbackDeliveryKey;
+    if (!lifecycleAdvertised) return deliveryKey ? { enabled: true, conflict: true } : { enabled: false };
     try {
-      const payload = await this.reportSyncLifecycleStatus(recordId, { status: 'processing' }, binding);
+      const active = deliveryKey ? getActiveCloudFallbackLifecycle(fallbackRecord) : null;
+      const payload = await this.reportSyncLifecycleStatus(recordId, { status: 'processing',
+        ...(deliveryKey ? { fallbackJobId: fallbackRecord.metadata.cloudFallbackJobId,
+          ...(active?.attemptId ? { resumeAttemptId: active.attemptId } : {}) } : {}),
+      }, binding);
       const data = payload && payload.data && typeof payload.data === 'object'
         ? payload.data
         : (payload && typeof payload === 'object' ? payload : {});
@@ -30244,7 +30330,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         leaseUntil: String(data.leaseUntil || data.processingLeaseUntil || '').trim(),
       };
     } catch (error) {
-      if (isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
+      if (!deliveryKey && isLegacySyncLifecycleError(error)) return { enabled: false, legacyFallback: true };
       if (isSyncRecordBusyError(error)) return { enabled: true, conflict: true };
       throw error;
     }
@@ -30364,13 +30450,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       const recordId = getRecordId(record);
       const cloudFallbackPending = isCloudFallbackPendingRecord(record);
       const cloudFallbackCompleted = isCloudFallbackCompletedRecord(record);
+      const cloudFallbackTerminal = isCloudFallbackTerminalRecord(record);
       const autoRetryKey = this.getAutoSyncRecordKey(binding, recordId);
       const previousFailure = this.getRecentSyncFailures().find((item) => (
         item.recordId === recordId && item.bindingToken === normalizeBindCodeInput(binding.token)
       ));
       // Only an explicit mini-program retry (higher counter), or a new record,
       // starts another attempt. Restarting or pressing Sync is not a retry.
-      if (previousFailure && !cloudFallbackCompleted
+      if (previousFailure && !cloudFallbackCompleted && !cloudFallbackTerminal
         && (Number(record.retryCount) || 0) <= previousFailure.retryCount
         && !this.findCompletedSyncReceipt(binding, recordId)) {
         skipped.push({ recordId, reason: 'failed-awaiting-manual-retry' });
@@ -30385,14 +30472,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         .find((item) => item.recordId === recordId
           && item.bindingFingerprint === getSyncLifecycleBindingFingerprint(binding.token)
           && item.stage !== 'committed');
-      if (pendingAttempt && !cloudFallbackPending && !cloudFallbackCompleted
+      if (pendingAttempt && pendingAttempt.stage !== 'cloud-fallback' && !cloudFallbackPending && !cloudFallbackCompleted
         && String(record.syncAttemptId || '') === pendingAttempt.attemptId) {
         // Failure report could not reach the server. Replay that report without
         // reclaiming an expired lease and transcribing the same content again.
         skipped.push({ recordId, reason: 'failure-report-pending' });
         continue;
       }
-      if (!cloudFallbackCompleted && this.backgroundSyncActive && (
+      if (!cloudFallbackCompleted && !cloudFallbackTerminal && this.backgroundSyncActive && (
         (this.settings.autoSyncStoppedRecords || []).includes(autoRetryKey)
         || (this.autoSyncController && (!this.autoSyncController.canRetry(autoRetryKey)
           || !this.autoSyncController.canRetry(`completion:${autoRetryKey}`)))
@@ -30424,15 +30511,6 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (!this.backgroundSyncActive) {
           this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端兜底中` });
         }
-        continue;
-      }
-      if (isCloudFallbackTerminalRecord(record)) {
-        skipped.push({
-          recordId,
-          reason: 'cloud-fallback-terminal',
-          jobId: record.metadata && record.metadata.cloudFallbackJobId,
-          status: record.metadata && (record.metadata.cloudFallbackStatus || record.metadata.transcriptionStatus),
-        });
         continue;
       }
       if (isCloudTranscriptionWaitingRecord(record)) {
@@ -30471,12 +30549,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         recordId,
         binding: binding ? { ...binding } : null,
         title: processingTitle,
+        recordSnapshot: normalizeCloudFallbackRecordSnapshot(record),
       };
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
-        lifecycle = getActiveCloudFallbackLifecycle(record)
-          || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        lifecycle = record.metadata?.cloudFallbackDeliveryKey
+          ? await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised, record)
+          : (getActiveCloudFallbackLifecycle(record) || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised));
         if (lifecycle.conflict) {
           skipped.push({ recordId, reason: 'record-busy' });
           continue;
@@ -30585,6 +30665,13 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           await this.acknowledgeCloudFallbackJobForRecord(record, binding).catch(() => {});
           continue;
+        }
+        if (cloudFallbackTerminal) {
+          const status = String(record.metadata.cloudFallbackStatus || 'failed');
+          const messages = { no_speech: '云端未检测到语音', cancelled: '云端兜底已取消', needs_action: '云端兜底需要处理', failed: '云端兜底处理失败' };
+          throw Object.assign(new Error(record.metadata.transcriptionError || messages[status] || messages.failed), {
+            code: `CLOUD_FALLBACK_${status.toUpperCase()}`, fallbackStatus: status,
+          });
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
         if (item.partialSaved) {

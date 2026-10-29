@@ -33,6 +33,8 @@ const helpers = PluginClass.__test;
     inboxDir: 'Inbox',
   });
   plugin.showSyncProgress = () => {};
+  // Cloud delivery recovery has its own suite; isolate local note dedupe here.
+  plugin.discoverCloudFallbackJobs = async () => ({ jobs: [], invalidatedJobIds: [] });
   plugin.app = {
     vault: {
       getMarkdownFiles: () => [

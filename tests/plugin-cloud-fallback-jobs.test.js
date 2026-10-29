@@ -150,7 +150,7 @@ assert.match(source, /delete requestBody\.cookie/);
 assert.match(source, /delete requestBody\.cookies/);
 assert.match(source, /CLOUD_FALLBACK_QUEUED/);
 assert.match(source, /cloud-fallback-processing/);
-assert.match(source, /cloud-fallback-terminal/);
+assert.match(source, /if \(cloudFallbackTerminal\)/, 'terminal fallback must enter lifecycle reporting instead of silently skipping');
 assert.match(source, /cloudFallbackRetryCount/);
 assert.match(source, /CLOUD_FALLBACK_RETRY_REQUIRED/);
 assert.match(source, /transcriptionStatus = 'no_speech'/);

@@ -1,5 +1,15 @@
 'use strict';
 
+const crypto = require('crypto');
+
+function cloudFallbackRecordSourceFingerprint(record) {
+  const metadata = record && record.metadata || {};
+  return crypto.createHash('sha256').update(JSON.stringify([
+    record && record.type || '', record && record.content || '', record && record.fileID || '',
+    metadata.url || '', metadata.originalUrl || '', metadata.fileID || '',
+  ])).digest('hex');
+}
+
 const CONNECTION_TICKET_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const CONNECTION_TICKET_PAYLOAD_LENGTH = 12;
 const CONNECTION_TICKET_PATTERN = new RegExp(
@@ -77,6 +87,7 @@ function normalizeCloudFallbackRecordSnapshot(value) {
       ? { recordId: String(value.recordId || value.syncRecordId).trim().slice(0, 180) }
       : {}),
     ...(String(value.type || '').trim() ? { type: String(value.type).trim().slice(0, 80) } : {}),
+    ...(String(value.fileID || '').trim() ? { fileID: String(value.fileID).trim().slice(0, 512) } : {}),
     ...(String(value.content || '').trim() ? { content: String(value.content).slice(0, 240000) } : {}),
     ...(String(value.title || '').trim() ? { title: String(value.title).trim().slice(0, 2000) } : {}),
     ...(String(value.description || '').trim() ? { description: String(value.description).trim().slice(0, 12000) } : {}),
@@ -117,6 +128,10 @@ function normalizeCloudFallbackJob(value) {
     bindingFingerprint: String(value.bindingFingerprint || '').trim().slice(0, 80),
     clientId: String(value.clientId || '').trim().slice(0, 180),
     sourceFingerprint: String(value.sourceFingerprint || '').trim().slice(0, 80),
+    ...(value.deliveryKey ? {
+      deliveryKey: String(value.deliveryKey).trim().slice(0, 64),
+      recordSourceFingerprint: String(value.recordSourceFingerprint || '').trim().slice(0, 64),
+    } : {}),
     ...(sourceUrl ? { sourceUrl } : {}),
     ...(fileID ? { fileID } : {}),
     status,
@@ -196,6 +211,29 @@ function isCloudFallbackJobPending(value) {
   const status = String(job.status || '').trim().toLowerCase();
   return isCloudFallbackPendingStatus(status)
     || (status === 'failed' && job.retryable === true);
+}
+
+function sameCloudFallbackDelivery(a, b) {
+  if (!a || !b || a.recordId !== b.recordId || a.clientId !== b.clientId
+    || a.bindingFingerprint !== b.bindingFingerprint
+    || Number(a.recordRetryCount || 0) !== Number(b.recordRetryCount || 0)) return false;
+  if (a.deliveryKey || b.deliveryKey) return Boolean(a.deliveryKey && a.deliveryKey === b.deliveryKey);
+  // Old jobs may only be combined when their media identity is known. Never
+  // treat merely sharing a record ID as proof of matching transcripts.
+  return Boolean(a.sourceFingerprint && a.sourceFingerprint === b.sourceFingerprint && a.sourceType === b.sourceType);
+}
+
+function selectCloudFallbackDelivery(jobs, record) {
+  const candidates = jobs.filter(job => job.recordId === String(record?._id || record?.id || record?.recordId || job.recordId)
+    && Number(job.recordRetryCount || 0) === Number(record?.retryCount || 0));
+  const timestamp = job => Date.parse(job?.updatedAt || job?.createdAt || '') || 0;
+  const anchorId = record?.metadata?.cloudFallbackJobId;
+  const anchor = candidates.find(job => job.jobId === anchorId)
+    || candidates.slice().sort((a, b) => timestamp(b) - timestamp(a))[0];
+  if (!anchor) return null;
+  const equivalent = candidates.filter(job => job.jobId === anchor.jobId || sameCloudFallbackDelivery(job, anchor));
+  return equivalent.find(job => job.status === 'succeeded' && (job.transcription || job.content))
+    || equivalent.find(isCloudFallbackJobPending) || anchor;
 }
 
 // A pending acknowledgement records the user's intent to release a finished
@@ -299,6 +337,9 @@ module.exports = {
   isCloudFallbackPendingStatus,
   isCloudFallbackJobTerminal,
   isCloudFallbackJobPending,
+  sameCloudFallbackDelivery,
+  selectCloudFallbackDelivery,
+  cloudFallbackRecordSourceFingerprint,
   normalizeCloudFallbackSourceType,
   isCloudFallbackUrlSourceType,
   normalizeCloudFallbackContent,
