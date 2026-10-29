@@ -398,6 +398,8 @@ Module._load = originalLoad;
 
 const helpers = PluginClass.__test;
 const sourceHelpers = SourcePluginClass.__test;
+// Delivery discovery has dedicated behavioral tests; these fixtures isolate the existing sync lifecycle.
+PluginClass.prototype.discoverCloudFallbackJobs = SourcePluginClass.prototype.discoverCloudFallbackJobs = async () => ({ jobs: [], invalidatedJobIds: [] });
 const productionRequestXiaohongshuStaticPage = PluginClass.prototype.requestXiaohongshuStaticPage;
 PluginClass.prototype.requestXiaohongshuStaticPage = async function requestXiaohongshuStaticPageFixture(url) {
   const response = await requestUrlMock({
@@ -14806,7 +14808,6 @@ async function runClipboardTextWebpagePromotionTests() {
   assert.match(failedSyncResult.failed[0].message, /剪切板链接网页提取失败/);
   assert.deepStrictEqual(failedSyncCalls, [
     ['/records?status=pending', 'GET'],
-    ['/transcriptions/fallback/jobs/recover', 'POST'],
   ]);
 
   for (const content of [
@@ -16701,7 +16702,8 @@ async function main() {
   await runDiagnosticFailureLogFilteringTests();
 }
 
-main().catch((error) => {
+const mainTestDeadline = setTimeout(() => { console.error('Main AI async tests did not finish'); process.exit(1); }, 60000);
+main().then(() => { clearTimeout(mainTestDeadline); console.log('All main AI async tests completed'); }).catch((error) => {
   if (process.env.GITHUB_ACTIONS) {
     const message = String(error && (error.stack || error.message) || error)
       .replace(/\r?\n/g, '%0A');
