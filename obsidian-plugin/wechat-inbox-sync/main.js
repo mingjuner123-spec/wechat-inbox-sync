@@ -3535,20 +3535,24 @@ var require_failure_technical_report = __commonJS({
     }
     __name(safeError, "safeError");
     function matchAsrSession(session, { recordId, attemptId, now }) {
-      if (String(session.recordId || "") !== String(recordId || "") || String(session.syncAttemptId || "") !== String(attemptId || "") || !["failed", "cancelled", "no_speech"].includes(String(session.status || "").toLowerCase())) {
+      const exactAttempt = String(session.syncAttemptId || "") === String(attemptId || "");
+      const sameRecord = String(session.recordId || "") === String(recordId || "");
+      if (!sameRecord || !["failed", "cancelled", "no_speech"].includes(String(session.status || "").toLowerCase())) {
         return { reason: "no_matching_attempt" };
       }
       const startedAt = iso(session.startedAt);
       const finishedAt = iso(session.finishedAt);
       const finishMs = Date.parse(finishedAt || "");
       const nowMs = Date.parse(now || "");
-      if (!startedAt || !finishedAt || !Number.isFinite(nowMs) || finishMs > nowMs + 60 * 1e3 || nowMs - finishMs > 24 * 60 * 60 * 1e3) {
+      const ageMs = nowMs - finishMs;
+      if (!startedAt || !finishedAt || !Number.isFinite(nowMs) || finishMs > nowMs + 60 * 1e3 || (exactAttempt ? ageMs > 24 * 60 * 60 * 1e3 : ageMs > 15 * 60 * 1e3)) {
         return { reason: "no_matching_attempt" };
       }
       const system = session.system || {};
       const runtime = session.runtime || {};
       const model = session.model || {};
       return { value: {
+        attemptMatch: exactAttempt ? "exact" : "same_record_recent_candidate",
         status: String(session.status),
         inputIdentity: safeInputIdentity(session.inputIdentity),
         startedAt,
@@ -14488,7 +14492,7 @@ var require_cloud_media_upload = __commonJS({
     var http2 = require("http");
     var https2 = require("https");
     var MAX_CLOUD_FALLBACK_MEDIA_BYTES2 = 100 * 1024 * 1024;
-    var DEFAULT_UPLOAD_TIMEOUT_MS = 12e4;
+    var DEFAULT_UPLOAD_TIMEOUT_MS = 8 * 60 * 1e3;
     function cloudMediaError(code, message, extra = {}) {
       const error = new Error(message);
       error.code = code;
@@ -14633,6 +14637,7 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
         let timer = null;
         let stream = null;
         let sent = 0;
+        const startedAt = Date.now();
         let request;
         const finish = /* @__PURE__ */ __name((error, value) => {
           if (settled) return;
@@ -14665,7 +14670,11 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
         if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
         timer = setTimeout(() => {
           request.destroy();
-          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时"));
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时", {
+            bytesSent: sent,
+            totalBytes: file.size,
+            elapsedMs: Date.now() - startedAt
+          }));
         }, Math.max(1e3, Math.min(10 * 60 * 1e3, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS)));
         request.on("error", (error) => {
           if (settled) return;
@@ -14749,6 +14758,7 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
       return await new Promise((resolve, reject) => {
         let settled = false;
         let sent = 0;
+        const startedAt = Date.now();
         let stream = null;
         let timer = null;
         const finish = /* @__PURE__ */ __name((error, value) => {
@@ -14784,7 +14794,11 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
         const timeout = Math.max(1e3, Math.min(10 * 60 * 1e3, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS));
         timer = setTimeout(() => {
           request.destroy();
-          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时"));
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时", {
+            bytesSent: sent,
+            totalBytes: file.size,
+            elapsedMs: Date.now() - startedAt
+          }));
         }, timeout);
         request.on("error", (error) => {
           if (settled) return;
@@ -14882,7 +14896,16 @@ var require_operator_media_node = __commonJS({
     __name(readOperatorNodeConfig, "readOperatorNodeConfig");
     function redactError(error) {
       const code = String(error && error.code || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80) || "OPERATOR_NODE_FAILED";
-      return { code };
+      const safeInteger = /* @__PURE__ */ __name((value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.min(Math.floor(Number(value)), Number.MAX_SAFE_INTEGER) : null, "safeInteger");
+      const bytesSent = safeInteger(error && error.bytesSent);
+      const totalBytes = safeInteger(error && error.totalBytes);
+      const elapsedMs = safeInteger(error && error.elapsedMs);
+      return {
+        code,
+        ...bytesSent !== null ? { bytesSent } : {},
+        ...totalBytes !== null ? { totalBytes } : {},
+        ...elapsedMs !== null ? { elapsedMs } : {}
+      };
     }
     __name(redactError, "redactError");
     var FAILURE_REASON_PATTERNS = [
@@ -15526,6 +15549,7 @@ var require_operator_media_node = __commonJS({
       isOperatorNodeEnabled,
       readOperatorNodeConfig,
       requestJsonViaNode: requestJsonViaNode2,
+      redactError,
       createOperatorMediaNode: createOperatorMediaNode2,
       classifyFailureReason
     };
@@ -22211,8 +22235,8 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.214";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
+var PLUGIN_RUNTIME_VERSION = "1.3.215";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -42728,7 +42752,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
         signal,
-        timeoutMs: 12e4,
+        timeoutMs: 8 * 60 * 1e3,
         maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
         fileName: "audio.mp3",
         contentType: "audio/mpeg",
