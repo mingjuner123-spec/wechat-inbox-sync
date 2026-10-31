@@ -51,12 +51,22 @@ function readOperatorNodeConfig({ env = process.env, apiBase = '' } = {}) {
 
 function redactError(error) {
   const code = String(error && error.code || '').replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 80) || 'OPERATOR_NODE_FAILED';
-  return { code };
+  const safeInteger = (value) => Number.isFinite(Number(value)) && Number(value) >= 0
+    ? Math.min(Math.floor(Number(value)), Number.MAX_SAFE_INTEGER)
+    : null;
+  const bytesSent = safeInteger(error && error.bytesSent);
+  const totalBytes = safeInteger(error && error.totalBytes);
+  const elapsedMs = safeInteger(error && error.elapsedMs);
+  return {
+    code,
+    ...(bytesSent !== null ? { bytesSent } : {}),
+    ...(totalBytes !== null ? { totalBytes } : {}),
+    ...(elapsedMs !== null ? { elapsedMs } : {}),
+  };
 }
 
-// The server stores only code, message, retryable and stage, so a bare
-// OPERATOR_NODE_FAILED leaves both the operator and the user guessing whether
-// the node lacked a login, hit risk control, or could not reach the platform.
+// The server stores a bounded error envelope. Keep upload progress limited to
+// numeric byte counts and elapsed time; never forward raw URLs, paths or text.
 // The reason below is a fixed vocabulary derived from the error - never the
 // raw message, which can carry URLs, cookies or page fragments.
 const FAILURE_REASON_PATTERNS = [
@@ -728,6 +738,7 @@ module.exports = {
   isOperatorNodeEnabled,
   readOperatorNodeConfig,
   requestJsonViaNode,
+  redactError,
   createOperatorMediaNode,
   classifyFailureReason,
 };

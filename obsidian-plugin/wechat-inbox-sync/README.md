@@ -4,6 +4,11 @@
 
 WeChat Inbox Sync follows a "send now, organize later" workflow: the mini program captures content, and the plugin writes it into the local vault as Markdown notes and attachments.
 
+## 1.3.215 更新
+
+- 放宽运营节点的媒体上传等待时间，并记录脱敏的上传字节数与耗时，便于区分传输未完成和服务端响应延迟。
+- 失败诊断可将同一内容 15 分钟内的 ASR 记录作为候选证据，并明确标注匹配精度。
+
 ## 1.3.141 更新
 
 - 修复部分普通公众号被误判为贴图的问题；已取得完整正文时不再重复请求。
