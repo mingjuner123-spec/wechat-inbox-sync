@@ -211,7 +211,6 @@ try {
 
   for (const mismatch of [
     { recordId: 'other-record' },
-    { syncAttemptId: 'old-attempt' },
     { status: 'success' },
     { finishedAt: relativeTime(-26 * 60 * 60 * 1000) },
   ]) {
@@ -223,6 +222,24 @@ try {
     assert.equal(result.unavailableReason, 'no_matching_attempt');
     assert.equal(JSON.parse(result.text).asr, undefined);
   }
+
+  // Older recovery paths can write a different attempt ID for the same
+  // failed record. Keep this evidence explicitly provisional and time-bounded.
+  saveSession({ syncAttemptId: 'old-attempt' });
+  const recentSameRecordCandidate = report.buildFailureTechnicalReport({
+    error, recordId: 'record-123', attemptId: 'attempt-123', stage: 'transcribe',
+    asrRoot: scratch, settings: { token, bindingCode: binding }, now,
+  });
+  assert.equal(recentSameRecordCandidate.unavailableReason, undefined);
+  assert.equal(JSON.parse(recentSameRecordCandidate.text).asr.attemptMatch, 'same_record_recent_candidate');
+
+  saveSession({ syncAttemptId: 'old-attempt', finishedAt: relativeTime(-16 * 60 * 1000) });
+  const staleSameRecord = report.buildFailureTechnicalReport({
+    error, recordId: 'record-123', attemptId: 'attempt-123', stage: 'transcribe',
+    asrRoot: scratch, settings: { token, bindingCode: binding }, now,
+  });
+  assert.equal(staleSameRecord.unavailableReason, 'no_matching_attempt');
+  assert.equal(JSON.parse(staleSameRecord.text).asr, undefined);
 
   const largeText = JSON.stringify({ schemaVersion: 1, kind: 'sync_failure', detail: '诊断'.repeat(100000) });
   const clipped = report.normalizeTechnicalReport({
