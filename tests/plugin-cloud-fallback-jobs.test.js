@@ -1191,9 +1191,9 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   assert.ok(heartbeatBodies.length >= 1);
   assert.ok(heartbeatBodies.every((item) => item.stage === 'acquiring'), 'media heartbeat must use the backend-supported acquiring stage');
   assert.ok(capacityBodies.length >= 1, 'operator must register capacity before claiming work');
-  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire']);
-  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire']);
-  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire']);
+  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article']);
+  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article']);
+  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article']);
   assert.strictEqual(fs.existsSync(operatorMediaPath), false, 'operator temp media must never remain after completion');
 
   // An idle always-on node backs off geometrically so it does not spend

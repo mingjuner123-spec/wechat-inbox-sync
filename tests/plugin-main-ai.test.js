@@ -16687,10 +16687,10 @@ async function main() {
     const plugin = new SourcePluginClass();
     requestUrlMock = async ({ url }) => {
       assert.ok(url.includes('/main/manifest.json'));
-      return { status: 200, text: JSON.stringify({ version: '1.3.217' }) };
+      return { status: 200, text: JSON.stringify({ version: '1.3.218' }) };
     };
     noticeMessages.length = 0;
-    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.217');
+    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.218');
     assert.ok(noticeMessages.some(message => message.includes('同步失败是否由版本差异引起尚未确认')));
     assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '');
     assert.strictEqual(noticeMessages.length, 1, 'a newer version should not produce repeated notices within the check window');
@@ -16698,8 +16698,8 @@ async function main() {
     const retryPlugin = new SourcePluginClass();
     requestUrlMock = async () => { throw new Error('offline'); };
     assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate(), '');
-    requestUrlMock = async () => ({ status: 200, text: JSON.stringify({ version: '1.3.217' }) });
-    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.217');
+    requestUrlMock = async () => ({ status: 200, text: JSON.stringify({ version: '1.3.218' }) });
+    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.218');
   } finally {
     requestUrlMock = previousRequestUrlMock;
     noticeMessages.length = 0;

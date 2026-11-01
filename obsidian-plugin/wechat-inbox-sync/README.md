@@ -4,6 +4,12 @@
 
 WeChat Inbox Sync follows a "send now, organize later" workflow: the mini program captures content, and the plugin writes it into the local vault as Markdown notes and attachments.
 
+## 1.3.217 更新
+
+- 修复知乎/头条文章误取推荐内容的问题，按目标文章 ID 和 canonical 地址校验正文；旧失败空壳会重新提取。
+- 诊断只保留仍未恢复的失败及匹配证据，并记录可操作的文章提取阶段信息。
+- 合并云端兜底上传等待、脱敏进度和插件版本不兼容提示改进。
+
 ## 1.3.216 更新
 
 - 云端明确返回插件版本不兼容时，直接提示更新到可用版本；普通同步失败不会被误判为版本问题，发现新版本时会给出“原因尚未确认”的更新建议。
