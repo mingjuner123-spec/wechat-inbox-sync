@@ -14417,15 +14417,16 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText({ detailed: true });
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion} / clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1`));
+    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion}`));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
-    assert.ok(diagnostic.includes('图片文字识别 OCR'));
-    assert.ok(diagnostic.includes('最近权限查询失败'));
-    assert.ok(diagnostic.includes('权限接口连接失败'));
-    assert.ok(diagnostic.includes('2026-07-15T06:30:00.000Z'));
-    assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
+    assert.ok(diagnostic.includes('当前没有失败中的同步记录'));
+    assert.strictEqual(diagnostic.includes('图片文字识别 OCR'), false);
+    assert.strictEqual(diagnostic.includes('最近权限查询失败'), false);
+    assert.strictEqual(diagnostic.includes('权限接口连接失败'), false);
+    assert.strictEqual(diagnostic.includes('2026-07-15T06:30:00.000Z'), false);
+    assert.strictEqual(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'), false);
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
-    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), true, 'detailed diagnostics retain installation provenance even when installation succeeded');
+    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false, 'sync diagnostics omit unrelated installation history');
     assert.strictEqual(diagnostic.includes('ABC-123'), false);
 
     helpers.appendLocalAsrRunLog({
@@ -14435,7 +14436,7 @@ async function runDiagnosticFailureLogFilteringTests() {
       error: '媒体下载超时',
     });
     const preAsrFailureDiagnostic = plugin.getSyncDiagnosticText();
-    assert.ok(preAsrFailureDiagnostic.includes('媒体下载超时'));
+    assert.strictEqual(preAsrFailureDiagnostic.includes('媒体下载超时'), false, 'uncorrelated historical failure logs are omitted');
     assert.strictEqual(preAsrFailureDiagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
 
     fs.rmSync(path.join(ocrRoot, 'install.log'), { force: true });
@@ -14449,8 +14450,8 @@ async function runDiagnosticFailureLogFilteringTests() {
       missingReasons: ['OCR 脚本未找到，请安装/更新本地转写组件'],
     });
     const missingScriptDiagnostic = plugin.getSyncDiagnosticText();
-    assert.ok(missingScriptDiagnostic.includes('Python 环境已安装，仅 OCR 脚本缺失'));
-    assert.ok(missingScriptDiagnostic.includes('OCR 安装日志未找到或没有记录失败信息'));
+    assert.strictEqual(missingScriptDiagnostic.includes('OCR 脚本缺失'), false);
+    assert.strictEqual(missingScriptDiagnostic.includes('OCR 安装日志'), false);
     assert.strictEqual(missingScriptDiagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
   } finally {
     fs.rmSync(asrRoot, { recursive: true, force: true });
