@@ -155,13 +155,23 @@ async function run() {
   assert.strictEqual(latest.recordRef, diagnostic.recordRef('record-A'));
   const log = helpers.buildSyncDiagnosticLogText({ status: 'failed', xiaohongshuBrowserResults: plugin.getRecentXiaohongshuBrowserResults() });
   fs.writeFileSync(path.join(temp, 'sync-last.log'), log);
+  plugin.saveSettings = async settings => { plugin.settings = settings; };
+  await plugin.updateRecentSyncFailures({ failed: [{
+    recordId: 'record-A', bindingToken: 'SYNTHETIC-XHS',
+    stage: 'parse', code: 'EXTRACTION_FAILED', message: '媒体提取失败',
+  }] });
   const restarted = fixture();
+  restarted.settings = helpers.mergeSettings(JSON.parse(JSON.stringify(plugin.settings)));
   restarted.showSyncProgress({ stage: 'empty' });
   let copied = '';
   restarted.copyDiagnosticText = async text => { copied = text; return true; };
   await restarted.copySyncDiagnosticText();
   assert.ok(copied.includes('no-media-candidate'));
   assert.ok(copied.includes(latest.attemptId));
+  restarted.saveSettings = async settings => { restarted.settings = settings; };
+  await restarted.updateRecentSyncFailures({ resolved: [{ recordId: 'record-A', bindingToken: 'SYNTHETIC-XHS' }] });
+  await restarted.copySyncDiagnosticText();
+  assert.ok(!copied.includes('no-media-candidate'), 'resolved records must no longer export stale platform failures');
   // Older ASR success must never claim this failed extraction was transcribed, even for the same record.
   fs.writeFileSync(path.join(temp, 'asr-diagnostic-last.json'), JSON.stringify({ recordId: 'record-A', startedAt: '2026-01-01T01:00:00.000Z', status: 'success' }));
   assert.ok(asr.detailedDiagnostic(temp, {}, latest).includes('historical_or_unconfirmed'));

@@ -29,6 +29,8 @@ async function run(){
   assert.match(diagnostic,/target/);assert.match(diagnostic,/403/);assert.match(diagnostic,/parse/);
   assert.doesNotMatch(diagnostic,/SYNTHETIC-SECRET|unrelated-xhs|抖音|ASR 尝试|模型|磁盘/);
   assert.ok(Buffer.byteLength(diagnostic)<4000);
+  assert.doesNotMatch(JSON.stringify(plugin.settings.recentSyncFailures), /zhihu\.com|2047272282221961889/,
+    'persistent failure context must not retain source links');
   // Settings reload retains safe article failure facts, despite a successful empty poll.
   plugin.settings=Plugin.__test.mergeSettings(JSON.parse(JSON.stringify(plugin.settings)));
   assert.match(plugin.getSyncDiagnosticText({detailed:true}),/403/);

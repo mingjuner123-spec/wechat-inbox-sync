@@ -22145,7 +22145,8 @@ function retainedSyncFailureDiagnostic(value, settings) {
 __name(retainedSyncFailureDiagnostic, "retainedSyncFailureDiagnostic");
 function retainedSyncFailureContext(item = {}) {
   return {
-    sourceUrl: sanitizeSourceLink(item.sourceUrl),
+    // Keep shared links in the active diagnostic only; failure history persists
+    // record/attempt identity and safe technical facts, not browsing history.
     stage: String(item.stage || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64),
     code: String(item.code || "").replace(/[^A-Z0-9_]/g, "").slice(0, 64),
     attemptId: /^[a-zA-Z0-9_-]{8,128}$/.test(item.attemptId || "") ? item.attemptId : ""

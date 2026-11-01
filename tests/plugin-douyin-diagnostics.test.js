@@ -137,9 +137,11 @@ async function run() {
     assert.doesNotMatch(result.metadata.transcriptionError || '', /安全验证/); cases++;
     browserCalls = 0; resolverCalls = 0;
     plugin.renderSocialMediaUrls = async () => { browserCalls++; throw Object.assign(new Error('fixture challenge'), { code: 'DOUYIN_CHALLENGE' }); };
-    await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: url, metadata: { url } }, '', '', 'fixture');
+    await plugin.hydrateWebpageMarkdown({ _id: 'douyin-record', type: 'webpage', content: url, metadata: { url } }, '', '', 'fixture');
     assert.equal(browserCalls, 1); assert.equal(resolverCalls, 1);
     assert.equal(diagnostic.read(scratch).at(-1).failureCode, 'DOUYIN_CHALLENGE'); cases++;
+    assert.doesNotMatch(plugin.getSyncDiagnosticText(), /DOUYIN_CHALLENGE/, 'unrelated history is not a current sync failure');
+    plugin.lastSyncDiagnostic = { status: 'failed', recordId: 'douyin-record', time: new Date().toISOString(), stage: 'parse' };
     const summary = plugin.getSyncDiagnosticText();
     assert.doesNotMatch(summary, /未检测到失败日志|最近小红书|飞书图片显示/);
     assert.match(summary, /DOUYIN_CHALLENGE/); cases++;
