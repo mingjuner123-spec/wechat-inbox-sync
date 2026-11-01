@@ -1,6 +1,7 @@
 'use strict';
 const { isWechatArticleFailurePlaceholder } = require('./wechat-placeholder-utils');
 const { isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
+const { isPlatformArticleUrl, hasPlatformArticleBody, sanitizePlatformArticleDiagnostic } = require('./platform-article-utils');
 
 const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
@@ -156,6 +157,7 @@ function buildWebpageExtractionFailureDiagnostic(source, metadata, markdown) {
     finalKind: String(conversionDiagnostic.finalKind || '').slice(0, 40),
     finalState: String(conversionDiagnostic.finalState || '').slice(0, 40),
     note: String(metadata.conversionNote || metadata.conversionError || '').slice(0, 200),
+    ...(sanitizePlatformArticleDiagnostic(conversionDiagnostic) || {}),
   };
 }
 
@@ -282,6 +284,7 @@ function isExistingLocalNoteDeliverable(record, markdown) {
   const fileExt = String(metadata.fileExt || '').trim().toLowerCase().replace(/^\./, '');
   const url = String(metadata.url || source.content || '').trim();
   const body = getMarkdownBody(markdown);
+  if (isPlatformArticleUrl(url) && !hasPlatformArticleBody(body)) return false;
   if (isKnownFailureReceiptMarkdown(body)) return false;
   if (metadata.transcriptionStatus === 'failed' && !String(metadata.transcription || '').trim()) return false;
   const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
@@ -340,6 +343,9 @@ function getSyncLifecycleOutcomeError(record) {
     metadata.contentSnapshot,
   ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
   const declaredError = `${metadata.conversionError || ''} ${metadata.transcriptionError || ''}`.trim();
+  if (isPlatformArticleUrl(url) && (['failed', 'link_saved'].includes(conversionStatus) || !hasPlatformArticleBody(markdown))) {
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '文章正文提取失败，未将标题或链接标记为同步成功', buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
+  }
   if (transcriptionStatus === 'no_speech' || conversionStatus === 'no_speech') {
     if (isRecognizedNoSpeechMetadata(metadata)) return null;
     // Same reason as below: an Xiaohongshu record is an extraction outcome.

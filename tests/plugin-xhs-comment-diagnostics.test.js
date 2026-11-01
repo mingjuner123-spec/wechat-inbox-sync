@@ -56,7 +56,8 @@ async function capture({pro = true, login = true, enabled = true, error, comment
   await plugin.copySyncDiagnosticText({ detailed: true });
   const diagnostic = record.metadata.xiaohongshuCommentResult;
   assert.ok(diagnostic, 'saved body must carry its own comment result: '+JSON.stringify(record.metadata));
-  assert.ok(copied.includes(JSON.stringify(diagnostic)), 'actual copy entry must include even successful-body diagnostics');
+  assert.ok(copied.includes('当前没有失败中的同步记录'), 'a saved body is not an unresolved sync failure');
+  assert.ok(!copied.includes(JSON.stringify(diagnostic)), 'successful-body comment history stays in record metadata, not failed-sync diagnostics');
   return {plugin, record, diagnostic, copied, calls, warning: helpers.getRecordConversionWarning(record)};
 }
 
@@ -518,7 +519,7 @@ async function run() {
     assert.strictEqual(failed.diagnostic.stopReason, stopReason);
     assert.strictEqual(failed.diagnostic.errorCode, errorCode);
     assert.ok(failed.warning.includes(warning));
-    assert.ok(failed.copied.includes(errorCode));
+    assert.ok(!failed.copied.includes(errorCode), 'comment warnings on a successfully saved body are not unresolved sync failures');
     identityFailures.push(failed.diagnostic);
   }
   const cookieChanged = await capture({details: {stopReason: 'skipped_no_login_cookie'}});
@@ -612,7 +613,7 @@ async function run() {
   };
   await assert.rejects(() => abortedPlugin.hydrateWebpageMarkdown({type: 'webpage', content: url, metadata: {url}}, '', '', '取消'), /cancelled/);
   assert.strictEqual(abortedPlugin.lastXiaohongshuCommentResults.at(-1).status, 'aborted');
-  assert.ok(abortedPlugin.getSyncDiagnosticText().includes('提取已取消'));
+  assert.ok(!abortedPlugin.getSyncDiagnosticText().includes('提取已取消'), 'unassociated cancellation is not an unresolved sync failure');
   // The final user notification consumes the same warning returned by saveRecord.
   const {buildSyncResultNotice} = require('../obsidian-plugin/wechat-inbox-sync/src/progress-notice-utils');
   assert.ok(buildSyncResultNotice(['saved'], [], [timeout.warning]).includes('评论提取失败'));
@@ -624,11 +625,11 @@ async function run() {
   const restarted = pluginFixture();
   restarted.showSyncProgress({stage: 'empty'});
   assert.ok(fs.readFileSync(logPath, 'utf8').includes('TIMEOUT'), 'empty auto-sync after restart must preserve previous diagnostics');
-  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('TIMEOUT'));
-  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('network_root_idle'));
-  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('TARGET_IDENTITY_MISSING'));
-  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('TARGET_IDENTITY_MISMATCH'));
-  assert.ok(restarted.getSyncDiagnosticText({ detailed: true }).includes('page_script_failed'));
+  const restartedDiagnostic = restarted.getSyncDiagnosticText({ detailed: true });
+  assert.ok(restartedDiagnostic.includes('当前没有失败中的同步记录'));
+  for (const detail of ['TIMEOUT', 'network_root_idle', 'TARGET_IDENTITY_MISSING', 'TARGET_IDENTITY_MISMATCH', 'page_script_failed']) {
+    assert.ok(!restartedDiagnostic.includes(detail), 'successful historical sync must not export unrelated comment details: ' + detail);
+  }
   for (let attempt = 0; attempt < 6; attempt++) {
     await restarted.hydrateWebpageMarkdown({type: 'webpage', content: url, metadata: {url, markdown: '已保存正文'}}, '', '', '重复');
   }

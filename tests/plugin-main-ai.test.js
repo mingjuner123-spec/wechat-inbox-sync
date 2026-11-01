@@ -11,6 +11,7 @@ const { createRecordBodyMarkdownHelpers } = require('../obsidian-plugin/wechat-i
 const { createAiMetadataHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/ai-metadata-utils');
 
 let requestUrlMock = async () => ({});
+const noticeMessages = [];
 async function withFixedNow(iso, callback) {
   const originalNow = Date.now;
   Date.now = () => new Date(iso).getTime();
@@ -371,7 +372,7 @@ Module._load = function mockObsidian(request, parent, isMain) {
   if (request === 'obsidian') {
     return {
       Modal: class Modal {},
-      Notice: class Notice {},
+      Notice: class Notice { constructor(message) { noticeMessages.push(String(message || '')); } },
       Plugin: class Plugin {},
       PluginSettingTab: class PluginSettingTab {},
       Setting: class Setting {},
@@ -439,7 +440,7 @@ assert.notStrictEqual(instrumentedLegacyAiMetadataMainSource, legacyAiMetadataMa
 const legacyAiMetadataModule = { exports: {} };
 const legacyAiMetadataObsidian = {
   Modal: class Modal {},
-  Notice: class Notice {},
+      Notice: class Notice { constructor(message) { noticeMessages.push(String(message || '')); } },
   Plugin: class Plugin {},
   PluginSettingTab: class PluginSettingTab {},
   Setting: class Setting {},
@@ -1254,6 +1255,8 @@ assert.throws(
   (error) => error && error.code === 'TRANSCRIPTION_LOW_QUALITY' && error.message.includes('重复句循环'),
 );
 assert.strictEqual(typeof helpers.formatHttpError, 'function');
+assert.match(helpers.formatSyncApiErrorMessage({ code: 'PLUGIN_UPDATE_REQUIRED', requiredVersion: '1.3.217' }), /当前插件版本.*需要更新到 1\.3\.217/);
+assert.match(helpers.formatSyncApiErrorMessage({ code: 'PLUGIN_VERSION_MISMATCH' }), /设置 → 第三方插件.*检查更新并重启 Obsidian/);
 assert.strictEqual(typeof helpers.buildTencentCreateRecTaskBody, 'function');
 assert.strictEqual(typeof helpers.buildTencentRequest, 'function');
 assert.strictEqual(typeof helpers.parseTencentCreateTaskResponse, 'function');
@@ -1277,7 +1280,7 @@ assert.strictEqual(typeof helpers.getPluginRuntimeIdentity, 'function');
 assert.deepStrictEqual(helpers.getPluginRuntimeIdentity(currentPluginVersion), {
   manifestVersion: currentPluginVersion,
   runtimeVersion: currentPluginVersion,
-  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1',
+  buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1',
   matchesManifest: true,
 });
 assert.strictEqual(helpers.getPluginRuntimeIdentity('1.3.58').matchesManifest, false);
@@ -11826,7 +11829,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
       runtime: {
         manifestVersion: currentPluginVersion,
         runtimeVersion: currentPluginVersion,
-        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1',
+        buildMarker: 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1',
         matchesManifest: true,
       },
       request: {
@@ -14414,15 +14417,16 @@ async function runDiagnosticFailureLogFilteringTests() {
 
     const diagnostic = plugin.getSyncDiagnosticText({ detailed: true });
     assert.ok(diagnostic.includes('插件版本：1.3.3'));
-    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion} / clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1`));
+    assert.ok(diagnostic.includes(`运行 Bundle：${currentPluginVersion}`));
     assert.ok(diagnostic.includes('版本身份一致：否（请完全退出并重新打开 Obsidian）'));
-    assert.ok(diagnostic.includes('图片文字识别 OCR'));
-    assert.ok(diagnostic.includes('最近权限查询失败'));
-    assert.ok(diagnostic.includes('权限接口连接失败'));
-    assert.ok(diagnostic.includes('2026-07-15T06:30:00.000Z'));
-    assert.ok(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'));
+    assert.ok(diagnostic.includes('当前没有失败中的同步记录'));
+    assert.strictEqual(diagnostic.includes('图片文字识别 OCR'), false);
+    assert.strictEqual(diagnostic.includes('最近权限查询失败'), false);
+    assert.strictEqual(diagnostic.includes('权限接口连接失败'), false);
+    assert.strictEqual(diagnostic.includes('2026-07-15T06:30:00.000Z'), false);
+    assert.strictEqual(diagnostic.includes('curl: (35) Recv failure: Connection reset by peer'), false);
     assert.strictEqual(diagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
-    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), true, 'detailed diagnostics retain installation provenance even when installation succeeded');
+    assert.strictEqual(diagnostic.includes('ASR INSTALL SUCCESS SHOULD NOT BE COPIED'), false, 'sync diagnostics omit unrelated installation history');
     assert.strictEqual(diagnostic.includes('ABC-123'), false);
 
     helpers.appendLocalAsrRunLog({
@@ -14432,7 +14436,7 @@ async function runDiagnosticFailureLogFilteringTests() {
       error: '媒体下载超时',
     });
     const preAsrFailureDiagnostic = plugin.getSyncDiagnosticText();
-    assert.ok(preAsrFailureDiagnostic.includes('媒体下载超时'));
+    assert.strictEqual(preAsrFailureDiagnostic.includes('媒体下载超时'), false, 'uncorrelated historical failure logs are omitted');
     assert.strictEqual(preAsrFailureDiagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
 
     fs.rmSync(path.join(ocrRoot, 'install.log'), { force: true });
@@ -14446,8 +14450,8 @@ async function runDiagnosticFailureLogFilteringTests() {
       missingReasons: ['OCR 脚本未找到，请安装/更新本地转写组件'],
     });
     const missingScriptDiagnostic = plugin.getSyncDiagnosticText();
-    assert.ok(missingScriptDiagnostic.includes('Python 环境已安装，仅 OCR 脚本缺失'));
-    assert.ok(missingScriptDiagnostic.includes('OCR 安装日志未找到或没有记录失败信息'));
+    assert.strictEqual(missingScriptDiagnostic.includes('OCR 脚本缺失'), false);
+    assert.strictEqual(missingScriptDiagnostic.includes('OCR 安装日志'), false);
     assert.strictEqual(missingScriptDiagnostic.includes('ASR SUCCESS TRANSCRIPT SHOULD NOT BE COPIED'), false);
   } finally {
     fs.rmSync(asrRoot, { recursive: true, force: true });
@@ -16638,6 +16642,68 @@ async function runWechatChannelsPartialNoteSyncLifecycleTest() {
     'ambiguous partial state must never be acknowledged as success');
 }
 async function main() {
+  const previousRequestUrlMock = requestUrlMock;
+  try {
+    const versionErrorPlugin = new SourcePluginClass();
+    versionErrorPlugin.settings = {
+      apiBase: 'https://sync.example.test',
+      token: 'test-binding-token',
+      clientId: 'test-client',
+      syncDiagnosticOutbox: [],
+    };
+    versionErrorPlugin.saveData = async () => {};
+    requestUrlMock = async () => ({
+      status: 426,
+      json: {
+        success: false,
+        errCode: 'PLUGIN_VERSION_MISMATCH',
+        requiredVersion: '1.3.217',
+        errMsg: '客户端版本不兼容',
+      },
+    });
+    let versionRequestError;
+    try {
+      await versionErrorPlugin.requestJson('/records?status=pending', 'GET', {}, { token: 'test-binding-token' });
+    } catch (error) {
+      versionRequestError = error;
+    }
+    assert.equal(versionRequestError && versionRequestError.code, 'PLUGIN_VERSION_MISMATCH');
+    assert.match(versionRequestError && versionRequestError.message || '', /当前插件版本.*需要更新到 1\.3\.217/);
+    const queuedVersionFailure = versionErrorPlugin.queueSyncDiagnosticFailure({
+      recordId: 'record-version-case-1',
+      attemptId: 'attempt-version-case-1',
+      diagnosticId: 'diagnostic-version-case-1',
+      binding: { token: 'test-binding-token' },
+      error: versionRequestError,
+      stage: 'sync',
+    });
+    assert.equal(queuedVersionFailure.queued, true);
+    assert.equal(queuedVersionFailure.event.errorType, 'SYNC_FAILED');
+    assert.equal(queuedVersionFailure.event.errorCode, 'PLUGIN_VERSION_MISMATCH');
+    assert.ok(queuedVersionFailure.event.evidenceCodes.includes('upgrade_required'));
+    assert.equal(queuedVersionFailure.event.stage, 'sync');
+    assert.equal(queuedVersionFailure.event.outcome, 'failed');
+
+    const plugin = new SourcePluginClass();
+    requestUrlMock = async ({ url }) => {
+      assert.ok(url.includes('/main/manifest.json'));
+      return { status: 200, text: JSON.stringify({ version: '1.3.218' }) };
+    };
+    noticeMessages.length = 0;
+    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.218');
+    assert.ok(noticeMessages.some(message => message.includes('同步失败是否由版本差异引起尚未确认')));
+    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '');
+    assert.strictEqual(noticeMessages.length, 1, 'a newer version should not produce repeated notices within the check window');
+
+    const retryPlugin = new SourcePluginClass();
+    requestUrlMock = async () => { throw new Error('offline'); };
+    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate(), '');
+    requestUrlMock = async () => ({ status: 200, text: JSON.stringify({ version: '1.3.218' }) });
+    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.218');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+    noticeMessages.length = 0;
+  }
   runNoteOutputPlanModuleTests();
   runRecordBodyMarkdownModuleTests();
   runAiMetadataFormattingModuleTests();

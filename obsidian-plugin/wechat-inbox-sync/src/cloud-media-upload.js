@@ -8,7 +8,10 @@ const https = require('https');
 // Keep this in sync with the server-side controlled-media limit. The plugin
 // rejects oversized input before asking the backend for a paid upload slot.
 const MAX_CLOUD_FALLBACK_MEDIA_BYTES = 100 * 1024 * 1024;
-const DEFAULT_UPLOAD_TIMEOUT_MS = 120000;
+// The server-side prepared-upload record expires after 15 minutes. Keep this
+// client wait below that bound while tolerating slower connections. CloudBase
+// SDK controls the signed URL's own TTL independently.
+const DEFAULT_UPLOAD_TIMEOUT_MS = 8 * 60 * 1000;
 
 function cloudMediaError(code, message, extra = {}) {
   const error = new Error(message);
@@ -148,6 +151,7 @@ async function uploadRawFile(uploadUrl, file, {
     let timer = null;
     let stream = null;
     let sent = 0;
+    const startedAt = Date.now();
     let request;
     const finish = (error, value) => {
       if (settled) return;
@@ -180,7 +184,9 @@ async function uploadRawFile(uploadUrl, file, {
     if (signal && typeof signal.addEventListener === 'function') signal.addEventListener('abort', abort, { once: true });
     timer = setTimeout(() => {
       request.destroy();
-      finish(cloudMediaError('CLOUD_MEDIA_UPLOAD_TIMEOUT', '云端媒体上传超时'));
+      finish(cloudMediaError('CLOUD_MEDIA_UPLOAD_TIMEOUT', '云端媒体上传超时', {
+        bytesSent: sent, totalBytes: file.size, elapsedMs: Date.now() - startedAt,
+      }));
     }, Math.max(1000, Math.min(10 * 60 * 1000, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS)));
     request.on('error', (error) => {
       if (settled) return;
@@ -262,6 +268,7 @@ async function uploadMultipartFile(
   return await new Promise((resolve, reject) => {
     let settled = false;
     let sent = 0;
+    const startedAt = Date.now();
     let stream = null;
     let timer = null;
     const finish = (error, value) => {
@@ -297,7 +304,9 @@ async function uploadMultipartFile(
     const timeout = Math.max(1000, Math.min(10 * 60 * 1000, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS));
     timer = setTimeout(() => {
       request.destroy();
-      finish(cloudMediaError('CLOUD_MEDIA_UPLOAD_TIMEOUT', '云端媒体上传超时'));
+      finish(cloudMediaError('CLOUD_MEDIA_UPLOAD_TIMEOUT', '云端媒体上传超时', {
+        bytesSent: sent, totalBytes: file.size, elapsedMs: Date.now() - startedAt,
+      }));
     }, timeout);
     request.on('error', (error) => {
       if (settled) return;

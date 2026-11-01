@@ -629,23 +629,26 @@ function safeError(error, settings = {}) {
   return redactTree(value, settings);
 }
 function matchAsrSession(session, { recordId, attemptId, now }) {
-  if (String(session.recordId || '') !== String(recordId || '')
-    || String(session.syncAttemptId || '') !== String(attemptId || '')
-    || !['failed', 'cancelled', 'no_speech'].includes(String(session.status || '').toLowerCase())) {
+  const exactAttempt = String(session.syncAttemptId || '') === String(attemptId || '');
+  const sameRecord = String(session.recordId || '') === String(recordId || '');
+  if (!sameRecord || !['failed', 'cancelled', 'no_speech'].includes(String(session.status || '').toLowerCase())) {
     return { reason: 'no_matching_attempt' };
   }
   const startedAt = iso(session.startedAt);
   const finishedAt = iso(session.finishedAt);
   const finishMs = Date.parse(finishedAt || '');
   const nowMs = Date.parse(now || '');
+  const ageMs = nowMs - finishMs;
   if (!startedAt || !finishedAt || !Number.isFinite(nowMs)
-    || finishMs > nowMs + 60 * 1000 || nowMs - finishMs > 24 * 60 * 60 * 1000) {
+    || finishMs > nowMs + 60 * 1000
+    || (exactAttempt ? ageMs > 24 * 60 * 60 * 1000 : ageMs > 15 * 60 * 1000)) {
     return { reason: 'no_matching_attempt' };
   }
   const system = session.system || {};
   const runtime = session.runtime || {};
   const model = session.model || {};
   return { value: {
+    attemptMatch: exactAttempt ? 'exact' : 'same_record_recent_candidate',
     status: String(session.status),
     inputIdentity: safeInputIdentity(session.inputIdentity),
     startedAt,

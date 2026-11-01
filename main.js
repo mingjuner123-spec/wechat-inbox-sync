@@ -3535,20 +3535,24 @@ var require_failure_technical_report = __commonJS({
     }
     __name(safeError, "safeError");
     function matchAsrSession(session, { recordId, attemptId, now }) {
-      if (String(session.recordId || "") !== String(recordId || "") || String(session.syncAttemptId || "") !== String(attemptId || "") || !["failed", "cancelled", "no_speech"].includes(String(session.status || "").toLowerCase())) {
+      const exactAttempt = String(session.syncAttemptId || "") === String(attemptId || "");
+      const sameRecord = String(session.recordId || "") === String(recordId || "");
+      if (!sameRecord || !["failed", "cancelled", "no_speech"].includes(String(session.status || "").toLowerCase())) {
         return { reason: "no_matching_attempt" };
       }
       const startedAt = iso(session.startedAt);
       const finishedAt = iso(session.finishedAt);
       const finishMs = Date.parse(finishedAt || "");
       const nowMs = Date.parse(now || "");
-      if (!startedAt || !finishedAt || !Number.isFinite(nowMs) || finishMs > nowMs + 60 * 1e3 || nowMs - finishMs > 24 * 60 * 60 * 1e3) {
+      const ageMs = nowMs - finishMs;
+      if (!startedAt || !finishedAt || !Number.isFinite(nowMs) || finishMs > nowMs + 60 * 1e3 || (exactAttempt ? ageMs > 24 * 60 * 60 * 1e3 : ageMs > 15 * 60 * 1e3)) {
         return { reason: "no_matching_attempt" };
       }
       const system = session.system || {};
       const runtime = session.runtime || {};
       const model = session.model || {};
       return { value: {
+        attemptMatch: exactAttempt ? "exact" : "same_record_recent_candidate",
         status: String(session.status),
         inputIdentity: safeInputIdentity(session.inputIdentity),
         startedAt,
@@ -4141,8 +4145,12 @@ var require_sync_diagnostic_reporter = __commonJS({
       "OCR_FAILED",
       "SYNC_FAILED",
       "TRANSCRIPTION_FAILED",
-      "WRITE_FAILED"
+      "WRITE_FAILED",
+      "PLUGIN_UPDATE_REQUIRED",
+      "PLUGIN_VERSION_MISMATCH",
+      "PLUGIN_VERSION_UNSUPPORTED"
     ]);
+    var SAFE_ERROR_TYPES = new Set([...SAFE_ERROR_CODES].filter((code) => !code.startsWith("PLUGIN_")));
     var SAFE_EVIDENCE_CODES = /* @__PURE__ */ new Set([
       "network_timeout",
       "http_status",
@@ -4293,6 +4301,7 @@ var require_sync_diagnostic_reporter = __commonJS({
         if (result.length >= 8) break;
       }
       if (outcome === "succeeded" && !result.includes("sync_callback")) result.unshift("sync_callback");
+      if (outcome === "failed" && ["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"].includes(errorCode) && !result.includes("upgrade_required")) result.unshift("upgrade_required");
       if (outcome === "failed" && !result.length) {
         result.push("no_matching_evidence");
       }
@@ -4337,7 +4346,8 @@ var require_sync_diagnostic_reporter = __commonJS({
     function normalizeDiagnosticEvent(input = {}, defaults = {}) {
       const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
       const outcome = normalizeOutcome(source.outcome || defaults.outcome);
-      const errorType = outcome === "failed" ? normalizeErrorCode(source.errorType || source.errorCode, "SYNC_FAILED") : "NONE";
+      const inputErrorType = normalizeErrorCode(source.errorType || source.errorCode, "SYNC_FAILED");
+      const errorType = outcome === "failed" ? SAFE_ERROR_TYPES.has(inputErrorType) ? inputErrorType : "SYNC_FAILED" : "NONE";
       const errorCode = outcome === "failed" ? normalizeErrorCode(source.errorCode || source.errorType, errorType) : "NONE";
       const diagnosticId = normalizeSafeId(source.diagnosticId || defaults.diagnosticId) || createDiagnosticId2({
         bindingFingerprint: defaults.bindingFingerprint,
@@ -6446,6 +6456,122 @@ ${link}` : "";
     }
     __name(formatCompactSyncDiagnostic2, "formatCompactSyncDiagnostic");
     module2.exports = { MAX_COMPACT_DIAGNOSTIC_BYTES, formatCompactSyncDiagnostic: formatCompactSyncDiagnostic2 };
+  }
+});
+
+// src/failure-diagnostic-scope.js
+var require_failure_diagnostic_scope = __commonJS({
+  "src/failure-diagnostic-scope.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var recordRef = /* @__PURE__ */ __name((value) => crypto2.createHash("sha256").update(String(value)).digest("hex").slice(0, 16), "recordRef");
+    var list = /* @__PURE__ */ __name((value) => Array.isArray(value) ? value : [], "list");
+    var time = /* @__PURE__ */ __name((value) => Number.isFinite(Date.parse(value)) ? Date.parse(value) : 0, "time");
+    var resolved = /* @__PURE__ */ __name((status) => ["success", "succeeded", "synced", "committed", "deleted", "already-synced-local", "synced-via-content-identity"].includes(status), "resolved");
+    var owner = /* @__PURE__ */ __name((row) => row.bindingFingerprint || (row.bindingToken ? crypto2.createHash("sha256").update(row.bindingToken).digest("hex").slice(0, 32) : ""), "owner");
+    var key = /* @__PURE__ */ __name((row) => `${owner(row)}:${row.recordId}`, "key");
+    function selectFailureRecords(recent = [], current = null, receipts = []) {
+      const state = current || {};
+      const snapshots = /* @__PURE__ */ new Map();
+      for (const snapshot of list(state.syncSnapshots)) {
+        for (const row of list(snapshot && snapshot.records)) {
+          if (row && row.recordId) {
+            const entry = { ...row, bindingFingerprint: owner(row) || owner(snapshot) };
+            snapshots.set(key(entry), entry);
+          }
+        }
+      }
+      if (state.recordId && resolved(state.status)) snapshots.set(key(state), state);
+      for (const receipt of list(receipts)) snapshots.set(key(receipt), { ...receipt, status: "committed", updatedAt: receipt.completedAt });
+      const candidates = [...list(recent), ...list(state.historicalFailures), ...list(state.failureDetails)];
+      if (["failed", "action_required"].includes(state.status) && state.recordId) candidates.push(state);
+      const records = /* @__PURE__ */ new Map();
+      for (const item of candidates) {
+        if (!item || !item.recordId || resolved(item.status)) continue;
+        const id = String(item.recordId);
+        const owned = candidates.filter((row) => row && row.recordId === id && owner(row));
+        const owners = [...new Set(owned.map(owner))];
+        const fingerprint = owner(item) || (owners.length === 1 ? owners[0] : "");
+        if (!fingerprint && owners.length > 1) continue;
+        const identity = `${fingerprint}:${id}`;
+        const snapshot = snapshots.get(identity) || (!fingerprint ? snapshots.get(":" + id) : null);
+        if (snapshot && resolved(snapshot.status) && (!time(item.failedAt || item.time) || !time(snapshot.updatedAt || snapshot.time) || time(snapshot.updatedAt || snapshot.time) >= time(item.failedAt || item.time))) continue;
+        const previous = records.get(identity) || {};
+        if (time(previous.failedAt) > time(item.failedAt || item.time)) continue;
+        records.set(identity, {
+          ...previous,
+          recordId: id,
+          bindingFingerprint: fingerprint,
+          failedAt: item.failedAt || item.time || previous.failedAt || "",
+          stage: item.stage || previous.stage || "",
+          code: item.code || item.errorCode || item.setupCode || previous.code || "",
+          message: item.error || item.message || previous.message || "",
+          sourceUrl: item.sourceUrl || item.diagnostic && item.diagnostic.sourceUrl || previous.sourceUrl || "",
+          attemptId: item.attemptId || item.diagnosticAttemptId || previous.attemptId || "",
+          diagnostic: item.diagnostic || previous.diagnostic || null,
+          setupRequired: item.setupRequired === true || previous.setupRequired === true
+        });
+      }
+      return [...records.values()].sort((a, b) => time(b.failedAt) - time(a.failedAt));
+    }
+    __name(selectFailureRecords, "selectFailureRecords");
+    function relatedFailureRows(rows, failures) {
+      const latest = /* @__PURE__ */ new Map();
+      for (const row of list(rows)) {
+        if (!row) continue;
+        const matches = failures.filter((item) => (row.recordId && row.recordId === item.recordId || row.recordRef && row.recordRef === recordRef(item.recordId)) && (!owner(row) || owner(row) === owner(item)));
+        const failure = matches.length === 1 ? matches[0] : null;
+        if (!failure || failure.attemptId && row.syncAttemptId && row.syncAttemptId !== failure.attemptId) continue;
+        const finished = time(row.finishedAt || row.updatedAt || row.startedAt);
+        if (time(failure.failedAt) && finished > time(failure.failedAt) + 5e3) continue;
+        const identity = key(failure);
+        const previous = latest.get(identity);
+        if (!previous || finished >= time(previous.finishedAt || previous.updatedAt || previous.startedAt)) latest.set(identity, row);
+      }
+      return [...latest.values()].filter((row) => !resolved(row.outcome || row.finalOutcome || row.status));
+    }
+    __name(relatedFailureRows, "relatedFailureRows");
+    function matchingFailedAsrSession(session, failures) {
+      if (!session || !session.recordId) return null;
+      const syncAttemptId = session.syncAttemptId || session.inputIdentity && session.inputIdentity.attemptId;
+      const matches = failures.filter((row) => row.recordId === session.recordId && (!owner(session) || owner(session) === owner(row)) && (!row.attemptId || !syncAttemptId || row.attemptId === syncAttemptId));
+      const failure = matches.length === 1 ? matches[0] : null;
+      if (!failure) return null;
+      const attempts = list(session.attempts);
+      const last = attempts.at(-1);
+      if (!last || resolved(last.status) || !["failed", "cancelled"].includes(session.status || last.status)) return null;
+      if (time(failure.failedAt) && time(last.finishedAt || session.finishedAt) > time(failure.failedAt) + 5e3) return null;
+      return {
+        recordRef: recordRef(session.recordId),
+        startedAt: session.startedAt,
+        attempts: attempts.filter((row) => row.status === "failed").map((row) => ({
+          attempt: row.attempt,
+          stage: row.stage,
+          status: row.status,
+          error: row.error,
+          exitCode: row.nativeExitCode ?? row.exitCode,
+          signal: row.signal,
+          startedAt: row.startedAt,
+          finishedAt: row.finishedAt
+        }))
+      };
+    }
+    __name(matchingFailedAsrSession, "matchingFailedAsrSession");
+    function boundedDiagnostic(text, maxBytes = 32768) {
+      if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+      const marker = "\n[诊断内容已截断；仅显示未恢复失败记录的部分细节]";
+      const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
+      let result = "", bytes = 0;
+      for (const char of text) {
+        const n = Buffer.byteLength(char, "utf8");
+        if (bytes + n > budget) break;
+        result += char;
+        bytes += n;
+      }
+      return result + marker;
+    }
+    __name(boundedDiagnostic, "boundedDiagnostic");
+    module2.exports = { selectFailureRecords, relatedFailureRows, matchingFailedAsrSession, boundedDiagnostic, recordRef };
   }
 });
 
@@ -14488,7 +14614,7 @@ var require_cloud_media_upload = __commonJS({
     var http2 = require("http");
     var https2 = require("https");
     var MAX_CLOUD_FALLBACK_MEDIA_BYTES2 = 100 * 1024 * 1024;
-    var DEFAULT_UPLOAD_TIMEOUT_MS = 12e4;
+    var DEFAULT_UPLOAD_TIMEOUT_MS = 8 * 60 * 1e3;
     function cloudMediaError(code, message, extra = {}) {
       const error = new Error(message);
       error.code = code;
@@ -14633,6 +14759,7 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
         let timer = null;
         let stream = null;
         let sent = 0;
+        const startedAt = Date.now();
         let request;
         const finish = /* @__PURE__ */ __name((error, value) => {
           if (settled) return;
@@ -14665,7 +14792,11 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
         if (signal && typeof signal.addEventListener === "function") signal.addEventListener("abort", abort, { once: true });
         timer = setTimeout(() => {
           request.destroy();
-          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时"));
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时", {
+            bytesSent: sent,
+            totalBytes: file.size,
+            elapsedMs: Date.now() - startedAt
+          }));
         }, Math.max(1e3, Math.min(10 * 60 * 1e3, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS)));
         request.on("error", (error) => {
           if (settled) return;
@@ -14749,6 +14880,7 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
       return await new Promise((resolve, reject) => {
         let settled = false;
         let sent = 0;
+        const startedAt = Date.now();
         let stream = null;
         let timer = null;
         const finish = /* @__PURE__ */ __name((error, value) => {
@@ -14784,7 +14916,11 @@ Content-Type: ${String(contentType || "audio/mpeg").replace(/[\r\n]/g, "")}\r
         const timeout = Math.max(1e3, Math.min(10 * 60 * 1e3, Number(timeoutMs) || DEFAULT_UPLOAD_TIMEOUT_MS));
         timer = setTimeout(() => {
           request.destroy();
-          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时"));
+          finish(cloudMediaError("CLOUD_MEDIA_UPLOAD_TIMEOUT", "云端媒体上传超时", {
+            bytesSent: sent,
+            totalBytes: file.size,
+            elapsedMs: Date.now() - startedAt
+          }));
         }, timeout);
         request.on("error", (error) => {
           if (settled) return;
@@ -14846,7 +14982,7 @@ var require_operator_media_node = __commonJS({
     var OPERATOR_NODE_ID_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_ID";
     var OPERATOR_NODE_TOKEN_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_TOKEN";
     var OPERATOR_NODE_API_BASE_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_API_BASE";
-    var WORKER_PROTOCOL_VERSION2 = "cfb-worker/v2";
+    var WORKER_PROTOCOL_VERSION = "cfb-worker/v2";
     var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
     var XIAOHONGSHU_CAPABILITY = "xiaohongshu";
     var WECHAT_ARTICLE_CAPABILITY = "wechat_article";
@@ -14882,7 +15018,16 @@ var require_operator_media_node = __commonJS({
     __name(readOperatorNodeConfig, "readOperatorNodeConfig");
     function redactError(error) {
       const code = String(error && error.code || "").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80) || "OPERATOR_NODE_FAILED";
-      return { code };
+      const safeInteger = /* @__PURE__ */ __name((value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.min(Math.floor(Number(value)), Number.MAX_SAFE_INTEGER) : null, "safeInteger");
+      const bytesSent = safeInteger(error && error.bytesSent);
+      const totalBytes = safeInteger(error && error.totalBytes);
+      const elapsedMs = safeInteger(error && error.elapsedMs);
+      return {
+        code,
+        ...bytesSent !== null ? { bytesSent } : {},
+        ...totalBytes !== null ? { totalBytes } : {},
+        ...elapsedMs !== null ? { elapsedMs } : {}
+      };
     }
     __name(redactError, "redactError");
     var FAILURE_REASON_PATTERNS = [
@@ -15048,7 +15193,7 @@ var require_operator_media_node = __commonJS({
       return "";
     }
     __name(resolveMediaSourcePlatform, "resolveMediaSourcePlatform");
-    function createOperatorMediaNode2({
+    function createOperatorMediaNode({
       plugin = null,
       env = process.env,
       apiBase = "",
@@ -15088,7 +15233,7 @@ var require_operator_media_node = __commonJS({
         attemptId: String(job && job.attemptId || "").trim(),
         leaseToken: String(job && job.leaseToken || "").trim(),
         fencingVersion: job && job.fencingVersion,
-        protocolVersion: WORKER_PROTOCOL_VERSION2
+        protocolVersion: WORKER_PROTOCOL_VERSION
       }), "baseForJob");
       const snapshot = /* @__PURE__ */ __name(() => ({
         enabled: config.enabled,
@@ -15198,7 +15343,7 @@ var require_operator_media_node = __commonJS({
               const capabilities = getCapabilities();
               return callApi("/transcriptions/fallback/worker/capacity", {
                 workerId: config.workerId,
-                protocolVersion: WORKER_PROTOCOL_VERSION2,
+                protocolVersion: WORKER_PROTOCOL_VERSION,
                 capabilities,
                 runtimeCapabilities: capabilities,
                 availableCapabilities: capabilities,
@@ -15430,7 +15575,7 @@ var require_operator_media_node = __commonJS({
             if (!capacityReady && !await sendCapacityHeartbeat()) return;
             const response = await withCapabilityNegotiation(() => callApi("/transcriptions/fallback/worker/claim", {
               workerId: config.workerId,
-              protocolVersion: WORKER_PROTOCOL_VERSION2,
+              protocolVersion: WORKER_PROTOCOL_VERSION,
               capabilities: getCapabilities(),
               capacitySlots: 1,
               activeSlots: 0,
@@ -15508,13 +15653,13 @@ var require_operator_media_node = __commonJS({
         poll
       };
     }
-    __name(createOperatorMediaNode2, "createOperatorMediaNode");
+    __name(createOperatorMediaNode, "createOperatorMediaNode");
     module2.exports = {
       OPERATOR_NODE_ENABLED_ENV: OPERATOR_NODE_ENABLED_ENV2,
       OPERATOR_NODE_ID_ENV: OPERATOR_NODE_ID_ENV2,
       OPERATOR_NODE_TOKEN_ENV: OPERATOR_NODE_TOKEN_ENV2,
       OPERATOR_NODE_API_BASE_ENV: OPERATOR_NODE_API_BASE_ENV2,
-      WORKER_PROTOCOL_VERSION: WORKER_PROTOCOL_VERSION2,
+      WORKER_PROTOCOL_VERSION,
       DEFAULT_CAPABILITIES,
       XIAOHONGSHU_CAPABILITY,
       isDouyinSourceUrl,
@@ -15526,7 +15671,8 @@ var require_operator_media_node = __commonJS({
       isOperatorNodeEnabled,
       readOperatorNodeConfig,
       requestJsonViaNode: requestJsonViaNode2,
-      createOperatorMediaNode: createOperatorMediaNode2,
+      redactError,
+      createOperatorMediaNode,
       classifyFailureReason
     };
   }
@@ -16843,12 +16989,401 @@ var require_record_identity_utils = __commonJS({
   }
 });
 
+// src/platform-article-utils.js
+var require_platform_article_utils = __commonJS({
+  "src/platform-article-utils.js"(exports2, module2) {
+    "use strict";
+    var ZHIHU_ROOTS = ["zhihu.com"];
+    var TOUTIAO_ROOTS = ["toutiao.com"];
+    var TRACKING_PARAM = /^(?:utm_[a-z0-9_]+|share_[a-z0-9_]+|from|source|spm|tt_from|traffic_source|isappinstalled|wxshare_count|scene|share_token|share_source|s_r|s_c|share_medium|share_plat|share_tag|timestamp|utm)$/i;
+    function cleanHost(value) {
+      return String(value || "").toLowerCase().replace(/\.$/, "");
+    }
+    __name(cleanHost, "cleanHost");
+    function getHttpHostname(url) {
+      try {
+        const parsed = new URL(String(url || "").trim());
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+        if (parsed.username || parsed.password) return "";
+        return cleanHost(parsed.hostname);
+      } catch (error) {
+        return "";
+      }
+    }
+    __name(getHttpHostname, "getHttpHostname");
+    function isHostWithin(url, roots) {
+      const hostname = getHttpHostname(url);
+      if (!hostname) return false;
+      return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
+    }
+    __name(isHostWithin, "isHostWithin");
+    function isZhihuUrl2(url) {
+      return isHostWithin(url, ZHIHU_ROOTS);
+    }
+    __name(isZhihuUrl2, "isZhihuUrl");
+    function isToutiaoUrl2(url) {
+      return isHostWithin(url, TOUTIAO_ROOTS);
+    }
+    __name(isToutiaoUrl2, "isToutiaoUrl");
+    function isPlatformArticleUrl2(url) {
+      return isZhihuUrl2(url) || isToutiaoUrl2(url);
+    }
+    __name(isPlatformArticleUrl2, "isPlatformArticleUrl");
+    function getPlatformArticleKind2(url) {
+      if (isZhihuUrl2(url)) return "zhihu";
+      if (isToutiaoUrl2(url)) return "toutiao";
+      return "";
+    }
+    __name(getPlatformArticleKind2, "getPlatformArticleKind");
+    function getPlatformArticleLabel2(url) {
+      const kind = getPlatformArticleKind2(url);
+      if (kind === "zhihu") return "知乎";
+      if (kind === "toutiao") return "今日头条";
+      return "";
+    }
+    __name(getPlatformArticleLabel2, "getPlatformArticleLabel");
+    function getPlatformArticleReferer2(url) {
+      if (isZhihuUrl2(url)) return "https://www.zhihu.com/";
+      if (isToutiaoUrl2(url)) return "https://www.toutiao.com/";
+      return "";
+    }
+    __name(getPlatformArticleReferer2, "getPlatformArticleReferer");
+    var PLATFORM_ARTICLE_NAVIGATION_ROOTS = {
+      zhihu: ZHIHU_ROOTS,
+      toutiao: TOUTIAO_ROOTS
+    };
+    function isAllowedPlatformArticleNavigation2(url, platform) {
+      const roots = PLATFORM_ARTICLE_NAVIGATION_ROOTS[platform];
+      if (!roots) return false;
+      let parsed;
+      try {
+        parsed = new URL(String(url || "").trim());
+      } catch (error) {
+        return false;
+      }
+      if (parsed.protocol !== "https:") return false;
+      if (parsed.username || parsed.password) return false;
+      if (parsed.port && parsed.port !== "443") return false;
+      const hostname = cleanHost(parsed.hostname);
+      return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
+    }
+    __name(isAllowedPlatformArticleNavigation2, "isAllowedPlatformArticleNavigation");
+    function unwrapZhihuRedirect(parsed) {
+      if (!isHostWithin(parsed.toString(), ZHIHU_ROOTS)) return null;
+      if (cleanHost(parsed.hostname) !== "link.zhihu.com") return null;
+      let current = parsed;
+      for (let index = 0; index < 3; index += 1) {
+        const target = current.searchParams.get("target");
+        if (!target) break;
+        let next;
+        try {
+          next = new URL(target);
+        } catch (error) {
+          break;
+        }
+        if (!["http:", "https:"].includes(next.protocol)) break;
+        if (next.hostname.endsWith(".")) break;
+        current = next;
+      }
+      return current === parsed ? null : current;
+    }
+    __name(unwrapZhihuRedirect, "unwrapZhihuRedirect");
+    var ZHIHU_CANONICAL_PATH = /\/(?:p|answer)\/\d+\/?$|\/question\/\d+\/answer\/\d+\/?$|\/question\/\d+\/?$/i;
+    var TOUTIAO_CANONICAL_PATH = /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i;
+    function normalizePlatformArticleUrl2(url) {
+      const source = String(url || "").trim();
+      if (!isPlatformArticleUrl2(source)) return source;
+      let parsed;
+      try {
+        parsed = new URL(source);
+      } catch (error) {
+        return source;
+      }
+      const unwrapped = unwrapZhihuRedirect(parsed);
+      if (unwrapped) parsed = unwrapped;
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return source;
+      if (parsed.username || parsed.password) return source;
+      const hostname = cleanHost(parsed.hostname);
+      const kind = isZhihuUrl2(parsed.toString()) ? "zhihu" : isToutiaoUrl2(parsed.toString()) ? "toutiao" : "";
+      if (!kind) return source;
+      const canonicalPath = kind === "zhihu" ? ZHIHU_CANONICAL_PATH.test(parsed.pathname) : TOUTIAO_CANONICAL_PATH.test(parsed.pathname);
+      const result = new URL(`${parsed.protocol}//${hostname}${parsed.pathname}`);
+      if (!canonicalPath) {
+        for (const [key, value] of parsed.searchParams.entries()) {
+          if (!TRACKING_PARAM.test(key)) result.searchParams.append(key, value);
+        }
+      }
+      return result.toString();
+    }
+    __name(normalizePlatformArticleUrl2, "normalizePlatformArticleUrl");
+    function decodeRenderDataScript(raw) {
+      const value = String(raw || "").trim();
+      if (!value) return null;
+      const candidates = [value];
+      try {
+        const decoded = decodeURIComponent(value);
+        if (decoded !== value) candidates.push(decoded);
+      } catch (error) {
+      }
+      for (const candidate of candidates) {
+        try {
+          const parsed = JSON.parse(candidate);
+          if (parsed && typeof parsed === "object") return parsed;
+        } catch (error) {
+        }
+      }
+      return null;
+    }
+    __name(decodeRenderDataScript, "decodeRenderDataScript");
+    function pickString(...values) {
+      for (const value of values) {
+        if (typeof value === "string" && value.trim()) return value.trim();
+      }
+      return "";
+    }
+    __name(pickString, "pickString");
+    function getPlatformArticleIdentity2(url) {
+      let parsed;
+      try {
+        parsed = new URL(url);
+      } catch (_) {
+        return null;
+      }
+      if (!/^https?:$/.test(parsed.protocol) || parsed.username || parsed.password) return null;
+      const path2 = parsed.pathname;
+      const kind = /(^|\.)zhihu\.com$/.test(parsed.hostname) ? "zhihu" : /(^|\.)toutiao\.com$/.test(parsed.hostname) ? "toutiao" : "";
+      if (!kind) return null;
+      const match = kind === "zhihu" ? path2.match(/\/(answer|p)\/(\d+)\/?$/) : path2.match(/\/(?:article|group|item)\/(\d+)\/?$|\/[ai](\d+)\/?$/);
+      if (!match) return null;
+      return kind === "zhihu" ? { platform: kind, type: match[1], id: match[2] } : { platform: kind, type: "article", id: match[1] || match[2] };
+    }
+    __name(getPlatformArticleIdentity2, "getPlatformArticleIdentity");
+    function hasPlatformArticleBody2(markdown) {
+      if (/^\s*>?\s*(?:知乎|今日头条)(?:正文未能自动提取|页面需要登录后才能读取正文|返回访问验证或登录提示)/m.test(String(markdown || "")) || /^\s*>?\s*(?:原始链接已写入笔记属性，可稍后重新同步|已保留原始链接等待重试，本次未完成正文同步)/m.test(String(markdown || ""))) return false;
+      const body = String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/<!--[^]*?-->/g, "").replace(/^\s*#{1,6}\s+.*$/gm, "").replace(/^\s*(?:原始链接|来源链接|来源|作者|发布时间|source\s*url)\s*[：:].*$/gim, "").replace(/!?\[[^\]]*\]\([^)]+\)|!?\[\[[^\]]+\]\]/g, "").replace(/https?:\/\/\S+/g, "").replace(/<[^>]*>/g, "").trim();
+      if (/^(?:首页|热点|登录|注册|关于我们|下载APP|关注|推荐|举报|分享|收藏|赞同|评论|\s|[|·])+$/i.test(body)) return false;
+      if (body.length < 160 && /请先登录|登录后(?:查看|阅读)|安全验证|访问异常|请求存在异常|打开.{0,12}(?:APP|客户端)|正文提取失败|内容解析失败/.test(body)) return false;
+      return body.replace(/[\s\p{P}\p{S}]/gu, "").length >= 20;
+    }
+    __name(hasPlatformArticleBody2, "hasPlatformArticleBody");
+    function findArticleLikeObject(root, target = null) {
+      if (!root || typeof root !== "object") return null;
+      const queue = [root];
+      const seen = /* @__PURE__ */ new Set();
+      let best = null;
+      let visited = 0;
+      while (queue.length && visited < 2e4) {
+        const node = queue.shift();
+        if (!node || typeof node !== "object" || seen.has(node)) continue;
+        seen.add(node);
+        visited += 1;
+        if (Array.isArray(node)) {
+          for (const item of node) queue.push(item);
+          continue;
+        }
+        const content = typeof node.content === "string" ? node.content : "";
+        const title = pickString(node.title, node.article_title, node.headline);
+        const ids = [node.group_id, node.groupId, node.item_id, node.itemId, node.article_id, node.articleId, node.id].filter((value) => typeof value === "string" || Number.isSafeInteger(value)).map(String);
+        const matchesTarget = !target || ids.includes(target.id);
+        if (matchesTarget && content && content.length >= 40 && (title || node.articleInfo)) {
+          const score = content.length + (title ? 1e3 : 0);
+          if (!best || score > best.score) best = { node, content, title, score };
+        }
+        for (const value of Object.values(node)) {
+          if (value && typeof value === "object") queue.push(value);
+        }
+      }
+      return best;
+    }
+    __name(findArticleLikeObject, "findArticleLikeObject");
+    function parseToutiaoRenderData(html, targetUrl = "") {
+      const source = String(html || "");
+      const match = source.match(/<script[^>]*\bid=["']RENDER_DATA["'][^>]*>([\s\S]*?)<\/script>/i) || source.match(/<script[^>]*\bid=["']render_data["'][^>]*>([\s\S]*?)<\/script>/i);
+      if (!match) return null;
+      const data = decodeRenderDataScript(match[1]);
+      if (!data) return null;
+      const target = targetUrl ? getPlatformArticleIdentity2(targetUrl) : null;
+      if (targetUrl && !target) return null;
+      const found = findArticleLikeObject(data, target);
+      if (!found) return null;
+      const node = found.node;
+      const mediaUser = node.media_user && typeof node.media_user === "object" ? node.media_user : {};
+      const author = pickString(
+        node.author,
+        node.source,
+        node.name,
+        mediaUser.screen_name,
+        mediaUser.name,
+        node.user_info && node.user_info.name
+      );
+      const contentHtml = String(found.content || "");
+      return {
+        title: pickString(node.title, node.article_title, node.headline),
+        author,
+        contentHtml: /<[a-z][\s\S]*>/i.test(contentHtml) ? contentHtml : "",
+        contentText: /<[a-z][\s\S]*>/i.test(contentHtml) ? "" : contentHtml,
+        publishTime: pickString(node.publish_time, node.create_time, node.datetime),
+        source: "render-data"
+      };
+    }
+    __name(parseToutiaoRenderData, "parseToutiaoRenderData");
+    function getZhihuEntityContent(entity) {
+      if (!entity || typeof entity !== "object") return "";
+      const direct = pickString(entity.content, entity.contentHtml);
+      if (direct) return direct;
+      const nested = entity.rich_text && typeof entity.rich_text === "object" ? pickString(entity.rich_text.content, entity.rich_text.contentHtml) : "";
+      return nested;
+    }
+    __name(getZhihuEntityContent, "getZhihuEntityContent");
+    function parseZhihuInitialData(html, targetUrl = "") {
+      const source = String(html || "");
+      const match = source.match(/<script[^>]*\bid=["']js-initialData["'][^>]*>([\s\S]*?)<\/script>/i);
+      if (!match) return null;
+      const raw = String(match[1] || "").trim();
+      if (!raw) return null;
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (error) {
+        return null;
+      }
+      const initialState = parsed && parsed.initialState && typeof parsed.initialState === "object" ? parsed.initialState : parsed;
+      const entities = initialState && initialState.entities && typeof initialState.entities === "object" ? initialState.entities : {};
+      const target = targetUrl ? getPlatformArticleIdentity2(targetUrl) : null;
+      if (targetUrl && !target) return null;
+      const groups = target ? [target.type === "answer" ? "answers" : "articles"] : ["answers", "articles", "zvideo"];
+      for (const group of groups) {
+        const collection = entities[group];
+        if (!collection || typeof collection !== "object") continue;
+        for (const [key, entity] of Object.entries(collection)) {
+          if (target && key !== target.id && String(entity.id || "") !== target.id) continue;
+          const contentHtml = getZhihuEntityContent(entity);
+          if (!contentHtml || String(contentHtml).length < 40) continue;
+          const author = entity.author && typeof entity.author === "object" ? pickString(entity.author.name, entity.author.headline) : pickString(entity.author);
+          return {
+            title: pickString(entity.title, entity.question && entity.question.title),
+            author,
+            contentHtml: String(contentHtml),
+            contentText: "",
+            publishTime: pickString(entity.created, entity.updated, entity.created_time),
+            source: "js-initial-data"
+          };
+        }
+      }
+      return null;
+    }
+    __name(parseZhihuInitialData, "parseZhihuInitialData");
+    function extractPlatformArticleFromHtml2(html, platform, targetUrl = "") {
+      if (platform === "toutiao") return parseToutiaoRenderData(html, targetUrl);
+      if (platform === "zhihu") return parseZhihuInitialData(html, targetUrl);
+      return null;
+    }
+    __name(extractPlatformArticleFromHtml2, "extractPlatformArticleFromHtml");
+    function selectPlatformArticleBody2(doc, platform, target) {
+      const pick = /* @__PURE__ */ __name((root, selectors) => selectors.map((selector) => root.querySelector(selector)).find(Boolean), "pick");
+      if (!target) {
+        let canonical = "";
+        try {
+          canonical = Array.from(doc.querySelectorAll('link[rel="canonical"],meta[property="og:url"]')).map((node) => node.getAttribute("href") || node.getAttribute("content") || "").find((value) => value) || "";
+          const parsed = new URL(canonical);
+          const hostname = String(parsed.hostname || "").toLowerCase().replace(/\.$/, "");
+          const onPlatform = platform === "zhihu" ? hostname === "zhihu.com" || hostname.endsWith(".zhihu.com") : platform === "toutiao" && (hostname === "toutiao.com" || hostname.endsWith(".toutiao.com"));
+          const canonicalArticlePath = platform === "zhihu" ? /\/(?:answer|p)\/\d+\/?$|\/question\/\d+\/?$/i.test(parsed.pathname) : platform === "toutiao" && /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i.test(parsed.pathname);
+          if (!onPlatform || !canonicalArticlePath) return null;
+        } catch (_) {
+          return null;
+        }
+        return (platform === "zhihu" ? pick(doc, [".QuestionRichText", ".Post-RichText"]) : platform === "toutiao" ? pick(doc, [".article-content", ".syl-article-base"]) : null) || null;
+      }
+      if (platform === "zhihu" && target.type === "answer") {
+        for (const answer of doc.querySelectorAll(".AnswerItem")) {
+          const raw = answer.getAttribute("data-zop") || "";
+          let itemId = "";
+          try {
+            itemId = String(JSON.parse(raw).itemId || "");
+          } catch (_) {
+          }
+          const urls = Array.from(answer.querySelectorAll('meta[itemprop="url"],a[itemprop="url"]')).map((node) => node.getAttribute("content") || node.getAttribute("href") || "");
+          if (itemId === target.id || urls.some((url) => new RegExp("/answer/" + target.id + "(?:[/?#]|$)").test(url))) {
+            return pick(answer, [".RichContent-inner .RichText", ".RichText"]);
+          }
+        }
+        return null;
+      }
+      return platform === "zhihu" ? pick(doc, [".Post-RichText"]) : pick(doc, [".article-content", ".syl-article-base"]);
+    }
+    __name(selectPlatformArticleBody2, "selectPlatformArticleBody");
+    function hasMatchingPlatformArticleDocumentIdentity2(doc, url) {
+      const target = getPlatformArticleIdentity2(url);
+      const platform = getPlatformArticleKind2(url);
+      if (!platform) return false;
+      const values = Array.from(doc.querySelectorAll('link[rel="canonical"],meta[property="og:url"]')).map((node) => node.getAttribute("href") || node.getAttribute("content"));
+      const identities = values.map(getPlatformArticleIdentity2).filter(Boolean);
+      if (!target) {
+        const canonicalArticles = values.map((value) => {
+          try {
+            const parsed = new URL(value);
+            const hostname = cleanHost(parsed.hostname);
+            const hostMatches = platform === "zhihu" ? ZHIHU_ROOTS.some((root) => hostname === root || hostname.endsWith(`.${root}`)) : TOUTIAO_ROOTS.some((root) => hostname === root || hostname.endsWith(`.${root}`));
+            const pathMatches = platform === "zhihu" ? /\/(?:answer|p)\/\d+\/?$|\/question\/\d+\/?$/i.test(parsed.pathname) : /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i.test(parsed.pathname);
+            return hostMatches && pathMatches;
+          } catch (_) {
+            return false;
+          }
+        });
+        return canonicalArticles.length > 0 && canonicalArticles.every(Boolean);
+      }
+      return identities.length > 0 && identities.every((value) => value.platform === target.platform && value.type === target.type && value.id === target.id);
+    }
+    __name(hasMatchingPlatformArticleDocumentIdentity2, "hasMatchingPlatformArticleDocumentIdentity");
+    function sanitizePlatformArticleDiagnostic2(value) {
+      if (!value || !["platform-article", "webpage-extraction"].includes(value.source)) return null;
+      const result = { source: value.source };
+      for (const key of ["platform", "stage", "conversionStatus", "transcriptionStatus", "finalKind", "finalState"]) {
+        if (value[key]) result[key] = String(value[key]).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
+      }
+      for (const key of ["httpStatus", "markdownChars"]) if (Number.isFinite(value[key])) result[key] = value[key];
+      if (value.http) result.http = {
+        status: Number(value.http.status) || 0,
+        previousStatus: Number(value.http.previousStatus) || 0,
+        transport: String(value.http.transport || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40)
+      };
+      if (value.hiddenBrowser) {
+        result.hiddenBrowser = {};
+        for (const key of ["ok", "needsLogin", "blocked", "appWall", "identityMatched"]) result.hiddenBrowser[key] = value.hiddenBrowser[key] === true;
+        result.hiddenBrowser.bodyTextChars = Number(value.hiddenBrowser.bodyTextChars) || 0;
+      }
+      return result;
+    }
+    __name(sanitizePlatformArticleDiagnostic2, "sanitizePlatformArticleDiagnostic");
+    module2.exports = {
+      getPlatformArticleIdentity: getPlatformArticleIdentity2,
+      hasPlatformArticleBody: hasPlatformArticleBody2,
+      selectPlatformArticleBody: selectPlatformArticleBody2,
+      hasMatchingPlatformArticleDocumentIdentity: hasMatchingPlatformArticleDocumentIdentity2,
+      sanitizePlatformArticleDiagnostic: sanitizePlatformArticleDiagnostic2,
+      isZhihuUrl: isZhihuUrl2,
+      isToutiaoUrl: isToutiaoUrl2,
+      isPlatformArticleUrl: isPlatformArticleUrl2,
+      getPlatformArticleKind: getPlatformArticleKind2,
+      getPlatformArticleLabel: getPlatformArticleLabel2,
+      getPlatformArticleReferer: getPlatformArticleReferer2,
+      isAllowedPlatformArticleNavigation: isAllowedPlatformArticleNavigation2,
+      normalizePlatformArticleUrl: normalizePlatformArticleUrl2,
+      parseToutiaoRenderData,
+      parseZhihuInitialData,
+      extractPlatformArticleFromHtml: extractPlatformArticleFromHtml2
+    };
+  }
+});
+
 // src/sync-lifecycle-utils.js
 var require_sync_lifecycle_utils = __commonJS({
   "src/sync-lifecycle-utils.js"(exports2, module2) {
     "use strict";
     var { isWechatArticleFailurePlaceholder } = require_wechat_placeholder_utils();
     var { isRecognizedNoSpeechMetadata: isRecognizedNoSpeechMetadata2 } = require_transcription_quality_utils();
+    var { isPlatformArticleUrl: isPlatformArticleUrl2, hasPlatformArticleBody: hasPlatformArticleBody2, sanitizePlatformArticleDiagnostic: sanitizePlatformArticleDiagnostic2 } = require_platform_article_utils();
     var crypto2 = require("node:crypto");
     var channelsDiagnostic2 = require_wechat_channels_diagnostic_utils();
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
@@ -16984,7 +17519,8 @@ var require_sync_lifecycle_utils = __commonJS({
         httpStatus: Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus) || 0,
         finalKind: String(conversionDiagnostic.finalKind || "").slice(0, 40),
         finalState: String(conversionDiagnostic.finalState || "").slice(0, 40),
-        note: String(metadata.conversionNote || metadata.conversionError || "").slice(0, 200)
+        note: String(metadata.conversionNote || metadata.conversionError || "").slice(0, 200),
+        ...sanitizePlatformArticleDiagnostic2(conversionDiagnostic) || {}
       };
     }
     __name(buildWebpageExtractionFailureDiagnostic, "buildWebpageExtractionFailureDiagnostic");
@@ -17098,6 +17634,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const fileExt = String(metadata.fileExt || "").trim().toLowerCase().replace(/^\./, "");
       const url = String(metadata.url || source.content || "").trim();
       const body = getMarkdownBody(markdown);
+      if (isPlatformArticleUrl2(url) && !hasPlatformArticleBody2(body)) return false;
       if (isKnownFailureReceiptMarkdown(body)) return false;
       if (metadata.transcriptionStatus === "failed" && !String(metadata.transcription || "").trim()) return false;
       const hasEmbeddedAttachment = /!\[\[[^\]]+\]\]/.test(body);
@@ -17144,6 +17681,9 @@ var require_sync_lifecycle_utils = __commonJS({
         metadata.contentSnapshot
       ].map((value) => String(value || "").trim()).filter(Boolean).join("\n");
       const declaredError = `${metadata.conversionError || ""} ${metadata.transcriptionError || ""}`.trim();
+      if (isPlatformArticleUrl2(url) && (["failed", "link_saved"].includes(conversionStatus) || !hasPlatformArticleBody2(markdown))) {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "文章正文提取失败，未将标题或链接标记为同步成功", buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
+      }
       if (transcriptionStatus === "no_speech" || conversionStatus === "no_speech") {
         if (isRecognizedNoSpeechMetadata2(metadata)) return null;
         return isXiaohongshuRecordSource(url) ? createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "小红书内容提取失败，请重新同步") : createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", "无语音识别结果缺少有效证据");
@@ -18325,281 +18865,6 @@ var require_wechat_article_pipeline = __commonJS({
       normalizeBrowserResult,
       sanitizeDiagnosticValue: sanitizeDiagnosticValue2,
       runWechatArticlePipeline: runWechatArticlePipeline2
-    };
-  }
-});
-
-// src/platform-article-utils.js
-var require_platform_article_utils = __commonJS({
-  "src/platform-article-utils.js"(exports2, module2) {
-    "use strict";
-    var ZHIHU_ROOTS = ["zhihu.com"];
-    var TOUTIAO_ROOTS = ["toutiao.com"];
-    var TRACKING_PARAM = /^(?:utm_[a-z0-9_]+|share_[a-z0-9_]+|from|source|spm|tt_from|traffic_source|isappinstalled|wxshare_count|scene|share_token|share_source|s_r|s_c|share_medium|share_plat|share_tag|timestamp|utm)$/i;
-    function cleanHost(value) {
-      return String(value || "").toLowerCase().replace(/\.$/, "");
-    }
-    __name(cleanHost, "cleanHost");
-    function getHttpHostname(url) {
-      try {
-        const parsed = new URL(String(url || "").trim());
-        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-        if (parsed.username || parsed.password) return "";
-        return cleanHost(parsed.hostname);
-      } catch (error) {
-        return "";
-      }
-    }
-    __name(getHttpHostname, "getHttpHostname");
-    function isHostWithin(url, roots) {
-      const hostname = getHttpHostname(url);
-      if (!hostname) return false;
-      return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
-    }
-    __name(isHostWithin, "isHostWithin");
-    function isZhihuUrl2(url) {
-      return isHostWithin(url, ZHIHU_ROOTS);
-    }
-    __name(isZhihuUrl2, "isZhihuUrl");
-    function isToutiaoUrl2(url) {
-      return isHostWithin(url, TOUTIAO_ROOTS);
-    }
-    __name(isToutiaoUrl2, "isToutiaoUrl");
-    function isPlatformArticleUrl2(url) {
-      return isZhihuUrl2(url) || isToutiaoUrl2(url);
-    }
-    __name(isPlatformArticleUrl2, "isPlatformArticleUrl");
-    function getPlatformArticleKind2(url) {
-      if (isZhihuUrl2(url)) return "zhihu";
-      if (isToutiaoUrl2(url)) return "toutiao";
-      return "";
-    }
-    __name(getPlatformArticleKind2, "getPlatformArticleKind");
-    function getPlatformArticleLabel2(url) {
-      const kind = getPlatformArticleKind2(url);
-      if (kind === "zhihu") return "知乎";
-      if (kind === "toutiao") return "今日头条";
-      return "";
-    }
-    __name(getPlatformArticleLabel2, "getPlatformArticleLabel");
-    function getPlatformArticleReferer2(url) {
-      if (isZhihuUrl2(url)) return "https://www.zhihu.com/";
-      if (isToutiaoUrl2(url)) return "https://www.toutiao.com/";
-      return "";
-    }
-    __name(getPlatformArticleReferer2, "getPlatformArticleReferer");
-    var PLATFORM_ARTICLE_NAVIGATION_ROOTS = {
-      zhihu: ZHIHU_ROOTS,
-      toutiao: TOUTIAO_ROOTS
-    };
-    function isAllowedPlatformArticleNavigation2(url, platform) {
-      const roots = PLATFORM_ARTICLE_NAVIGATION_ROOTS[platform];
-      if (!roots) return false;
-      let parsed;
-      try {
-        parsed = new URL(String(url || "").trim());
-      } catch (error) {
-        return false;
-      }
-      if (parsed.protocol !== "https:") return false;
-      if (parsed.username || parsed.password) return false;
-      if (parsed.port && parsed.port !== "443") return false;
-      const hostname = cleanHost(parsed.hostname);
-      return roots.some((root) => hostname === root || hostname.endsWith(`.${root}`));
-    }
-    __name(isAllowedPlatformArticleNavigation2, "isAllowedPlatformArticleNavigation");
-    function unwrapZhihuRedirect(parsed) {
-      if (!isHostWithin(parsed.toString(), ZHIHU_ROOTS)) return null;
-      if (cleanHost(parsed.hostname) !== "link.zhihu.com") return null;
-      let current = parsed;
-      for (let index = 0; index < 3; index += 1) {
-        const target = current.searchParams.get("target");
-        if (!target) break;
-        let next;
-        try {
-          next = new URL(target);
-        } catch (error) {
-          break;
-        }
-        if (!["http:", "https:"].includes(next.protocol)) break;
-        if (next.hostname.endsWith(".")) break;
-        current = next;
-      }
-      return current === parsed ? null : current;
-    }
-    __name(unwrapZhihuRedirect, "unwrapZhihuRedirect");
-    var ZHIHU_CANONICAL_PATH = /\/(?:p|answer)\/\d+\/?$|\/question\/\d+\/answer\/\d+\/?$|\/question\/\d+\/?$/i;
-    var TOUTIAO_CANONICAL_PATH = /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i;
-    function normalizePlatformArticleUrl2(url) {
-      const source = String(url || "").trim();
-      if (!isPlatformArticleUrl2(source)) return source;
-      let parsed;
-      try {
-        parsed = new URL(source);
-      } catch (error) {
-        return source;
-      }
-      const unwrapped = unwrapZhihuRedirect(parsed);
-      if (unwrapped) parsed = unwrapped;
-      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return source;
-      if (parsed.username || parsed.password) return source;
-      const hostname = cleanHost(parsed.hostname);
-      const kind = isZhihuUrl2(parsed.toString()) ? "zhihu" : isToutiaoUrl2(parsed.toString()) ? "toutiao" : "";
-      if (!kind) return source;
-      const canonicalPath = kind === "zhihu" ? ZHIHU_CANONICAL_PATH.test(parsed.pathname) : TOUTIAO_CANONICAL_PATH.test(parsed.pathname);
-      const result = new URL(`${parsed.protocol}//${hostname}${parsed.pathname}`);
-      if (!canonicalPath) {
-        for (const [key, value] of parsed.searchParams.entries()) {
-          if (!TRACKING_PARAM.test(key)) result.searchParams.append(key, value);
-        }
-      }
-      return result.toString();
-    }
-    __name(normalizePlatformArticleUrl2, "normalizePlatformArticleUrl");
-    function decodeRenderDataScript(raw) {
-      const value = String(raw || "").trim();
-      if (!value) return null;
-      const candidates = [value];
-      try {
-        const decoded = decodeURIComponent(value);
-        if (decoded !== value) candidates.push(decoded);
-      } catch (error) {
-      }
-      for (const candidate of candidates) {
-        try {
-          const parsed = JSON.parse(candidate);
-          if (parsed && typeof parsed === "object") return parsed;
-        } catch (error) {
-        }
-      }
-      return null;
-    }
-    __name(decodeRenderDataScript, "decodeRenderDataScript");
-    function pickString(...values) {
-      for (const value of values) {
-        if (typeof value === "string" && value.trim()) return value.trim();
-      }
-      return "";
-    }
-    __name(pickString, "pickString");
-    function findArticleLikeObject(root) {
-      if (!root || typeof root !== "object") return null;
-      const queue = [root];
-      const seen = /* @__PURE__ */ new Set();
-      let best = null;
-      let visited = 0;
-      while (queue.length && visited < 2e4) {
-        const node = queue.shift();
-        if (!node || typeof node !== "object" || seen.has(node)) continue;
-        seen.add(node);
-        visited += 1;
-        if (Array.isArray(node)) {
-          for (const item of node) queue.push(item);
-          continue;
-        }
-        const content = typeof node.content === "string" ? node.content : "";
-        const title = pickString(node.title, node.article_title, node.headline);
-        if (content && content.length >= 40 && (title || node.articleInfo)) {
-          const score = content.length + (title ? 1e3 : 0);
-          if (!best || score > best.score) best = { node, content, title, score };
-        }
-        for (const value of Object.values(node)) {
-          if (value && typeof value === "object") queue.push(value);
-        }
-      }
-      return best;
-    }
-    __name(findArticleLikeObject, "findArticleLikeObject");
-    function parseToutiaoRenderData(html) {
-      const source = String(html || "");
-      const match = source.match(/<script[^>]*\bid=["']RENDER_DATA["'][^>]*>([\s\S]*?)<\/script>/i) || source.match(/<script[^>]*\bid=["']render_data["'][^>]*>([\s\S]*?)<\/script>/i);
-      if (!match) return null;
-      const data = decodeRenderDataScript(match[1]);
-      if (!data) return null;
-      const found = findArticleLikeObject(data);
-      if (!found) return null;
-      const node = found.node;
-      const mediaUser = node.media_user && typeof node.media_user === "object" ? node.media_user : {};
-      const author = pickString(
-        node.author,
-        node.source,
-        node.name,
-        mediaUser.screen_name,
-        mediaUser.name,
-        node.user_info && node.user_info.name
-      );
-      const contentHtml = String(found.content || "");
-      return {
-        title: pickString(node.title, node.article_title, node.headline),
-        author,
-        contentHtml: /<[a-z][\s\S]*>/i.test(contentHtml) ? contentHtml : "",
-        contentText: /<[a-z][\s\S]*>/i.test(contentHtml) ? "" : contentHtml,
-        publishTime: pickString(node.publish_time, node.create_time, node.datetime),
-        source: "render-data"
-      };
-    }
-    __name(parseToutiaoRenderData, "parseToutiaoRenderData");
-    function getZhihuEntityContent(entity) {
-      if (!entity || typeof entity !== "object") return "";
-      const direct = pickString(entity.content, entity.contentHtml);
-      if (direct) return direct;
-      const nested = entity.rich_text && typeof entity.rich_text === "object" ? pickString(entity.rich_text.content, entity.rich_text.contentHtml) : "";
-      return nested;
-    }
-    __name(getZhihuEntityContent, "getZhihuEntityContent");
-    function parseZhihuInitialData(html) {
-      const source = String(html || "");
-      const match = source.match(/<script[^>]*\bid=["']js-initialData["'][^>]*>([\s\S]*?)<\/script>/i);
-      if (!match) return null;
-      const raw = String(match[1] || "").trim();
-      if (!raw) return null;
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch (error) {
-        return null;
-      }
-      const initialState = parsed && parsed.initialState && typeof parsed.initialState === "object" ? parsed.initialState : parsed;
-      const entities = initialState && initialState.entities && typeof initialState.entities === "object" ? initialState.entities : {};
-      const groups = ["answers", "articles", "zvideo"];
-      for (const group of groups) {
-        const collection = entities[group];
-        if (!collection || typeof collection !== "object") continue;
-        for (const entity of Object.values(collection)) {
-          const contentHtml = getZhihuEntityContent(entity);
-          if (!contentHtml || String(contentHtml).length < 40) continue;
-          const author = entity.author && typeof entity.author === "object" ? pickString(entity.author.name, entity.author.headline) : pickString(entity.author);
-          return {
-            title: pickString(entity.title, entity.question && entity.question.title),
-            author,
-            contentHtml: String(contentHtml),
-            contentText: "",
-            publishTime: pickString(entity.created, entity.updated, entity.created_time),
-            source: "js-initial-data"
-          };
-        }
-      }
-      return null;
-    }
-    __name(parseZhihuInitialData, "parseZhihuInitialData");
-    function extractPlatformArticleFromHtml2(html, platform) {
-      if (platform === "toutiao") return parseToutiaoRenderData(html);
-      if (platform === "zhihu") return parseZhihuInitialData(html);
-      return null;
-    }
-    __name(extractPlatformArticleFromHtml2, "extractPlatformArticleFromHtml");
-    module2.exports = {
-      isZhihuUrl: isZhihuUrl2,
-      isToutiaoUrl: isToutiaoUrl2,
-      isPlatformArticleUrl: isPlatformArticleUrl2,
-      getPlatformArticleKind: getPlatformArticleKind2,
-      getPlatformArticleLabel: getPlatformArticleLabel2,
-      getPlatformArticleReferer: getPlatformArticleReferer2,
-      isAllowedPlatformArticleNavigation: isAllowedPlatformArticleNavigation2,
-      normalizePlatformArticleUrl: normalizePlatformArticleUrl2,
-      parseToutiaoRenderData,
-      parseZhihuInitialData,
-      extractPlatformArticleFromHtml: extractPlatformArticleFromHtml2
     };
   }
 });
@@ -21875,9 +22140,19 @@ var {
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var bilibiliDiagnostic = require_bilibili_diagnostic_utils();
 function retainedSyncFailureDiagnostic(value, settings) {
-  return channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value);
+  return channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
 }
 __name(retainedSyncFailureDiagnostic, "retainedSyncFailureDiagnostic");
+function retainedSyncFailureContext(item = {}) {
+  return {
+    // Keep shared links in the active diagnostic only; failure history persists
+    // record/attempt identity and safe technical facts, not browsing history.
+    stage: String(item.stage || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64),
+    code: String(item.code || "").replace(/[^A-Z0-9_]/g, "").slice(0, 64),
+    attemptId: /^[a-zA-Z0-9_-]{8,128}$/.test(item.attemptId || "") ? item.attemptId : ""
+  };
+}
+__name(retainedSyncFailureContext, "retainedSyncFailureContext");
 var { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require_feishu_image_display();
 var { createTranscriptMediaPlayer } = require_transcript_media_player();
 var crypto = require("crypto");
@@ -21888,6 +22163,7 @@ var macLegacyAsrCompat = require_mac_legacy_asr_compat();
 var { buildFailureTechnicalReport, unavailableTechnicalReport } = require_failure_technical_report();
 var asrDiagnosticEvidence = require_asr_diagnostic_evidence();
 var { formatCompactSyncDiagnostic } = require_compact_sync_diagnostic();
+var failureScope = require_failure_diagnostic_scope();
 var { runLocalAsrWithQualityRetry, shouldRetryLocalAsrQualityFailure } = require_local_asr_quality_retry();
 var { inspectChannelsVadAssets, runChannelsQualityRecovery } = require_channels_asr_quality_recovery();
 var {
@@ -21979,15 +22255,18 @@ var {
   hashFileSha256,
   uploadMultipartFile
 } = require_cloud_media_upload();
-var {
-  createOperatorMediaNode,
-  OPERATOR_NODE_API_BASE_ENV,
-  OPERATOR_NODE_ENABLED_ENV,
-  OPERATOR_NODE_ID_ENV,
-  OPERATOR_NODE_TOKEN_ENV,
-  WORKER_PROTOCOL_VERSION,
-  requestJsonViaNode: requestOperatorJsonViaNode
-} = require_operator_media_node();
+var OPERATOR_NODE_ENABLED_ENV = "WECHAT_INBOX_OPERATOR_NODE_ENABLED";
+var OPERATOR_NODE_ID_ENV = "WECHAT_INBOX_OPERATOR_NODE_ID";
+var OPERATOR_NODE_TOKEN_ENV = "WECHAT_INBOX_OPERATOR_NODE_TOKEN";
+var OPERATOR_NODE_API_BASE_ENV = "WECHAT_INBOX_OPERATOR_NODE_API_BASE";
+var operatorMediaNodeModule = null;
+function getOperatorMediaNodeModule() {
+  if (!operatorMediaNodeModule) {
+    operatorMediaNodeModule = require_operator_media_node();
+  }
+  return operatorMediaNodeModule;
+}
+__name(getOperatorMediaNodeModule, "getOperatorMediaNodeModule");
 var {
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer
@@ -22096,6 +22375,11 @@ var {
 } = require_wechat_article_utils();
 var {
   extractPlatformArticleFromHtml,
+  getPlatformArticleIdentity,
+  hasPlatformArticleBody,
+  selectPlatformArticleBody,
+  hasMatchingPlatformArticleDocumentIdentity,
+  sanitizePlatformArticleDiagnostic,
   getPlatformArticleKind,
   getPlatformArticleLabel,
   getPlatformArticleReferer,
@@ -22211,8 +22495,8 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.214";
-var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1";
+var PLUGIN_RUNTIME_VERSION = "1.3.217";
+var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
 ];
@@ -24714,6 +24998,7 @@ function normalizeRecentSyncFailures(value, settings = {}) {
       bindingToken,
       bindingLabel: String(item && item.bindingLabel || "").trim(),
       message: String(item && item.message || "").trim().slice(0, 500),
+      ...retainedSyncFailureContext(item),
       failedAt: String(item && item.failedAt || "").trim(),
       retryCount: Math.max(0, Math.floor(Number(item && item.retryCount) || 0)),
       ...isSetupRequired({ code: item && item.setupCode }) ? { setupRequired: true, setupCode: item.setupCode } : {},
@@ -25048,6 +25333,35 @@ function isInvalidCloudBaseEnvMessage(message) {
   return /INVALID_ENV/i.test(text) || /Env Not Exists/i.test(text);
 }
 __name(isInvalidCloudBaseEnvMessage, "isInvalidCloudBaseEnvMessage");
+function formatSyncApiErrorMessage(payload, fallback = "") {
+  const errorCode = String(payload && (payload.errCode || payload.code || payload.error && (payload.error.code || payload.error.errCode)) || "").trim().toUpperCase();
+  if (["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"].includes(errorCode)) {
+    const requiredVersion = String(payload.requiredVersion || payload.error && payload.error.requiredVersion || "").trim();
+    const safeRequiredVersion = /^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(requiredVersion) ? `，需要更新到 ${requiredVersion} 或更高版本` : "";
+    return `当前插件版本（${PLUGIN_RUNTIME_VERSION}）与此功能不兼容${safeRequiredVersion}。请在“设置 → 第三方插件”中检查更新并重启 Obsidian 后重试。`;
+  }
+  const raw = String(
+    payload && (payload.errMsg || payload.message || payload.error && (payload.error.message || payload.error.errMsg) || payload.code) || fallback || ""
+  );
+  if (/InsufficientBalance|Function is Unavailable|AvailableStatus\s*=\s*InsufficientBalance/i.test(raw)) {
+    return "云端同步服务暂时不可用：腾讯云资源包或账户余额不足，请先在腾讯云控制台续费/充值后再重试。";
+  }
+  return raw || "同步 API 请求失败";
+}
+__name(formatSyncApiErrorMessage, "formatSyncApiErrorMessage");
+function createSyncApiRequestError(payload, status, fallback = "") {
+  const errorCode = String(payload && (payload.errCode || payload.code || payload.error && (payload.error.code || payload.error.errCode)) || "").trim().toUpperCase();
+  const requestError = new Error(formatSyncApiErrorMessage(payload, fallback));
+  requestError.status = Number(status) || 0;
+  requestError.statusCode = requestError.status;
+  if (errorCode) requestError.code = errorCode;
+  const requiredVersion = String(payload && (payload.requiredVersion || payload.error && payload.error.requiredVersion) || "").trim();
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(requiredVersion)) {
+    requestError.requiredVersion = requiredVersion;
+  }
+  return requestError;
+}
+__name(createSyncApiRequestError, "createSyncApiRequestError");
 function requestJsonViaNode(options) {
   return new Promise((resolve, reject) => {
     const signal = options && options.signal;
@@ -33529,14 +33843,18 @@ async function renderPlatformArticleWithElectron(url) {
         };
         let body = null;
         for (let attempt = 0; attempt < 30; attempt += 1) {
-          body = pick(selectors.body);
+          const target = (${getPlatformArticleIdentity.toString()})(location.href);
+          body = (${selectPlatformArticleBody.toString()})(document, ${JSON.stringify(platform)}, target);
           if (body && clean(body.innerText || body.textContent).replace(/\\s+/g, '').length >= 80) break;
           window.scrollTo(0, Math.max(document.body.scrollHeight, document.documentElement.scrollHeight));
           await sleep(500);
         }
         const pageText = clean(document.body ? (document.body.innerText || document.body.textContent) : '');
+        const initialDataHtml = Array.from(document.querySelectorAll('script#js-initialData,script#RENDER_DATA'))
+          .map(node => node.outerHTML).join('');
         if (!body) {
           return {
+            initialDataHtml,
             title: clean(document.title || ''),
             author: '',
             html: '',
@@ -33557,6 +33875,7 @@ async function renderPlatformArticleWithElectron(url) {
           title: clean(titleNode && (titleNode.innerText || titleNode.textContent) || document.title || ''),
           author: clean(authorNode && (authorNode.innerText || authorNode.textContent) || '').slice(0, 80),
           html: clone.outerHTML,
+          initialDataHtml,
           assets,
           needsLogin: false,
           blocked: isBlocked(pageText),
@@ -33576,6 +33895,17 @@ async function renderPlatformArticleWithElectron(url) {
     }
     result.platform = platform;
     result.finalUrl = win.webContents && typeof win.webContents.getURL === "function" ? win.webContents.getURL() : url;
+    const embedded = extractPlatformArticleFromHtml(result.initialDataHtml, platform, result.finalUrl);
+    delete result.initialDataHtml;
+    if (embedded) {
+      result.markdown = embedded.contentHtml ? htmlToMarkdown(embedded.contentHtml) : embedded.contentText;
+      result.title = embedded.title || result.title;
+      result.author = embedded.author || result.author;
+    }
+    const expected = getPlatformArticleIdentity(url);
+    const actual = getPlatformArticleIdentity(result.finalUrl);
+    result.identityMatched = expected ? Boolean(actual && actual.platform === expected.platform && actual.type === expected.type && actual.id === expected.id) : Boolean(getPlatformArticleKind(url) && getPlatformArticleKind(url) === getPlatformArticleKind(result.finalUrl));
+    if (!result.identityMatched || !hasPlatformArticleBody(result.markdown)) result.markdown = "";
     if (loadFailure) {
       result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || "").slice(0, 160);
     }
@@ -37093,9 +37423,12 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const status = Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
     const apiCode = Number(error && error.apiCode) || 0;
     const effectiveHttpStatus = status || (apiCode === -412 ? 412 : 0);
+    const explicitPluginVersionCode = ["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"].find((code) => code === transportCode || code === diagnosticCode) || "";
     const explicitAuthEvidence = status === 401 || /AUTH|BINDING|TOKEN/.test(transportCode) || /鉴权|绑定码/.test(errorMessage);
-    const errorCode = explicitAuthEvidence ? "AUTH_FAILED" : categorizeSyncFailure(error);
+    const errorType = explicitPluginVersionCode ? "SYNC_FAILED" : explicitAuthEvidence ? "AUTH_FAILED" : categorizeSyncFailure(error);
+    const errorCode = explicitPluginVersionCode || errorType;
     const evidenceCodes = [];
+    if (explicitPluginVersionCode) evidenceCodes.push("upgrade_required");
     if (/^(?:TIMEOUT|ETIMEDOUT|ECONNABORTED|NETWORK_TIMEOUT|NODE_HTTP_TIMEOUT)$/.test(transportCode)) {
       evidenceCodes.push("network_timeout");
     } else if (/^(?:ENOTFOUND|EAI_AGAIN|EAI_FAIL|DNS_ERROR)$/.test(transportCode)) {
@@ -37113,8 +37446,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (explicitAuthEvidence) {
       evidenceCodes.push("auth_rejected");
     }
-    if (errorCode === "WRITE_FAILED") evidenceCodes.push("write_error");
-    if (errorCode === "LOCAL_COMPONENT_UNAVAILABLE") {
+    if (errorType === "WRITE_FAILED") evidenceCodes.push("write_error");
+    if (errorType === "LOCAL_COMPONENT_UNAVAILABLE") {
       if (diagnostic.componentMissing === true || diagnostic.componentStatus === "missing" || /^(?:COMPONENT_MISSING|LOCAL_COMPONENT_MISSING|ASR_COMPONENT_MISSING|OCR_COMPONENT_MISSING|ENOENT)$/.test(transportCode)) {
         evidenceCodes.push("component_missing");
       } else if (diagnostic.componentVersionMismatch === true || diagnostic.componentStatus === "outdated" || /^(?:COMPONENT_VERSION_MISMATCH|LOCAL_COMPONENT_OUTDATED|COMPONENT_OUTDATED|VERSION_MISMATCH)$/.test(transportCode)) {
@@ -37140,9 +37473,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (["COMPONENT_CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "EXPLICIT_UPGRADE_REQUIRED", "UPGRADE_REQUIRED"].includes(transportCode) || ["COMPONENT_CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "EXPLICIT_UPGRADE_REQUIRED", "UPGRADE_REQUIRED"].includes(diagnosticCode) || diagnostic.upgradeRequired === true) {
       evidenceCodes.push("upgrade_required");
     }
-    const diagnosticStage = errorCode === "EXTRACTION_FAILED" ? "parse" : errorCode === "TRANSCRIPTION_FAILED" ? "transcribe" : errorCode === "OCR_FAILED" ? "ocr" : errorCode === "WRITE_FAILED" ? "write" : stage === "fetching" ? "fetch" : "sync";
+    const diagnosticStage = errorType === "EXTRACTION_FAILED" ? "parse" : errorType === "TRANSCRIPTION_FAILED" ? "transcribe" : errorType === "OCR_FAILED" ? "ocr" : errorType === "WRITE_FAILED" ? "write" : stage === "fetching" ? "fetch" : "sync";
     let asrRoot = "";
-    if (errorCode === "TRANSCRIPTION_FAILED") {
+    if (errorType === "TRANSCRIPTION_FAILED") {
       try {
         asrRoot = this.getConfiguredLocalAsrInstallRoot();
       } catch (_) {
@@ -37167,7 +37500,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       diagnosticId,
       attemptId,
       syncRecordId: normalizedRecordId,
-      errorType: errorCode,
+      errorType,
       errorCode,
       stage: diagnosticStage,
       retryCount: Number(retryCount) || 0,
@@ -37181,22 +37514,45 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   // Nothing is persisted: this check must never write settings, because a
   // settings write is the one operation that can disturb a user's bindings.
   // Any failure (offline, blocked host, bad JSON) is silent.
-  async maybeCheckPluginUpdate() {
-    if (this.__pluginUpdateChecked) return;
-    this.__pluginUpdateChecked = true;
-    try {
-      const response = await requestUrl({
-        url: "https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/manifest.json",
-        method: "GET",
-        throw: false
-      });
-      if (!response || response.status !== 200) return;
-      const parsed = JSON.parse(String(response.text || "{}"));
-      const latest = String(parsed && parsed.version || "").trim();
-      if (!latest || !isNewerPluginVersion(latest, PLUGIN_RUNTIME_VERSION)) return;
-      new Notice(`WeChat Inbox Sync ${latest} 已发布（当前 ${PLUGIN_RUNTIME_VERSION}）。请在“设置 → 第三方插件”中检查更新。`, 1e4);
-    } catch (_) {
-    }
+  async maybeCheckPluginUpdate({ failureContext = false } = {}) {
+    const lastSuccessfulCheckAt = Number(this.__pluginUpdateCheckedAt) || 0;
+    if (lastSuccessfulCheckAt && Date.now() - lastSuccessfulCheckAt < 5 * 60 * 1e3) return "";
+    if (this.__pluginUpdateCheckPromise) return this.__pluginUpdateCheckPromise;
+    const checkPromise = (async () => {
+      try {
+        let requestTimeout;
+        let response;
+        try {
+          response = await Promise.race([
+            requestUrl({
+              url: "https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/manifest.json",
+              method: "GET",
+              throw: false
+            }),
+            new Promise((resolve) => {
+              requestTimeout = setTimeout(() => resolve(null), 5e3);
+            })
+          ]);
+        } finally {
+          if (requestTimeout) clearTimeout(requestTimeout);
+        }
+        if (!response || response.status !== 200) return "";
+        const parsed = JSON.parse(String(response.text || "{}"));
+        const latest = String(parsed && parsed.version || "").trim();
+        if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(latest)) return "";
+        this.__pluginUpdateCheckedAt = Date.now();
+        if (!isNewerPluginVersion(latest, PLUGIN_RUNTIME_VERSION)) return "";
+        const message = failureContext ? `检测到插件新版本 ${latest}（当前 ${PLUGIN_RUNTIME_VERSION}）。当前同步失败是否由版本差异引起尚未确认，建议更新后重试。` : `WeChat Inbox Sync ${latest} 已发布（当前 ${PLUGIN_RUNTIME_VERSION}）。请在“设置 → 第三方插件”中检查更新。`;
+        new Notice(message, 1e4);
+        return latest;
+      } catch (_) {
+        return "";
+      } finally {
+        if (this.__pluginUpdateCheckPromise === checkPromise) this.__pluginUpdateCheckPromise = null;
+      }
+    })();
+    this.__pluginUpdateCheckPromise = checkPromise;
+    return checkPromise;
   }
   async onload() {
     this.ensureSerializedSaveData();
@@ -37307,17 +37663,34 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.transcriptionStopRibbon = this.addRibbonIcon("square", "暂停当前转写", (event) => this.stopCurrentTranscription({ trigger: "stop_button", trustedEvent: Boolean(event && event.isTrusted) }));
     this.setTranscriptionStopAvailable(false);
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
-    this.operatorMediaNode = createOperatorMediaNode({
-      plugin: this,
-      apiBase: this.settings.apiBase
-    });
-    this.register(() => {
-      if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
-        return this.operatorMediaNode.stop();
+    const operatorNodeConfigured = String(process.env[OPERATOR_NODE_ENABLED_ENV] || "").trim() === "1" && Boolean(String(process.env[OPERATOR_NODE_ID_ENV] || "").trim()) && Boolean(String(process.env[OPERATOR_NODE_TOKEN_ENV] || "").trim());
+    if (operatorNodeConfigured) {
+      try {
+        const { createOperatorMediaNode } = getOperatorMediaNodeModule();
+        this.operatorMediaNode = createOperatorMediaNode({
+          plugin: this,
+          apiBase: this.settings.apiBase
+        });
+        this.register(() => {
+          if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
+            return this.operatorMediaNode.stop();
+          }
+          return void 0;
+        });
+        if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
+      } catch (error) {
+        if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
+          try {
+            Promise.resolve(this.operatorMediaNode.stop()).catch(() => {
+            });
+          } catch (_) {
+          }
+        }
+        this.operatorMediaNode = null;
+        const code = String(error && error.code || "INITIALIZATION_FAILED").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+        console.warn(`Optional operator media node did not start (${code || "INITIALIZATION_FAILED"}).`);
       }
-      return void 0;
-    });
-    if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
+    }
     this.startAutoSync();
     this.getSyncDiagnosticReporter().kick();
     void this.maybeCheckPluginUpdate().catch(() => {
@@ -38041,7 +38414,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }
     }
     if (response.status && (response.status < 200 || response.status >= 300)) {
-      const message = payload && payload.errMsg || `HTTP ${response.status}`;
+      const message = payload && (payload.errMsg || payload.message || payload.error && payload.error.message) || `HTTP ${response.status}`;
       const officialRetryPayload = await retryWithOfficialApiBaseIfNeeded(message);
       if (officialRetryPayload) return officialRetryPayload;
       if (response.status === 400 && message.includes("Missing client ID")) {
@@ -38050,10 +38423,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (isBindingInvalidMessage(message)) {
         throw new Error("绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」");
       }
-      const requestError = new Error(message);
-      requestError.status = response.status;
-      requestError.statusCode = response.status;
-      if (payload && payload.errCode) requestError.code = String(payload.errCode);
+      const requestError = createSyncApiRequestError(payload, response.status, message);
       throw requestError;
     }
     if (!payload || payload.success === false) {
@@ -38066,10 +38436,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (isBindingInvalidMessage(message)) {
         throw new Error("绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」");
       }
-      const requestError = new Error(message);
-      requestError.status = Number(response.status) || 0;
-      requestError.statusCode = requestError.status;
-      if (payload && payload.errCode) requestError.code = String(payload.errCode);
+      const requestError = createSyncApiRequestError(payload, response.status, message);
       throw requestError;
     }
     return payload;
@@ -38114,12 +38481,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const status = Number(response && response.status) || 0;
     const errorPayload = payload && (payload.errMsg || payload.message || payload.error && payload.error.message);
     if (status && (status < 200 || status >= 300) || !payload || payload.success === false) {
-      const requestError = new Error(String(errorPayload || `同步 API 请求失败${status ? `：HTTP ${status}` : ""}`));
-      requestError.status = status;
-      requestError.statusCode = status;
-      if (payload && (payload.errCode || payload.code || payload.error && payload.error.code)) {
-        requestError.code = String(payload.errCode || payload.code || payload.error.code);
-      }
+      const requestError = createSyncApiRequestError(payload, status, String(errorPayload || `同步 API 请求失败${status ? `：HTTP ${status}` : ""}`));
       throw requestError;
     }
     return payload;
@@ -39504,6 +39866,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         bindingToken,
         bindingLabel: String(item.bindingLabel || "").trim(),
         message: String(item.message || "").trim().slice(0, 500),
+        ...retainedSyncFailureContext(item),
         failedAt: (/* @__PURE__ */ new Date()).toISOString(),
         retryCount: Math.max(0, Math.floor(Number(item.retryCount) || 0)),
         ...isSetupRequired({ code: item.setupCode }) ? { setupRequired: true, setupCode: item.setupCode } : {},
@@ -40348,149 +40711,73 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   }
   getSyncDiagnosticText(options = {}) {
     const detailed = options.detailed === true;
-    const platform = this.getConfiguredLocalAsrPlatform();
-    const runtimeIdentity = getPluginRuntimeIdentity(
-      this.manifest && this.manifest.version ? this.manifest.version : ""
-    );
+    const identity = getPluginRuntimeIdentity(this.manifest && this.manifest.version || "");
     const asrRoot = this.getConfiguredLocalAsrInstallRoot();
-    const ocrRoot = this.getConfiguredLocalOcrInstallRoot();
-    const asrStatus = typeof this.getLocalAsrInstallStatus === "function" ? this.getLocalAsrInstallStatus() : getLocalAsrInstallStatus(asrRoot, fs.existsSync, platform);
-    const ocrStatus = typeof this.getLocalOcrInstallStatus === "function" ? this.getLocalOcrInstallStatus() : getLocalOcrInstallStatus(ocrRoot, fs.existsSync, platform);
-    const asrInstallLog = readLocalAsrInstallLog(asrRoot);
-    const asrRunLog = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(asrRoot));
-    const ocrInstallLog = readLocalAsrInstallLog(ocrRoot);
-    const syncLogText = readSyncDiagnosticLog(asrRoot);
-    const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : syncLogText;
-    const sourceUrlFromSyncLog = /* @__PURE__ */ __name((text) => {
-      const match = String(text || "").match(/^sourceUrl=(https?:\/\/\S+)$/im);
-      return sanitizeSourceLink(match ? match[1] : "");
-    }, "sourceUrlFromSyncLog");
-    const lastSyncSourceUrl = this.lastSyncDiagnostic ? this.lastSyncDiagnostic.status === "failed" ? sanitizeSourceLink(this.lastSyncDiagnostic.sourceUrl) : "" : sourceUrlFromSyncLog(syncLogText);
-    const hasFailureSignal = /* @__PURE__ */ __name((text) => /status\s*=\s*failed|failed|failure|error|exception|traceback|curl:\s*\(\d+\)|connection reset|timed out|timeout|not found|permission denied|denied|未找到|失败|错误|异常|超时|缺失|不完整/i.test(String(text || "")), "hasFailureSignal");
-    const hasAsrRunFailureSignal = /* @__PURE__ */ __name((text) => {
-      const source = String(text || "");
-      const errorSectionMatch = source.match(/--- error ---\s*([\s\S]*)$/i);
-      const explicitError = errorSectionMatch ? errorSectionMatch[1].trim() : "";
-      return Boolean(explicitError) || /status\s*=\s*failed|whisper failed|ffmpeg failed|failed with exit code|command failed|runtimeexception|fullyqualifiederrorid|operationstopped|traceback|enoent|permission denied|timed out|timeout/i.test(source);
-    }, "hasAsrRunFailureSignal");
-    const tailLog = /* @__PURE__ */ __name((text, maxLines = 50) => String(text || "").split(/\r?\n/).slice(-maxLines).join("\n").trim(), "tailLog");
-    const appendFailedLog = /* @__PURE__ */ __name((lines2, title, text, detector = hasFailureSignal) => {
-      const source = String(text || "").trim();
-      if (!source || !detector(source)) return false;
-      const identity = source.split(/\r?\n/).filter((line) => /^(?:time|status)=/.test(line)).slice(0, 2).join("\n");
-      lines2.push(title, identity, tailLog(asrRecovery.diagnosticRedact(source, this.settings), detailed ? 50 : 12));
-      return true;
-    }, "appendFailedLog");
-    const formatMissingReasons = /* @__PURE__ */ __name((status) => status && Array.isArray(status.missingReasons) && status.missingReasons.length ? status.missingReasons.join("；") : "无", "formatMissingReasons");
+    let current = this.lastSyncDiagnostic;
+    if (!current) {
+      const saved = readSyncDiagnosticLog(asrRoot);
+      const read = /* @__PURE__ */ __name((name) => (String(saved || "").match(new RegExp("^" + name + "=(.*)$", "m")) || [])[1] || "", "read");
+      current = { status: read("status"), recordId: read("recordId"), time: read("time"), stage: read("stage"), error: read("error"), message: read("message"), sourceUrl: read("sourceUrl") };
+    }
+    const failures = failureScope.selectFailureRecords(this.getRecentSyncFailures(), current, this.settings.completedSyncReceipts);
     const lines = [
-      "WeChat Inbox Sync 同步/安装失败诊断",
-      `插件版本：${runtimeIdentity.manifestVersion}`,
-      `运行 Bundle：${runtimeIdentity.runtimeVersion}${detailed ? " / " + runtimeIdentity.buildMarker : ""}`,
-      `版本身份一致：${runtimeIdentity.matchesManifest ? "是" : "否（请完全退出并重新打开 Obsidian）"}`,
-      `运行系统：${os.platform()} ${os.arch()} ${os.release()}`,
-      `手动选择系统：${this.settings.localAsrPlatform || "auto"}`,
-      `实际使用系统：${platform}`,
-      `API 地址：${this.settings.apiBase || "-"}`,
-      `绑定码：${this.getActiveBindings().map((item) => `${item.label || ""}:[REDACTED]`).join(", ") || "-"}`,
-      `权限缓存：${JSON.stringify(redactSensitiveObject(this.settings.localTranscriptionEntitlementStatus || {}))}`,
-      `最近权限查询失败：${this.settings.proEntitlementLastError ? `${this.settings.proEntitlementLastErrorAt || "时间未知"} ${this.settings.proEntitlementLastError}` : "无"}`,
-      "",
-      "组件状态：",
-      "抖音解析：" + (this.getLocalDouyinResolverInstallStatus().ready ? "可用（已校验）" : "需安装或修复"),
-      `音视频转写 ASR：${asrStatus.ready ? "可用" : "不可用"}`,
-      `ASR 安装目录：${asrStatus.installRoot || asrRoot}`,
-      `ASR 缺失项：${formatMissingReasons(asrStatus)}`,
-      `图片文字识别 OCR：${ocrStatus.ready ? "可用" : "不可用"}`,
-      `OCR 安装目录：${ocrStatus.installRoot || ocrRoot}`,
-      `OCR 安装日志：${getLocalAsrInstallLogPath(ocrRoot)}`,
-      `OCR 缺失项：${formatMissingReasons(ocrStatus)}`
+      "WeChat Inbox Sync 同步失败诊断",
+      "插件版本：" + identity.manifestVersion + "；运行 Bundle：" + identity.runtimeVersion,
+      "版本身份一致：" + (identity.matchesManifest ? "是" : "否（请完全退出并重新打开 Obsidian）"),
+      "运行系统：" + os.platform() + " " + os.arch() + " " + os.release(),
+      "未恢复失败记录：" + failures.length
     ];
-    const asrDownload = readLocalAsrDownloadDiagnostic(asrRoot);
-    if (detailed || [...asrDownload.source || [], ...asrDownload.downloads || []].some((entry) => entry.status === "failed")) {
-      lines.push("", "最近 ASR 下载诊断（请核对 time 是否属于本次安装）：", JSON.stringify(asrDownload, null, detailed ? 2 : 0));
+    if (!failures.length) {
+      if (current && current.status === "failed" && !current.recordId && !(current.failureDetails && current.failureDetails.length) && !(current.historicalFailures && current.historicalFailures.length)) {
+        lines.push("同步请求失败（尚未关联到具体记录）：" + asrRecovery.diagnosticRedact(String(current.error || current.message || ""), this.settings));
+      } else {
+        lines.push("当前没有失败中的同步记录；已省略成功任务及无关平台历史。");
+      }
+      return failureScope.boundedDiagnostic(lines.join("\n"), 16384);
     }
-    const resolverAttempts = this.getLocalDouyinResolverInstallDiagnostic();
-    if (resolverAttempts.length) lines.push("", "最近抖音解析组件安装诊断：", detailed ? JSON.stringify(resolverAttempts, null, 2) : summarizeResolverAttempts(resolverAttempts));
-    const douyinAttempts = douyinBrowserSafety.readAttempts(asrRoot);
-    const douyinResolutions = douyinDiagnostic.read(asrRoot);
-    if (douyinResolutions.length) {
-      const selected = detailed ? douyinResolutions : douyinResolutions.slice(-1).map((row) => ({
-        attemptId: row.attemptId,
-        finishedAt: row.finishedAt,
-        outcome: row.outcome,
-        failureCode: row.failureCode,
-        cookieState: row.cookieState,
-        stages: row.stages.map((stage) => ({
-          stage: stage.stage,
-          ok: stage.ok,
-          durationMs: stage.durationMs,
-          rejectionReason: stage.rejectionReason,
-          ...stage.error ? { error: stage.error } : {}
-        }))
-      }));
-      lines.push("", detailed ? "最近抖音完整解析链：" : "最近抖音解析结果（详细诊断保留历史）：", JSON.stringify(selected, null, detailed ? 2 : 0));
-    }
-    if (douyinAttempts.length) lines.push("", "最近抖音隐藏网页诊断：", JSON.stringify(detailed ? douyinAttempts : douyinAttempts.slice(-1), null, detailed ? 2 : 0));
-    const taskResults = this.getRecentXiaohongshuBrowserResults().map((item) => xhsDiagnostic.sanitize(item, this.settings));
-    if (taskResults.length) lines.push("", "最近小红书任务诊断：", JSON.stringify(detailed ? taskResults : taskResults.slice(-1), null, detailed ? 2 : 0));
-    const commentResults = this.getRecentXiaohongshuCommentResults();
-    if (Array.isArray(commentResults) && commentResults.length) {
-      lines.push("", "最近小红书评论诊断：", ...commentResults.slice(detailed ? -5 : -1).map((result) => formatXiaohongshuCommentResult(result, detailed)));
-    }
-    if (this.feishuImageDisplay) {
-      const feishu = this.feishuImageDisplay.diagnostic();
-      if (hasFeishuActivity(feishu)) lines.push("", "飞书图片显示：", JSON.stringify(feishu));
-    }
-    if (lastSyncText && (hasFailureSignal(lastSyncText) || this.lastSyncDiagnostic && this.lastSyncDiagnostic.diagnostic)) {
-      lines.push("", "最近同步失败状态：", lastSyncText);
-    }
-    if (lastSyncSourceUrl) lines.push("", `最近失败原始分享链接：${lastSyncSourceUrl}`);
-    const bilibiliFailures = this.getRecentSyncFailures().map((item) => {
-      const diagnostic = bilibiliDiagnostic.sanitize(item.diagnostic);
-      return diagnostic ? { recordId: item.recordId, summary: bilibiliDiagnostic.summary(diagnostic), diagnostic } : null;
-    }).filter(Boolean).slice(-20);
-    if (bilibiliFailures.length) lines.push("", "最近B站失败原因：", JSON.stringify(bilibiliFailures, null, 2));
-    const recentCleanupErrors = this.getRecentSyncFailureCleanupErrors();
-    if (recentCleanupErrors.length) {
+    for (const failure of failures) {
       lines.push(
         "",
-        "最近失败清理结果：",
-        ...recentCleanupErrors.map((item) => `${item.bindingLabel || "未知设备"} / ${item.recordId}: ${item.reason}`)
+        "记录 ID：" + failure.recordId,
+        "失败时间：" + (failure.failedAt || "未知"),
+        "失败阶段：" + (failure.stage || "未知") + (failure.code ? " / " + failure.code : ""),
+        "错误摘要：" + asrRecovery.diagnosticRedact(String(failure.message || "内容处理失败"), this.settings)
       );
+      const sourceUrl = sanitizeSourceLink(failure.sourceUrl);
+      if (sourceUrl) lines.push("原始分享链接：" + sourceUrl);
     }
-    if (/INSTALLER_CLEANUP_WARNING/i.test(asrInstallLog)) {
-      const stages = [...new Set([...asrInstallLog.matchAll(/INSTALLER_CLEANUP_WARNING stage=(temporary-directory|release-lock)/g)].map((match) => match[1]))];
-      lines.push("ASR 安装清理提示：INSTALLER_CLEANUP_WARNING；" + stages.join(", ") + "；请结合安装时间和结果判断，清理提示不代表组件不可用。");
+    const append = /* @__PURE__ */ __name((title, value) => {
+      if (!value || Array.isArray(value) && !value.length) return;
+      const text = asrRecovery.diagnosticRedact(JSON.stringify(value, null, detailed ? 2 : 0), this.settings);
+      lines.push("", title, failureScope.boundedDiagnostic(text, detailed ? 8192 : 2048));
+    }, "append");
+    for (const failure of failures) {
+      if (failure.diagnostic) append("该记录失败细节：" + failure.recordId, failure.diagnostic);
     }
-    appendFailedLog(
-      lines,
-      "ASR 最近安装异常（组件当前可用也保留）：",
-      asrInstallLog,
-      (text) => /INSTALLER_CLEANUP_WARNING/i.test(text) || hasAsrRunFailureSignal(text)
-    );
-    appendFailedLog(lines, "ASR 最近转写失败日志：", asrRunLog, hasAsrRunFailureSignal);
-    if (!ocrStatus.ready) {
-      const appendedOcrLog = appendFailedLog(lines, "OCR 最近安装失败日志：", ocrInstallLog);
-      if (ocrStatus.hasPython && !ocrStatus.hasScript) {
-        lines.push("", "OCR 修复建议：Python 环境已安装，仅 OCR 脚本缺失；重新安装会复用现有环境并补齐脚本。");
+    const resolutions = failureScope.relatedFailureRows(douyinDiagnostic.read(asrRoot), failures);
+    append("关联失败的抖音解析链：", resolutions);
+    const resolutionAttempts = new Set(resolutions.map((row) => row.attemptId).filter(Boolean));
+    append("关联失败的抖音网页诊断：", douyinBrowserSafety.readAttempts(asrRoot).filter((row) => resolutionAttempts.has(row.resolutionAttemptId) && row.outcome !== "success"));
+    const xhs = failureScope.relatedFailureRows(this.getRecentXiaohongshuBrowserResults(), failures).map((row) => xhsDiagnostic.sanitize(row, this.settings));
+    append("关联失败的小红书任务诊断：", xhs);
+    const xhsAttempts = new Set(xhs.map((row) => row.attemptId).filter(Boolean));
+    append("关联失败的小红书评论诊断：", this.getRecentXiaohongshuCommentResults().filter((row) => xhsAttempts.has(row.attemptId) && !["success", "complete", "completed"].includes(row.status)));
+    if (detailed) {
+      let session = null;
+      try {
+        session = JSON.parse(asrRecovery.boundedRead(path.join(asrRoot, "asr-diagnostic-last.json"), 768 * 1024));
+      } catch (_) {
       }
-      if (!appendedOcrLog) {
-        lines.push("", "OCR 安装日志未找到或没有记录失败信息；请重新安装/修复本地转写组件以生成新的分阶段日志。");
-      }
+      append("关联失败的 ASR 尝试：", failureScope.matchingFailedAsrSession(session, failures));
     }
-    if (Array.isArray(commentResults) && commentResults.length) {
-      lines.push("", "已保留小红书评论诊断；其他组件仅显示失败相关日志。");
-    } else if (!douyinAttempts.some((row) => row.outcome === "failed") && !douyinResolutions.some((row) => row.outcome === "failed") && !resolverAttempts.some((row) => row.status === "failed") && !lines.some((line) => /失败日志|失败状态|安装异常/.test(line))) {
-      lines.push("", "未检测到失败日志；已省略成功日志。");
-    } else {
-      lines.push("", "已省略成功日志，只保留失败相关信息。");
+    const setupFailures = failures.filter((row) => row.setupRequired);
+    if (setupFailures.length) {
+      const platform = this.getConfiguredLocalAsrPlatform();
+      const status = this.getLocalAsrInstallStatus();
+      append("相关组件缺失项：", { platform, missingReasons: status.missingReasons || [] });
     }
-    if (detailed) lines.push("", asrRecovery.detailedDiagnostic(asrRoot, this.settings, taskResults.at(-1)));
-    else lines.push("", "已对诊断信息进行脱敏。");
-    const redacted = asrRecovery.diagnosticRedact(lines.join("\n"), this.settings);
-    return lastSyncSourceUrl ? `${redacted}
-
-最近失败原始分享链接：${lastSyncSourceUrl}` : redacted;
+    lines.push("", "仅保留未恢复失败记录的相关信息；已省略成功任务与无法关联的历史日志。");
+    return failureScope.boundedDiagnostic(lines.join("\n"), detailed ? 32768 : 16384);
   }
   async copyTextToClipboard(text) {
     if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
@@ -42697,6 +42984,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       error.code = "OPERATOR_NODE_DISABLED";
       throw error;
     }
+    const operatorNodeApi = getOperatorMediaNodeModule();
     throwIfAborted(signal);
     const preparedMedia = await this.transcodeCloudFallbackMediaToMp3(inputPath, { signal });
     const lease = {
@@ -42705,9 +42993,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       fencingVersion: job && job.fencingVersion,
       leaseToken: String(job && job.leaseToken || "").trim(),
       workerId,
-      protocolVersion: WORKER_PROTOCOL_VERSION
+      protocolVersion: operatorNodeApi.WORKER_PROTOCOL_VERSION
     };
-    const requestWorker = typeof request === "function" ? request : (requestPath, body, options) => requestOperatorJsonViaNode(apiBase, requestPath, workerToken, body, options);
+    const requestWorker = typeof request === "function" ? request : (requestPath, body, options) => operatorNodeApi.requestJsonViaNode(apiBase, requestPath, workerToken, body, options);
     try {
       const digest = await hashFileSha256(preparedMedia.path, { signal, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES });
       const preparedPayload = await requestWorker("/transcriptions/fallback/worker/media/prepare", {
@@ -42728,7 +43016,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
       await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
         signal,
-        timeoutMs: 12e4,
+        timeoutMs: 8 * 60 * 1e3,
         maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
         fileName: "audio.mp3",
         contentType: "audio/mpeg",
@@ -45757,7 +46045,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const isFeishuLink = isFeishuUrl(url);
     const feishuCloudOAuthStatus = isFeishuLink ? await this.getFeishuCloudOAuthStatus(binding) : null;
-    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === "audio_video" || metadata.contentCategory === "视频" || metadata.videoUrl) && !String(metadata.transcription || "").trim()) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && (!isWechatArticleUrl(url) || !getSyncLifecycleOutcomeError(record) && (!(metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim())) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
+    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && (!isPlatformArticleUrl(url) || !["failed", "link_saved"].includes(metadata.conversionStatus) && hasPlatformArticleBody(metadata.markdown || metadata.snapshot || metadata.contentSnapshot)) && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === "audio_video" || metadata.contentCategory === "视频" || metadata.videoUrl) && !String(metadata.transcription || "").trim()) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && (!isWechatArticleUrl(url) || !getSyncLifecycleOutcomeError(record) && (!(metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim())) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       if (xiaohongshuBrowserDiagnostic) {
         const prior = metadata.xiaohongshuCommentResult;
         let savedMarkdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || "");
@@ -47351,6 +47639,7 @@ ${finalized.markdown}
             needsLogin: Boolean(platformResult && platformResult.needsLogin),
             blocked: Boolean(platformResult && platformResult.blocked),
             appWall: Boolean(platformResult && platformResult.appWall),
+            identityMatched: Boolean(platformResult && platformResult.identityMatched),
             bodyTextChars: Number(platformResult && platformResult.bodyTextChars) || 0,
             finalHost: getSafeUrlDiagnostic(platformResult && platformResult.finalUrl || platformUrl).host || "",
             ...platformResult && platformResult.loadError ? { loadError: platformResult.loadError } : {}
@@ -47358,7 +47647,7 @@ ${finalized.markdown}
           if (platformResult && String(platformResult.markdown || "").trim()) {
             platformStage = "hidden-browser";
           } else if (platformResult && platformResult.blocked) {
-            platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+            platformError = new Error(`${platformLabel}返回访问限制或验证页面，未获得正文`);
           } else if (platformResult && platformResult.needsLogin) {
             platformError = new Error("页面需要登录后才能读取正文");
           } else if (platformResult && platformResult.appWall) {
@@ -47397,6 +47686,8 @@ ${finalized.markdown}
             try {
               html2 = String(await this.downloadWebpageHtmlViaNode(platformUrl) || "");
               platformHttpDiagnostic.transport = "node-http";
+              platformHttpDiagnostic.previousStatus = platformHttpDiagnostic.status;
+              platformHttpDiagnostic.status = 0;
             } catch (nodeError) {
               platformHttpDiagnostic.transport = "node-http-failed";
               platformHttpDiagnostic.nodeError = String(nodeError && (nodeError.message || nodeError) || "").slice(0, 160);
@@ -47409,11 +47700,11 @@ ${finalized.markdown}
           if (html2 && platformBlockMarker && platformBlockMarker.test(html2)) {
             html2 = "";
             if (!platformError) {
-              platformError = new Error(`${platformLabel}拒绝了当前网络的访问，错误码 40362；请更换网络或代理后重试`);
+              platformError = new Error(`${platformLabel}返回访问限制或验证页面，未获得正文`);
             }
           }
           if (html2) {
-            const embedded = extractPlatformArticleFromHtml(html2, platformKind);
+            const embedded = extractPlatformArticleFromHtml(html2, platformKind, platformUrl);
             let markdown2 = "";
             if (embedded && embedded.contentHtml) {
               try {
@@ -47426,12 +47717,14 @@ ${finalized.markdown}
             }
             if (!markdown2) {
               try {
-                markdown2 = htmlToMarkdown(html2);
+                const doc = new DOMParser().parseFromString(html2, "text/html");
+                const body = selectPlatformArticleBody(doc, platformKind, getPlatformArticleIdentity(platformUrl));
+                if (body && hasMatchingPlatformArticleDocumentIdentity(doc, platformUrl)) markdown2 = htmlToMarkdown(body.innerHTML);
               } catch (error) {
                 if (!platformError) platformError = error;
               }
             }
-            if (markdown2) {
+            if (hasPlatformArticleBody(markdown2)) {
               platformResult = {
                 ...platformResult || {},
                 title: platformResult && platformResult.title || embedded && embedded.title || "",
@@ -47442,7 +47735,7 @@ ${finalized.markdown}
             }
           }
         }
-        if (!platformResult || !String(platformResult.markdown || "").trim()) {
+        if (!platformStage || !platformResult || !hasPlatformArticleBody(platformResult.markdown)) {
           const error = platformError || new Error(`${platformLabel}正文提取失败`);
           error.platformDiagnostic = redactSensitiveObject({
             source: "platform-article",
@@ -48095,8 +48388,8 @@ ${finalized.markdown}
             platform: metadata.platform || platformLabel,
             contentCategory: "图文",
             markdown: [
-              `> ${needsLogin ? `${platformLabel}页面需要登录后才能读取正文。` : `${platformLabel}正文未能自动提取。`}`,
-              "> 原始链接已写入笔记属性，可稍后重新同步。",
+              `> ${needsLogin ? `${platformLabel}返回访问验证或登录提示，本次未取得目标正文。` : `${platformLabel}正文未能自动提取。`}`,
+              "> 已保留原始链接等待重试，本次未完成正文同步。",
               "",
               `原始链接：${normalizePlatformArticleUrl(url)}`
             ].join("\n"),
@@ -49257,8 +49550,8 @@ ${finalized.markdown}
           sourceUrl: sanitizeSourceLink(getDiagnosticSourceUrl(record))
         });
         let lifecycleReportError = null;
+        const failureCode = categorizeSyncFailure(error);
         if (lifecycle.enabled && lifecycle.attemptId) {
-          const failureCode = categorizeSyncFailure(error);
           try {
             await this.upsertPendingSyncLifecycleAttempt(binding, {
               recordId,
@@ -49299,6 +49592,7 @@ ${finalized.markdown}
           title: failedTitle,
           recordId: getRecordId(record),
           message: setupRequired ? message : partialSavedInfo ? QUALITY_PARTIAL_NOTICE : "单条内容同步失败",
+          bindingFingerprint: getSyncLifecycleBindingFingerprint(binding.token),
           error: message,
           ...diagnosticSourceUrl ? { sourceUrl: diagnosticSourceUrl } : {},
           ...diagnostic ? { diagnostic } : {},
@@ -49313,6 +49607,10 @@ ${finalized.markdown}
             bindingToken: binding.token,
             bindingLabel,
             message,
+            sourceUrl: diagnosticSourceUrl,
+            stage: progress.stage || "processing",
+            code: failureCode,
+            attemptId: lifecycle && lifecycle.attemptId,
             retryCount: Number(record.retryCount) || 0,
             ...setupRequired ? { setupRequired: true, setupCode: error.code } : {},
             ...diagnostic ? { diagnostic } : {}
@@ -49332,7 +49630,10 @@ ${finalized.markdown}
           stage: { value: progress.stage || "processing" },
           failedAt: { value: failedAt },
           diagnosticId: { value: diagnosticId },
-          sourceUrl: { value: diagnosticSourceUrl }
+          sourceUrl: { value: diagnosticSourceUrl },
+          code: { value: failureCode },
+          attemptId: { value: lifecycle && lifecycle.attemptId },
+          bindingFingerprint: { value: getSyncLifecycleBindingFingerprint(binding.token) }
         });
         failed.push(failedItem);
       } finally {
@@ -49417,6 +49718,7 @@ ${finalized.markdown}
               bindingToken: binding.token,
               bindingLabel: binding.label,
               message: item.message,
+              ...retainedSyncFailureContext(item),
               retryCount: item.retryCount,
               ...item.setupRequired ? { setupRequired: true, setupCode: item.setupCode } : {},
               ...retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}
@@ -49531,6 +49833,10 @@ ${finalized.markdown}
       ));
       const pendingSetupEntries = outstandingFailures.filter((item) => item.setupRequired);
       const displayedFailures = failed.filter((item) => !item.partialSaved);
+      if (showNotice && displayedFailures.length) {
+        void this.maybeCheckPluginUpdate({ failureContext: true }).catch(() => {
+        });
+      }
       let finalMessage = buildSyncResultNotice(
         written,
         skipped,
@@ -49593,9 +49899,11 @@ ${finalized.markdown}
           recordId: item.recordId,
           message: item.message,
           failedAt: item.failedAt,
+          ...retainedSyncFailureContext(item),
+          bindingFingerprint: getSyncLifecycleBindingFingerprint(item.bindingToken),
           ...retainedSyncFailureDiagnostic(item.diagnostic, this.settings) ? { diagnostic: retainedSyncFailureDiagnostic(item.diagnostic, this.settings) } : {}
         })),
-        failureDetails: failed.slice(0, 20).map((item) => ({ recordId: item.recordId, message: item.message, ...item.stage ? { stage: item.stage } : {}, ...item.failedAt ? { failedAt: item.failedAt } : {}, ...item.diagnosticId ? { diagnosticId: item.diagnosticId } : {}, ...item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}, ...item.diagnostic ? { diagnostic: item.diagnostic } : {} })),
+        failureDetails: failed.slice(0, 20).map((item) => ({ recordId: item.recordId, bindingFingerprint: item.bindingFingerprint, attemptId: item.attemptId, message: item.message, ...item.stage ? { stage: item.stage } : {}, ...item.failedAt ? { failedAt: item.failedAt } : {}, ...item.diagnosticId ? { diagnosticId: item.diagnosticId } : {}, ...item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}, ...item.diagnostic ? { diagnostic: item.diagnostic } : {} })),
         completionWarningCount: completionWarnings.length,
         completionWarningCode: completionWarnings.length ? "COMPLETION_REPORT_FAILED" : "",
         ...completionWarningDetails.length ? { completionWarningDetails } : {},
@@ -50089,6 +50397,7 @@ WechatObsidianInboxPlugin.__test = {
   parseDoubaoAsrResult,
   parseDoubaoAsrTaskState,
   formatHttpError,
+  formatSyncApiErrorMessage,
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
   buildAttachmentDiagnostic,

@@ -1,0 +1,58 @@
+'use strict';
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const Module=require('node:module');
+const originalLoad=Module._load;
+let response={status:200,text:''};
+Module._load=function(name,...args){
+  if(name==='obsidian') return {Plugin:class{},PluginSettingTab:class{},Modal:class{},Setting:class{},Notice:class{},requestUrl:async()=>response};
+  if(name==='electron'||name==='@electron/remote') throw new Error('unavailable in test');
+  return originalLoad.call(this,name,...args);
+};
+const Plugin=require('../obsidian-plugin/wechat-inbox-sync/main');
+const lifecycle=require('../obsidian-plugin/wechat-inbox-sync/src/sync-lifecycle-utils');
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'article-diagnostics-test-'));
+async function run(){
+  const plugin=Object.create(Plugin.prototype);
+  plugin.manifest={version:'1.3.214'};
+  plugin.settings=Plugin.__test.mergeSettings({token:'SYNTHETIC-SECRET'});
+  plugin.saveSettings=async settings=>{plugin.settings=settings;};
+  plugin.getConfiguredLocalAsrInstallRoot=()=>root;
+  plugin.getRecentXiaohongshuBrowserResults=()=>[{recordRef:'unrelated-xhs',outcome:'success',error:'unrelated-xhs-detail'}];
+  plugin.getRecentXiaohongshuCommentResults=()=>[];
+  plugin.lastSyncDiagnostic={status:'success'};
+  const url='https://www.zhihu.com/question/321759446/answer/2047272282221961889';
+  await plugin.updateRecentSyncFailures({failed:[{recordId:'target',bindingToken:'SYNTHETIC-SECRET',message:'failure SYNTHETIC-SECRET',sourceUrl:url,stage:'parse',code:'EXTRACTION_FAILED',diagnostic:{source:'platform-article',platform:'zhihu',http:{status:403,transport:'obsidian-requestUrl'}}}]});
+  const diagnostic=plugin.getSyncDiagnosticText({detailed:true});
+  assert.match(diagnostic,/target/);assert.match(diagnostic,/403/);assert.match(diagnostic,/parse/);
+  assert.doesNotMatch(diagnostic,/SYNTHETIC-SECRET|unrelated-xhs|抖音|ASR 尝试|模型|磁盘/);
+  assert.ok(Buffer.byteLength(diagnostic)<4000);
+  assert.doesNotMatch(JSON.stringify(plugin.settings.recentSyncFailures), /zhihu\.com|2047272282221961889/,
+    'persistent failure context must not retain source links');
+  // Settings reload retains safe article failure facts, despite a successful empty poll.
+  plugin.settings=Plugin.__test.mergeSettings(JSON.parse(JSON.stringify(plugin.settings)));
+  assert.match(plugin.getSyncDiagnosticText({detailed:true}),/403/);
+  await plugin.updateRecentSyncFailures({resolved:[{recordId:'target',bindingToken:'SYNTHETIC-SECRET'}]});
+  assert.match(plugin.getSyncDiagnosticText({detailed:true}),/当前没有失败中的同步记录/);
+  plugin.saveMarkdownRemoteImageAssets=async md=>md;
+  plugin.downloadWebpageHtmlViaNode=async()=>'';
+  const content='知乎目标回答的正文内容，需要完整保留，不能被推荐回答和页面导航替代。'.repeat(3);
+  response={status:200,text:`<script id="js-initialData">${JSON.stringify({initialState:{entities:{answers:{111:{content:'错误推荐'.repeat(200)},'2047272282221961889':{content,question:{title:'正确文章'}}}}}})}</script>`};
+  const record={_id:'target',type:'webpage',content:url,metadata:{}};
+  const success=await plugin.hydrateWebpageMarkdown(record,root,'2026-11-01','test');
+  assert.equal(success.metadata.conversionStatus,'success');
+  assert.equal(success.metadata.markdown,content);
+  assert.equal(lifecycle.getSyncLifecycleOutcomeError(success),null);
+  const oldShell={...record,metadata:{markdown:'# 标题长到足够通过旧检查\n原始链接：'+url,conversionStatus:'success'}};
+  assert.equal((await plugin.hydrateWebpageMarkdown(oldShell,root,'2026-11-01','test')).metadata.markdown,content,'old shells must be re-extracted');
+  response={status:403,text:'<html><nav>首页 热点 登录 关于我们</nav></html>'};
+  const failure=await plugin.hydrateWebpageMarkdown(record,root,'2026-11-01','test');
+  assert.equal(failure.metadata.conversionStatus,'link_saved');
+  const failureError=lifecycle.getSyncLifecycleOutcomeError(failure);
+  assert.equal(failureError.code,'EXTRACTION_FAILED');
+  assert.equal(failureError.diagnostic.http.status,403);
+  console.log('plugin article and failed-only diagnostic integration tests passed');
+}
+run().catch(error=>{console.error(error);process.exitCode=1;}).finally(()=>{Module._load=originalLoad;fs.rmSync(root,{recursive:true,force:true});});
