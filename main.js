@@ -4145,8 +4145,12 @@ var require_sync_diagnostic_reporter = __commonJS({
       "OCR_FAILED",
       "SYNC_FAILED",
       "TRANSCRIPTION_FAILED",
-      "WRITE_FAILED"
+      "WRITE_FAILED",
+      "PLUGIN_UPDATE_REQUIRED",
+      "PLUGIN_VERSION_MISMATCH",
+      "PLUGIN_VERSION_UNSUPPORTED"
     ]);
+    var SAFE_ERROR_TYPES = new Set([...SAFE_ERROR_CODES].filter((code) => !code.startsWith("PLUGIN_")));
     var SAFE_EVIDENCE_CODES = /* @__PURE__ */ new Set([
       "network_timeout",
       "http_status",
@@ -4297,6 +4301,7 @@ var require_sync_diagnostic_reporter = __commonJS({
         if (result.length >= 8) break;
       }
       if (outcome === "succeeded" && !result.includes("sync_callback")) result.unshift("sync_callback");
+      if (outcome === "failed" && ["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"].includes(errorCode) && !result.includes("upgrade_required")) result.unshift("upgrade_required");
       if (outcome === "failed" && !result.length) {
         result.push("no_matching_evidence");
       }
@@ -4341,7 +4346,8 @@ var require_sync_diagnostic_reporter = __commonJS({
     function normalizeDiagnosticEvent(input = {}, defaults = {}) {
       const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
       const outcome = normalizeOutcome(source.outcome || defaults.outcome);
-      const errorType = outcome === "failed" ? normalizeErrorCode(source.errorType || source.errorCode, "SYNC_FAILED") : "NONE";
+      const inputErrorType = normalizeErrorCode(source.errorType || source.errorCode, "SYNC_FAILED");
+      const errorType = outcome === "failed" ? SAFE_ERROR_TYPES.has(inputErrorType) ? inputErrorType : "SYNC_FAILED" : "NONE";
       const errorCode = outcome === "failed" ? normalizeErrorCode(source.errorCode || source.errorType, errorType) : "NONE";
       const diagnosticId = normalizeSafeId(source.diagnosticId || defaults.diagnosticId) || createDiagnosticId2({
         bindingFingerprint: defaults.bindingFingerprint,
@@ -14860,7 +14866,7 @@ var require_operator_media_node = __commonJS({
     var OPERATOR_NODE_ID_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_ID";
     var OPERATOR_NODE_TOKEN_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_TOKEN";
     var OPERATOR_NODE_API_BASE_ENV2 = "WECHAT_INBOX_OPERATOR_NODE_API_BASE";
-    var WORKER_PROTOCOL_VERSION2 = "cfb-worker/v2";
+    var WORKER_PROTOCOL_VERSION = "cfb-worker/v2";
     var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
     var XIAOHONGSHU_CAPABILITY = "xiaohongshu";
     var WECHAT_ARTICLE_CAPABILITY = "wechat_article";
@@ -15071,7 +15077,7 @@ var require_operator_media_node = __commonJS({
       return "";
     }
     __name(resolveMediaSourcePlatform, "resolveMediaSourcePlatform");
-    function createOperatorMediaNode2({
+    function createOperatorMediaNode({
       plugin = null,
       env = process.env,
       apiBase = "",
@@ -15111,7 +15117,7 @@ var require_operator_media_node = __commonJS({
         attemptId: String(job && job.attemptId || "").trim(),
         leaseToken: String(job && job.leaseToken || "").trim(),
         fencingVersion: job && job.fencingVersion,
-        protocolVersion: WORKER_PROTOCOL_VERSION2
+        protocolVersion: WORKER_PROTOCOL_VERSION
       }), "baseForJob");
       const snapshot = /* @__PURE__ */ __name(() => ({
         enabled: config.enabled,
@@ -15221,7 +15227,7 @@ var require_operator_media_node = __commonJS({
               const capabilities = getCapabilities();
               return callApi("/transcriptions/fallback/worker/capacity", {
                 workerId: config.workerId,
-                protocolVersion: WORKER_PROTOCOL_VERSION2,
+                protocolVersion: WORKER_PROTOCOL_VERSION,
                 capabilities,
                 runtimeCapabilities: capabilities,
                 availableCapabilities: capabilities,
@@ -15453,7 +15459,7 @@ var require_operator_media_node = __commonJS({
             if (!capacityReady && !await sendCapacityHeartbeat()) return;
             const response = await withCapabilityNegotiation(() => callApi("/transcriptions/fallback/worker/claim", {
               workerId: config.workerId,
-              protocolVersion: WORKER_PROTOCOL_VERSION2,
+              protocolVersion: WORKER_PROTOCOL_VERSION,
               capabilities: getCapabilities(),
               capacitySlots: 1,
               activeSlots: 0,
@@ -15531,13 +15537,13 @@ var require_operator_media_node = __commonJS({
         poll
       };
     }
-    __name(createOperatorMediaNode2, "createOperatorMediaNode");
+    __name(createOperatorMediaNode, "createOperatorMediaNode");
     module2.exports = {
       OPERATOR_NODE_ENABLED_ENV: OPERATOR_NODE_ENABLED_ENV2,
       OPERATOR_NODE_ID_ENV: OPERATOR_NODE_ID_ENV2,
       OPERATOR_NODE_TOKEN_ENV: OPERATOR_NODE_TOKEN_ENV2,
       OPERATOR_NODE_API_BASE_ENV: OPERATOR_NODE_API_BASE_ENV2,
-      WORKER_PROTOCOL_VERSION: WORKER_PROTOCOL_VERSION2,
+      WORKER_PROTOCOL_VERSION,
       DEFAULT_CAPABILITIES,
       XIAOHONGSHU_CAPABILITY,
       isDouyinSourceUrl,
@@ -15550,7 +15556,7 @@ var require_operator_media_node = __commonJS({
       readOperatorNodeConfig,
       requestJsonViaNode: requestJsonViaNode2,
       redactError,
-      createOperatorMediaNode: createOperatorMediaNode2,
+      createOperatorMediaNode,
       classifyFailureReason
     };
   }
@@ -22003,15 +22009,18 @@ var {
   hashFileSha256,
   uploadMultipartFile
 } = require_cloud_media_upload();
-var {
-  createOperatorMediaNode,
-  OPERATOR_NODE_API_BASE_ENV,
-  OPERATOR_NODE_ENABLED_ENV,
-  OPERATOR_NODE_ID_ENV,
-  OPERATOR_NODE_TOKEN_ENV,
-  WORKER_PROTOCOL_VERSION,
-  requestJsonViaNode: requestOperatorJsonViaNode
-} = require_operator_media_node();
+var OPERATOR_NODE_ENABLED_ENV = "WECHAT_INBOX_OPERATOR_NODE_ENABLED";
+var OPERATOR_NODE_ID_ENV = "WECHAT_INBOX_OPERATOR_NODE_ID";
+var OPERATOR_NODE_TOKEN_ENV = "WECHAT_INBOX_OPERATOR_NODE_TOKEN";
+var OPERATOR_NODE_API_BASE_ENV = "WECHAT_INBOX_OPERATOR_NODE_API_BASE";
+var operatorMediaNodeModule = null;
+function getOperatorMediaNodeModule() {
+  if (!operatorMediaNodeModule) {
+    operatorMediaNodeModule = require_operator_media_node();
+  }
+  return operatorMediaNodeModule;
+}
+__name(getOperatorMediaNodeModule, "getOperatorMediaNodeModule");
 var {
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer
@@ -22235,7 +22244,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.215";
+var PLUGIN_RUNTIME_VERSION = "1.3.216";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -25072,6 +25081,35 @@ function isInvalidCloudBaseEnvMessage(message) {
   return /INVALID_ENV/i.test(text) || /Env Not Exists/i.test(text);
 }
 __name(isInvalidCloudBaseEnvMessage, "isInvalidCloudBaseEnvMessage");
+function formatSyncApiErrorMessage(payload, fallback = "") {
+  const errorCode = String(payload && (payload.errCode || payload.code || payload.error && (payload.error.code || payload.error.errCode)) || "").trim().toUpperCase();
+  if (["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"].includes(errorCode)) {
+    const requiredVersion = String(payload.requiredVersion || payload.error && payload.error.requiredVersion || "").trim();
+    const safeRequiredVersion = /^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(requiredVersion) ? `，需要更新到 ${requiredVersion} 或更高版本` : "";
+    return `当前插件版本（${PLUGIN_RUNTIME_VERSION}）与此功能不兼容${safeRequiredVersion}。请在“设置 → 第三方插件”中检查更新并重启 Obsidian 后重试。`;
+  }
+  const raw = String(
+    payload && (payload.errMsg || payload.message || payload.error && (payload.error.message || payload.error.errMsg) || payload.code) || fallback || ""
+  );
+  if (/InsufficientBalance|Function is Unavailable|AvailableStatus\s*=\s*InsufficientBalance/i.test(raw)) {
+    return "云端同步服务暂时不可用：腾讯云资源包或账户余额不足，请先在腾讯云控制台续费/充值后再重试。";
+  }
+  return raw || "同步 API 请求失败";
+}
+__name(formatSyncApiErrorMessage, "formatSyncApiErrorMessage");
+function createSyncApiRequestError(payload, status, fallback = "") {
+  const errorCode = String(payload && (payload.errCode || payload.code || payload.error && (payload.error.code || payload.error.errCode)) || "").trim().toUpperCase();
+  const requestError = new Error(formatSyncApiErrorMessage(payload, fallback));
+  requestError.status = Number(status) || 0;
+  requestError.statusCode = requestError.status;
+  if (errorCode) requestError.code = errorCode;
+  const requiredVersion = String(payload && (payload.requiredVersion || payload.error && payload.error.requiredVersion) || "").trim();
+  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(requiredVersion)) {
+    requestError.requiredVersion = requiredVersion;
+  }
+  return requestError;
+}
+__name(createSyncApiRequestError, "createSyncApiRequestError");
 function requestJsonViaNode(options) {
   return new Promise((resolve, reject) => {
     const signal = options && options.signal;
@@ -37117,9 +37155,12 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const status = Number(error && (error.status || error.statusCode || error.response && error.response.status)) || 0;
     const apiCode = Number(error && error.apiCode) || 0;
     const effectiveHttpStatus = status || (apiCode === -412 ? 412 : 0);
+    const explicitPluginVersionCode = ["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"].find((code) => code === transportCode || code === diagnosticCode) || "";
     const explicitAuthEvidence = status === 401 || /AUTH|BINDING|TOKEN/.test(transportCode) || /鉴权|绑定码/.test(errorMessage);
-    const errorCode = explicitAuthEvidence ? "AUTH_FAILED" : categorizeSyncFailure(error);
+    const errorType = explicitPluginVersionCode ? "SYNC_FAILED" : explicitAuthEvidence ? "AUTH_FAILED" : categorizeSyncFailure(error);
+    const errorCode = explicitPluginVersionCode || errorType;
     const evidenceCodes = [];
+    if (explicitPluginVersionCode) evidenceCodes.push("upgrade_required");
     if (/^(?:TIMEOUT|ETIMEDOUT|ECONNABORTED|NETWORK_TIMEOUT|NODE_HTTP_TIMEOUT)$/.test(transportCode)) {
       evidenceCodes.push("network_timeout");
     } else if (/^(?:ENOTFOUND|EAI_AGAIN|EAI_FAIL|DNS_ERROR)$/.test(transportCode)) {
@@ -37137,8 +37178,8 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (explicitAuthEvidence) {
       evidenceCodes.push("auth_rejected");
     }
-    if (errorCode === "WRITE_FAILED") evidenceCodes.push("write_error");
-    if (errorCode === "LOCAL_COMPONENT_UNAVAILABLE") {
+    if (errorType === "WRITE_FAILED") evidenceCodes.push("write_error");
+    if (errorType === "LOCAL_COMPONENT_UNAVAILABLE") {
       if (diagnostic.componentMissing === true || diagnostic.componentStatus === "missing" || /^(?:COMPONENT_MISSING|LOCAL_COMPONENT_MISSING|ASR_COMPONENT_MISSING|OCR_COMPONENT_MISSING|ENOENT)$/.test(transportCode)) {
         evidenceCodes.push("component_missing");
       } else if (diagnostic.componentVersionMismatch === true || diagnostic.componentStatus === "outdated" || /^(?:COMPONENT_VERSION_MISMATCH|LOCAL_COMPONENT_OUTDATED|COMPONENT_OUTDATED|VERSION_MISMATCH)$/.test(transportCode)) {
@@ -37164,9 +37205,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     if (["COMPONENT_CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "EXPLICIT_UPGRADE_REQUIRED", "UPGRADE_REQUIRED"].includes(transportCode) || ["COMPONENT_CLIENT_UPGRADE_REQUIRED", "CLIENT_UPGRADE_REQUIRED", "EXPLICIT_UPGRADE_REQUIRED", "UPGRADE_REQUIRED"].includes(diagnosticCode) || diagnostic.upgradeRequired === true) {
       evidenceCodes.push("upgrade_required");
     }
-    const diagnosticStage = errorCode === "EXTRACTION_FAILED" ? "parse" : errorCode === "TRANSCRIPTION_FAILED" ? "transcribe" : errorCode === "OCR_FAILED" ? "ocr" : errorCode === "WRITE_FAILED" ? "write" : stage === "fetching" ? "fetch" : "sync";
+    const diagnosticStage = errorType === "EXTRACTION_FAILED" ? "parse" : errorType === "TRANSCRIPTION_FAILED" ? "transcribe" : errorType === "OCR_FAILED" ? "ocr" : errorType === "WRITE_FAILED" ? "write" : stage === "fetching" ? "fetch" : "sync";
     let asrRoot = "";
-    if (errorCode === "TRANSCRIPTION_FAILED") {
+    if (errorType === "TRANSCRIPTION_FAILED") {
       try {
         asrRoot = this.getConfiguredLocalAsrInstallRoot();
       } catch (_) {
@@ -37191,7 +37232,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       diagnosticId,
       attemptId,
       syncRecordId: normalizedRecordId,
-      errorType: errorCode,
+      errorType,
       errorCode,
       stage: diagnosticStage,
       retryCount: Number(retryCount) || 0,
@@ -37205,22 +37246,45 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   // Nothing is persisted: this check must never write settings, because a
   // settings write is the one operation that can disturb a user's bindings.
   // Any failure (offline, blocked host, bad JSON) is silent.
-  async maybeCheckPluginUpdate() {
-    if (this.__pluginUpdateChecked) return;
-    this.__pluginUpdateChecked = true;
-    try {
-      const response = await requestUrl({
-        url: "https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/manifest.json",
-        method: "GET",
-        throw: false
-      });
-      if (!response || response.status !== 200) return;
-      const parsed = JSON.parse(String(response.text || "{}"));
-      const latest = String(parsed && parsed.version || "").trim();
-      if (!latest || !isNewerPluginVersion(latest, PLUGIN_RUNTIME_VERSION)) return;
-      new Notice(`WeChat Inbox Sync ${latest} 已发布（当前 ${PLUGIN_RUNTIME_VERSION}）。请在“设置 → 第三方插件”中检查更新。`, 1e4);
-    } catch (_) {
-    }
+  async maybeCheckPluginUpdate({ failureContext = false } = {}) {
+    const lastSuccessfulCheckAt = Number(this.__pluginUpdateCheckedAt) || 0;
+    if (lastSuccessfulCheckAt && Date.now() - lastSuccessfulCheckAt < 5 * 60 * 1e3) return "";
+    if (this.__pluginUpdateCheckPromise) return this.__pluginUpdateCheckPromise;
+    const checkPromise = (async () => {
+      try {
+        let requestTimeout;
+        let response;
+        try {
+          response = await Promise.race([
+            requestUrl({
+              url: "https://raw.githubusercontent.com/mingjuner123-spec/wechat-inbox-sync/main/manifest.json",
+              method: "GET",
+              throw: false
+            }),
+            new Promise((resolve) => {
+              requestTimeout = setTimeout(() => resolve(null), 5e3);
+            })
+          ]);
+        } finally {
+          if (requestTimeout) clearTimeout(requestTimeout);
+        }
+        if (!response || response.status !== 200) return "";
+        const parsed = JSON.parse(String(response.text || "{}"));
+        const latest = String(parsed && parsed.version || "").trim();
+        if (!/^\d{1,3}\.\d{1,3}\.\d{1,3}(?:[-+][A-Za-z0-9.-]+)?$/.test(latest)) return "";
+        this.__pluginUpdateCheckedAt = Date.now();
+        if (!isNewerPluginVersion(latest, PLUGIN_RUNTIME_VERSION)) return "";
+        const message = failureContext ? `检测到插件新版本 ${latest}（当前 ${PLUGIN_RUNTIME_VERSION}）。当前同步失败是否由版本差异引起尚未确认，建议更新后重试。` : `WeChat Inbox Sync ${latest} 已发布（当前 ${PLUGIN_RUNTIME_VERSION}）。请在“设置 → 第三方插件”中检查更新。`;
+        new Notice(message, 1e4);
+        return latest;
+      } catch (_) {
+        return "";
+      } finally {
+        if (this.__pluginUpdateCheckPromise === checkPromise) this.__pluginUpdateCheckPromise = null;
+      }
+    })();
+    this.__pluginUpdateCheckPromise = checkPromise;
+    return checkPromise;
   }
   async onload() {
     this.ensureSerializedSaveData();
@@ -37331,17 +37395,34 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     this.transcriptionStopRibbon = this.addRibbonIcon("square", "暂停当前转写", (event) => this.stopCurrentTranscription({ trigger: "stop_button", trustedEvent: Boolean(event && event.isTrusted) }));
     this.setTranscriptionStopAvailable(false);
     this.addSettingTab(new WechatInboxSettingTab(this.app, this));
-    this.operatorMediaNode = createOperatorMediaNode({
-      plugin: this,
-      apiBase: this.settings.apiBase
-    });
-    this.register(() => {
-      if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
-        return this.operatorMediaNode.stop();
+    const operatorNodeConfigured = String(process.env[OPERATOR_NODE_ENABLED_ENV] || "").trim() === "1" && Boolean(String(process.env[OPERATOR_NODE_ID_ENV] || "").trim()) && Boolean(String(process.env[OPERATOR_NODE_TOKEN_ENV] || "").trim());
+    if (operatorNodeConfigured) {
+      try {
+        const { createOperatorMediaNode } = getOperatorMediaNodeModule();
+        this.operatorMediaNode = createOperatorMediaNode({
+          plugin: this,
+          apiBase: this.settings.apiBase
+        });
+        this.register(() => {
+          if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
+            return this.operatorMediaNode.stop();
+          }
+          return void 0;
+        });
+        if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
+      } catch (error) {
+        if (this.operatorMediaNode && typeof this.operatorMediaNode.stop === "function") {
+          try {
+            Promise.resolve(this.operatorMediaNode.stop()).catch(() => {
+            });
+          } catch (_) {
+          }
+        }
+        this.operatorMediaNode = null;
+        const code = String(error && error.code || "INITIALIZATION_FAILED").replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 80);
+        console.warn(`Optional operator media node did not start (${code || "INITIALIZATION_FAILED"}).`);
       }
-      return void 0;
-    });
-    if (this.operatorMediaNode.isEnabled()) this.operatorMediaNode.start();
+    }
     this.startAutoSync();
     this.getSyncDiagnosticReporter().kick();
     void this.maybeCheckPluginUpdate().catch(() => {
@@ -38065,7 +38146,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       }
     }
     if (response.status && (response.status < 200 || response.status >= 300)) {
-      const message = payload && payload.errMsg || `HTTP ${response.status}`;
+      const message = payload && (payload.errMsg || payload.message || payload.error && payload.error.message) || `HTTP ${response.status}`;
       const officialRetryPayload = await retryWithOfficialApiBaseIfNeeded(message);
       if (officialRetryPayload) return officialRetryPayload;
       if (response.status === 400 && message.includes("Missing client ID")) {
@@ -38074,10 +38155,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (isBindingInvalidMessage(message)) {
         throw new Error("绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」");
       }
-      const requestError = new Error(message);
-      requestError.status = response.status;
-      requestError.statusCode = response.status;
-      if (payload && payload.errCode) requestError.code = String(payload.errCode);
+      const requestError = createSyncApiRequestError(payload, response.status, message);
       throw requestError;
     }
     if (!payload || payload.success === false) {
@@ -38090,10 +38168,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       if (isBindingInvalidMessage(message)) {
         throw new Error("绑定码未绑定或已失效，请在插件设置里粘贴小程序绑定码后点击「立即绑定」");
       }
-      const requestError = new Error(message);
-      requestError.status = Number(response.status) || 0;
-      requestError.statusCode = requestError.status;
-      if (payload && payload.errCode) requestError.code = String(payload.errCode);
+      const requestError = createSyncApiRequestError(payload, response.status, message);
       throw requestError;
     }
     return payload;
@@ -38138,12 +38213,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const status = Number(response && response.status) || 0;
     const errorPayload = payload && (payload.errMsg || payload.message || payload.error && payload.error.message);
     if (status && (status < 200 || status >= 300) || !payload || payload.success === false) {
-      const requestError = new Error(String(errorPayload || `同步 API 请求失败${status ? `：HTTP ${status}` : ""}`));
-      requestError.status = status;
-      requestError.statusCode = status;
-      if (payload && (payload.errCode || payload.code || payload.error && payload.error.code)) {
-        requestError.code = String(payload.errCode || payload.code || payload.error.code);
-      }
+      const requestError = createSyncApiRequestError(payload, status, String(errorPayload || `同步 API 请求失败${status ? `：HTTP ${status}` : ""}`));
       throw requestError;
     }
     return payload;
@@ -42721,6 +42791,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       error.code = "OPERATOR_NODE_DISABLED";
       throw error;
     }
+    const operatorNodeApi = getOperatorMediaNodeModule();
     throwIfAborted(signal);
     const preparedMedia = await this.transcodeCloudFallbackMediaToMp3(inputPath, { signal });
     const lease = {
@@ -42729,9 +42800,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       fencingVersion: job && job.fencingVersion,
       leaseToken: String(job && job.leaseToken || "").trim(),
       workerId,
-      protocolVersion: WORKER_PROTOCOL_VERSION
+      protocolVersion: operatorNodeApi.WORKER_PROTOCOL_VERSION
     };
-    const requestWorker = typeof request === "function" ? request : (requestPath, body, options) => requestOperatorJsonViaNode(apiBase, requestPath, workerToken, body, options);
+    const requestWorker = typeof request === "function" ? request : (requestPath, body, options) => operatorNodeApi.requestJsonViaNode(apiBase, requestPath, workerToken, body, options);
     try {
       const digest = await hashFileSha256(preparedMedia.path, { signal, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES });
       const preparedPayload = await requestWorker("/transcriptions/fallback/worker/media/prepare", {
@@ -49555,6 +49626,10 @@ ${finalized.markdown}
       ));
       const pendingSetupEntries = outstandingFailures.filter((item) => item.setupRequired);
       const displayedFailures = failed.filter((item) => !item.partialSaved);
+      if (showNotice && displayedFailures.length) {
+        void this.maybeCheckPluginUpdate({ failureContext: true }).catch(() => {
+        });
+      }
       let finalMessage = buildSyncResultNotice(
         written,
         skipped,
@@ -50113,6 +50188,7 @@ WechatObsidianInboxPlugin.__test = {
   parseDoubaoAsrResult,
   parseDoubaoAsrTaskState,
   formatHttpError,
+  formatSyncApiErrorMessage,
   parseTencentCreateTaskResponse,
   parseTencentTaskStatusResponse,
   buildAttachmentDiagnostic,

@@ -11,6 +11,7 @@ const { createRecordBodyMarkdownHelpers } = require('../obsidian-plugin/wechat-i
 const { createAiMetadataHelpers } = require('../obsidian-plugin/wechat-inbox-sync/src/ai-metadata-utils');
 
 let requestUrlMock = async () => ({});
+const noticeMessages = [];
 async function withFixedNow(iso, callback) {
   const originalNow = Date.now;
   Date.now = () => new Date(iso).getTime();
@@ -371,7 +372,7 @@ Module._load = function mockObsidian(request, parent, isMain) {
   if (request === 'obsidian') {
     return {
       Modal: class Modal {},
-      Notice: class Notice {},
+      Notice: class Notice { constructor(message) { noticeMessages.push(String(message || '')); } },
       Plugin: class Plugin {},
       PluginSettingTab: class PluginSettingTab {},
       Setting: class Setting {},
@@ -439,7 +440,7 @@ assert.notStrictEqual(instrumentedLegacyAiMetadataMainSource, legacyAiMetadataMa
 const legacyAiMetadataModule = { exports: {} };
 const legacyAiMetadataObsidian = {
   Modal: class Modal {},
-  Notice: class Notice {},
+      Notice: class Notice { constructor(message) { noticeMessages.push(String(message || '')); } },
   Plugin: class Plugin {},
   PluginSettingTab: class PluginSettingTab {},
   Setting: class Setting {},
@@ -1254,6 +1255,8 @@ assert.throws(
   (error) => error && error.code === 'TRANSCRIPTION_LOW_QUALITY' && error.message.includes('重复句循环'),
 );
 assert.strictEqual(typeof helpers.formatHttpError, 'function');
+assert.match(helpers.formatSyncApiErrorMessage({ code: 'PLUGIN_UPDATE_REQUIRED', requiredVersion: '1.3.217' }), /当前插件版本.*需要更新到 1\.3\.217/);
+assert.match(helpers.formatSyncApiErrorMessage({ code: 'PLUGIN_VERSION_MISMATCH' }), /设置 → 第三方插件.*检查更新并重启 Obsidian/);
 assert.strictEqual(typeof helpers.buildTencentCreateRecTaskBody, 'function');
 assert.strictEqual(typeof helpers.buildTencentRequest, 'function');
 assert.strictEqual(typeof helpers.parseTencentCreateTaskResponse, 'function');
@@ -16638,6 +16641,68 @@ async function runWechatChannelsPartialNoteSyncLifecycleTest() {
     'ambiguous partial state must never be acknowledged as success');
 }
 async function main() {
+  const previousRequestUrlMock = requestUrlMock;
+  try {
+    const versionErrorPlugin = new SourcePluginClass();
+    versionErrorPlugin.settings = {
+      apiBase: 'https://sync.example.test',
+      token: 'test-binding-token',
+      clientId: 'test-client',
+      syncDiagnosticOutbox: [],
+    };
+    versionErrorPlugin.saveData = async () => {};
+    requestUrlMock = async () => ({
+      status: 426,
+      json: {
+        success: false,
+        errCode: 'PLUGIN_VERSION_MISMATCH',
+        requiredVersion: '1.3.217',
+        errMsg: '客户端版本不兼容',
+      },
+    });
+    let versionRequestError;
+    try {
+      await versionErrorPlugin.requestJson('/records?status=pending', 'GET', {}, { token: 'test-binding-token' });
+    } catch (error) {
+      versionRequestError = error;
+    }
+    assert.equal(versionRequestError && versionRequestError.code, 'PLUGIN_VERSION_MISMATCH');
+    assert.match(versionRequestError && versionRequestError.message || '', /当前插件版本.*需要更新到 1\.3\.217/);
+    const queuedVersionFailure = versionErrorPlugin.queueSyncDiagnosticFailure({
+      recordId: 'record-version-case-1',
+      attemptId: 'attempt-version-case-1',
+      diagnosticId: 'diagnostic-version-case-1',
+      binding: { token: 'test-binding-token' },
+      error: versionRequestError,
+      stage: 'sync',
+    });
+    assert.equal(queuedVersionFailure.queued, true);
+    assert.equal(queuedVersionFailure.event.errorType, 'SYNC_FAILED');
+    assert.equal(queuedVersionFailure.event.errorCode, 'PLUGIN_VERSION_MISMATCH');
+    assert.ok(queuedVersionFailure.event.evidenceCodes.includes('upgrade_required'));
+    assert.equal(queuedVersionFailure.event.stage, 'sync');
+    assert.equal(queuedVersionFailure.event.outcome, 'failed');
+
+    const plugin = new SourcePluginClass();
+    requestUrlMock = async ({ url }) => {
+      assert.ok(url.includes('/main/manifest.json'));
+      return { status: 200, text: JSON.stringify({ version: '1.3.217' }) };
+    };
+    noticeMessages.length = 0;
+    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.217');
+    assert.ok(noticeMessages.some(message => message.includes('同步失败是否由版本差异引起尚未确认')));
+    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '');
+    assert.strictEqual(noticeMessages.length, 1, 'a newer version should not produce repeated notices within the check window');
+
+    const retryPlugin = new SourcePluginClass();
+    requestUrlMock = async () => { throw new Error('offline'); };
+    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate(), '');
+    requestUrlMock = async () => ({ status: 200, text: JSON.stringify({ version: '1.3.217' }) });
+    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.217');
+  } finally {
+    requestUrlMock = previousRequestUrlMock;
+    noticeMessages.length = 0;
+  }
   runNoteOutputPlanModuleTests();
   runRecordBodyMarkdownModuleTests();
   runAiMetadataFormattingModuleTests();

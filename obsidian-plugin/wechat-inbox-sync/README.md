@@ -4,6 +4,12 @@
 
 WeChat Inbox Sync follows a "send now, organize later" workflow: the mini program captures content, and the plugin writes it into the local vault as Markdown notes and attachments.
 
+## 1.3.216 更新
+
+- 云端明确返回插件版本不兼容时，直接提示更新到可用版本；普通同步失败不会被误判为版本问题，发现新版本时会给出“原因尚未确认”的更新建议。
+- 版本更新检查有 5 秒上限且不阻塞同步；诊断记录保留明确版本错误码，便于区分插件兼容性问题与其他同步失败。
+- 包含 1.3.215 的云端兜底上传等待和失败诊断改进。
+
 ## 1.3.215 更新
 
 - 放宽运营节点的媒体上传等待时间，并记录脱敏的上传字节数与耗时，便于区分传输未完成和服务端响应延迟。

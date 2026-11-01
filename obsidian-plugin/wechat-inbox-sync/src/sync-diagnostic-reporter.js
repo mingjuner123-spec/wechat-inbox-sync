@@ -57,7 +57,11 @@ const SAFE_ERROR_CODES = new Set([
   'SYNC_FAILED',
   'TRANSCRIPTION_FAILED',
   'WRITE_FAILED',
+  'PLUGIN_UPDATE_REQUIRED',
+  'PLUGIN_VERSION_MISMATCH',
+  'PLUGIN_VERSION_UNSUPPORTED',
 ]);
+const SAFE_ERROR_TYPES = new Set([...SAFE_ERROR_CODES].filter((code) => !code.startsWith('PLUGIN_')));
 const SAFE_EVIDENCE_CODES = new Set([
   'network_timeout',
   'http_status',
@@ -225,6 +229,9 @@ function normalizeEvidenceCodes(value, outcome, errorCode) {
     if (result.length >= 8) break;
   }
   if (outcome === 'succeeded' && !result.includes('sync_callback')) result.unshift('sync_callback');
+  if (outcome === 'failed'
+    && ['PLUGIN_UPDATE_REQUIRED', 'PLUGIN_VERSION_MISMATCH', 'PLUGIN_VERSION_UNSUPPORTED'].includes(errorCode)
+    && !result.includes('upgrade_required')) result.unshift('upgrade_required');
   if (outcome === 'failed' && !result.length) {
     result.push('no_matching_evidence');
   }
@@ -273,8 +280,9 @@ function buildEventId(input = {}) {
 function normalizeDiagnosticEvent(input = {}, defaults = {}) {
   const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
   const outcome = normalizeOutcome(source.outcome || defaults.outcome);
+  const inputErrorType = normalizeErrorCode(source.errorType || source.errorCode, 'SYNC_FAILED');
   const errorType = outcome === 'failed'
-    ? normalizeErrorCode(source.errorType || source.errorCode, 'SYNC_FAILED')
+    ? (SAFE_ERROR_TYPES.has(inputErrorType) ? inputErrorType : 'SYNC_FAILED')
     : 'NONE';
   const errorCode = outcome === 'failed'
     ? normalizeErrorCode(source.errorCode || source.errorType, errorType)
