@@ -194,6 +194,21 @@ jobs:
       - name: Reject public CloudBase component download paths
         run: node scripts/check-local-component-access-policy.js
 
+      - name: Restore synthetic settings fixtures and recheck release source
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Regression fixtures exercise real saveSettings; only their two
+          # tracked guard files may change. All other drift must fail closed.
+          git diff --exit-code HEAD -- . \
+            ':(exclude)obsidian-plugin/wechat-inbox-sync/settings-guard.json' \
+            ':(exclude)obsidian-plugin/wechat-inbox-sync/src/settings-guard.json'
+          git restore --source=HEAD -- \
+            obsidian-plugin/wechat-inbox-sync/settings-guard.json \
+            obsidian-plugin/wechat-inbox-sync/src/settings-guard.json
+          node scripts/release-source-guard.js --tag "$TAG_NAME"
+
       - name: Package plugin release assets
         env:
           TAG_NAME: ${{ github.ref_name }}
