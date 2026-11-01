@@ -13639,7 +13639,9 @@ async function renderPlatformArticleWithElectron(url) {
     }
     const expected = getPlatformArticleIdentity(url);
     const actual = getPlatformArticleIdentity(result.finalUrl);
-    result.identityMatched = Boolean(actual && (!expected || (actual.platform === expected.platform && actual.type === expected.type && actual.id === expected.id)));
+    result.identityMatched = expected
+      ? Boolean(actual && actual.platform === expected.platform && actual.type === expected.type && actual.id === expected.id)
+      : Boolean(getPlatformArticleKind(url) && getPlatformArticleKind(url) === getPlatformArticleKind(result.finalUrl));
     if (!result.identityMatched || !hasPlatformArticleBody(result.markdown)) result.markdown = '';
     if (loadFailure) {
       result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || '').slice(0, 160);

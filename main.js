@@ -17280,8 +17280,21 @@ var require_platform_article_utils = __commonJS({
     }
     __name(extractPlatformArticleFromHtml2, "extractPlatformArticleFromHtml");
     function selectPlatformArticleBody2(doc, platform, target) {
-      if (!target) return null;
       const pick = /* @__PURE__ */ __name((root, selectors) => selectors.map((selector) => root.querySelector(selector)).find(Boolean), "pick");
+      if (!target) {
+        let canonical = "";
+        try {
+          canonical = Array.from(doc.querySelectorAll('link[rel="canonical"],meta[property="og:url"]')).map((node) => node.getAttribute("href") || node.getAttribute("content") || "").find((value) => value) || "";
+          const parsed = new URL(canonical);
+          const hostname = String(parsed.hostname || "").toLowerCase().replace(/\.$/, "");
+          const onPlatform = platform === "zhihu" ? hostname === "zhihu.com" || hostname.endsWith(".zhihu.com") : platform === "toutiao" && (hostname === "toutiao.com" || hostname.endsWith(".toutiao.com"));
+          const canonicalArticlePath = platform === "zhihu" ? /\/(?:answer|p)\/\d+\/?$|\/question\/\d+\/?$/i.test(parsed.pathname) : platform === "toutiao" && /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i.test(parsed.pathname);
+          if (!onPlatform || !canonicalArticlePath) return null;
+        } catch (_) {
+          return null;
+        }
+        return (platform === "zhihu" ? pick(doc, [".QuestionRichText", ".Post-RichText"]) : platform === "toutiao" ? pick(doc, [".article-content", ".syl-article-base"]) : null) || null;
+      }
       if (platform === "zhihu" && target.type === "answer") {
         for (const answer of doc.querySelectorAll(".AnswerItem")) {
           const raw = answer.getAttribute("data-zop") || "";
@@ -17302,9 +17315,24 @@ var require_platform_article_utils = __commonJS({
     __name(selectPlatformArticleBody2, "selectPlatformArticleBody");
     function hasMatchingPlatformArticleDocumentIdentity2(doc, url) {
       const target = getPlatformArticleIdentity2(url);
-      if (!target) return false;
+      const platform = getPlatformArticleKind2(url);
+      if (!platform) return false;
       const values = Array.from(doc.querySelectorAll('link[rel="canonical"],meta[property="og:url"]')).map((node) => node.getAttribute("href") || node.getAttribute("content"));
       const identities = values.map(getPlatformArticleIdentity2).filter(Boolean);
+      if (!target) {
+        const canonicalArticles = values.map((value) => {
+          try {
+            const parsed = new URL(value);
+            const hostname = cleanHost(parsed.hostname);
+            const hostMatches = platform === "zhihu" ? ZHIHU_ROOTS.some((root) => hostname === root || hostname.endsWith(`.${root}`)) : TOUTIAO_ROOTS.some((root) => hostname === root || hostname.endsWith(`.${root}`));
+            const pathMatches = platform === "zhihu" ? /\/(?:answer|p)\/\d+\/?$|\/question\/\d+\/?$/i.test(parsed.pathname) : /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i.test(parsed.pathname);
+            return hostMatches && pathMatches;
+          } catch (_) {
+            return false;
+          }
+        });
+        return canonicalArticles.length > 0 && canonicalArticles.every(Boolean);
+      }
       return identities.length > 0 && identities.every((value) => value.platform === target.platform && value.type === target.type && value.id === target.id);
     }
     __name(hasMatchingPlatformArticleDocumentIdentity2, "hasMatchingPlatformArticleDocumentIdentity");
@@ -33875,7 +33903,7 @@ async function renderPlatformArticleWithElectron(url) {
     }
     const expected = getPlatformArticleIdentity(url);
     const actual = getPlatformArticleIdentity(result.finalUrl);
-    result.identityMatched = Boolean(actual && (!expected || actual.platform === expected.platform && actual.type === expected.type && actual.id === expected.id));
+    result.identityMatched = expected ? Boolean(actual && actual.platform === expected.platform && actual.type === expected.type && actual.id === expected.id) : Boolean(getPlatformArticleKind(url) && getPlatformArticleKind(url) === getPlatformArticleKind(result.finalUrl));
     if (!result.identityMatched || !hasPlatformArticleBody(result.markdown)) result.markdown = "";
     if (loadFailure) {
       result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || "").slice(0, 160);

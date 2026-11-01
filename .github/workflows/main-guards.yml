@@ -39,6 +39,9 @@ jobs:
           node tests/plugin-architecture-integration.test.js
           node tests/plugin-asr-diagnostic-evidence.test.js
           node tests/plugin-failure-technical-report.test.js
+          node tests/failure-diagnostic-scope.test.js
+          node tests/platform-article-recovery.test.js
+          node tests/plugin-article-diagnostic-integration.test.js
           node tests/plugin-diagnostic-reporter.test.js
           node tests/plugin-macos-asr-recovery.test.js
           node tests/plugin-diagnostic-native-evidence.test.js

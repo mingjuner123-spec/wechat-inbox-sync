@@ -330,8 +330,31 @@ function extractPlatformArticleFromHtml(html, platform, targetUrl = '') {
 
 // Self contained: also executed in the sandboxed extraction window.
 function selectPlatformArticleBody(doc, platform, target) {
-  if (!target) return null;
   const pick = (root, selectors) => selectors.map(selector => root.querySelector(selector)).find(Boolean);
+  // Share URLs without a stable numeric identity can still use a narrowly
+  // scoped article-body fallback. Never scan page-wide text or recommendation
+  // cards; only use the platform's dedicated body container.
+  if (!target) {
+    let canonical = '';
+    try {
+      canonical = Array.from(doc.querySelectorAll('link[rel="canonical"],meta[property="og:url"]'))
+        .map(node => node.getAttribute('href') || node.getAttribute('content') || '')
+        .find(value => value) || '';
+      const parsed = new URL(canonical);
+      const hostname = String(parsed.hostname || '').toLowerCase().replace(/\.$/, '');
+      const onPlatform = platform === 'zhihu'
+        ? hostname === 'zhihu.com' || hostname.endsWith('.zhihu.com')
+        : platform === 'toutiao' && (hostname === 'toutiao.com' || hostname.endsWith('.toutiao.com'));
+      const canonicalArticlePath = platform === 'zhihu'
+        ? /\/(?:answer|p)\/\d+\/?$|\/question\/\d+\/?$/i.test(parsed.pathname)
+        : platform === 'toutiao' && /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i.test(parsed.pathname);
+      if (!onPlatform || !canonicalArticlePath) return null;
+    } catch (_) {
+      return null;
+    }
+    return (platform === 'zhihu' ? pick(doc, ['.QuestionRichText', '.Post-RichText'])
+      : platform === 'toutiao' ? pick(doc, ['.article-content', '.syl-article-base']) : null) || null;
+  }
   if (platform === 'zhihu' && target.type === 'answer') {
     for (const answer of doc.querySelectorAll('.AnswerItem')) {
       const raw = answer.getAttribute('data-zop') || '';
@@ -351,10 +374,32 @@ function selectPlatformArticleBody(doc, platform, target) {
 
 function hasMatchingPlatformArticleDocumentIdentity(doc, url) {
   const target = getPlatformArticleIdentity(url);
-  if (!target) return false;
+  const platform = getPlatformArticleKind(url);
+  if (!platform) return false;
   const values = Array.from(doc.querySelectorAll('link[rel="canonical"],meta[property="og:url"]'))
     .map(node => node.getAttribute('href') || node.getAttribute('content'));
   const identities = values.map(getPlatformArticleIdentity).filter(Boolean);
+  if (!target) {
+    // For share URLs without an identity, require an explicit canonical URL
+    // resolving to an article on the same platform. The DOM fallback path uses
+    // the same restricted article-body containers.
+    const canonicalArticles = values.map(value => {
+      try {
+        const parsed = new URL(value);
+        const hostname = cleanHost(parsed.hostname);
+        const hostMatches = platform === 'zhihu'
+          ? ZHIHU_ROOTS.some(root => hostname === root || hostname.endsWith(`.${root}`))
+          : TOUTIAO_ROOTS.some(root => hostname === root || hostname.endsWith(`.${root}`));
+        const pathMatches = platform === 'zhihu'
+          ? /\/(?:answer|p)\/\d+\/?$|\/question\/\d+\/?$/i.test(parsed.pathname)
+          : /\/(?:article|group|item)\/\d+\/?$|\/[ai]\d{6,}\/?$/i.test(parsed.pathname);
+        return hostMatches && pathMatches;
+      } catch (_) {
+        return false;
+      }
+    });
+    return canonicalArticles.length > 0 && canonicalArticles.every(Boolean);
+  }
   return identities.length > 0 && identities.every(value => value.platform === target.platform && value.type === target.type && value.id === target.id);
 }
 
