@@ -33,6 +33,7 @@ const asrTimeoutProcessGroup = require('./asr-timeout-process-group');
 const asrStartupTimeout = require('./asr-startup-timeout');
 const macLegacyAsrCompat = require('./mac-legacy-asr-compat');
 const { buildFailureTechnicalReport, unavailableTechnicalReport } = require('./failure-technical-report');
+const { selectFailureDetail, observedFailureStage, failureMessage } = require('./failure-reason-utils');
 const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
 const { formatCompactSyncDiagnostic } = require('./compact-sync-diagnostic');
 const failureScope = require('./failure-diagnostic-scope');
@@ -382,7 +383,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.217';
+const PLUGIN_RUNTIME_VERSION = '1.3.218';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -17383,7 +17384,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       : explicitAuthEvidence
       ? 'AUTH_FAILED'
       : categorizeSyncFailure(error);
-    const errorCode = explicitPluginVersionCode || errorType;
+    const errorCode = explicitPluginVersionCode || selectFailureDetail(error) || errorType;
     const evidenceCodes = [];
     if (explicitPluginVersionCode) evidenceCodes.push('upgrade_required');
     // Timeout evidence is reserved for an actual transport timeout code. A
@@ -17454,7 +17455,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       || diagnostic.upgradeRequired === true) {
       evidenceCodes.push('upgrade_required');
     }
-    const diagnosticStage = errorType === 'EXTRACTION_FAILED'
+    const diagnosticStage = observedFailureStage(error, errorType === 'EXTRACTION_FAILED'
       ? 'parse'
       : errorType === 'TRANSCRIPTION_FAILED'
         ? 'transcribe'
@@ -17464,7 +17465,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             ? 'write'
             : stage === 'fetching'
               ? 'fetch'
-              : 'sync';
+              : 'sync');
     let asrRoot = '';
     if (errorType === 'TRANSCRIPTION_FAILED') {
       try { asrRoot = this.getConfiguredLocalAsrInstallRoot(); } catch (_) { asrRoot = ''; }
@@ -30772,7 +30773,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           continue;
         }
-        const message = error.message || String(error);
+        const message = failureMessage(error) || error.message || String(error);
         const setupRequired = isSetupRequired(error);
         const partialSavedInfo = error.partialSaved || null;
         const deletionResult = await this.consumePendingStoppedTranscriptionDelete(getRecordId(record));

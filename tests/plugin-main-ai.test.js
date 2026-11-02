@@ -11824,7 +11824,7 @@ async function runXiaohongshuUnavailableRecordRemainsPendingTest() {
   assert.deepStrictEqual(result.failed, [{
     recordId: 'xhs-content-unavailable-1',
     retryCount: 0,
-    message: '小红书链接已失效或笔记不可见（分享链接过期、笔记被删除或设为私密）。请在手机上重新打开该笔记，点“分享 → 复制链接”后重新同步；重试原链接不会成功。',
+    message: '未取得这条小红书内容。请确认原内容仍可打开；可正常打开时保留任务编号排查提取路径。',
     diagnostic: {
       runtime: {
         manifestVersion: currentPluginVersion,
@@ -12005,7 +12005,7 @@ async function runExpiredXiaohongshuShortlinkNeverDeletesTest() {
   assert.deepStrictEqual(result.skipped, []);
   assert.strictEqual(result.failed.length, 1);
   assert.strictEqual(result.failed[0].recordId, 'expired-xhs-delete-failed');
-  assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。');
+  assert.strictEqual(result.failed[0].message, '未取得这条小红书内容。请确认原内容仍可打开；可正常打开时保留任务编号排查提取路径。');
   assert.deepStrictEqual(calls, [
     '/records?status=pending',
   ]);
@@ -12158,7 +12158,7 @@ async function runXiaohongshuShareOnlyPageRemainsPendingTest() {
     }, false);
     assert.deepStrictEqual(result.written, []);
     assert.strictEqual(result.failed.length, 1);
-    assert.strictEqual(result.failed[0].message, '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。');
+    assert.strictEqual(result.failed[0].message, '未取得这条小红书内容。请确认原内容仍可打开；可正常打开时保留任务编号排查提取路径。');
     assert.deepStrictEqual(vaultWrites, []);
     assert.deepStrictEqual(requestCalls, [[
       '/records?status=pending',
@@ -16685,12 +16685,13 @@ async function main() {
     assert.equal(queuedVersionFailure.event.outcome, 'failed');
 
     const plugin = new SourcePluginClass();
+    const futureTestVersion = currentPluginVersion.replace(/\d+$/, patch => String(Number(patch) + 1));
     requestUrlMock = async ({ url }) => {
       assert.ok(url.includes('/main/manifest.json'));
-      return { status: 200, text: JSON.stringify({ version: '1.3.218' }) };
+      return { status: 200, text: JSON.stringify({ version: futureTestVersion }) };
     };
     noticeMessages.length = 0;
-    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.218');
+    assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), futureTestVersion);
     assert.ok(noticeMessages.some(message => message.includes('同步失败是否由版本差异引起尚未确认')));
     assert.strictEqual(await plugin.maybeCheckPluginUpdate({ failureContext: true }), '');
     assert.strictEqual(noticeMessages.length, 1, 'a newer version should not produce repeated notices within the check window');
@@ -16698,8 +16699,8 @@ async function main() {
     const retryPlugin = new SourcePluginClass();
     requestUrlMock = async () => { throw new Error('offline'); };
     assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate(), '');
-    requestUrlMock = async () => ({ status: 200, text: JSON.stringify({ version: '1.3.218' }) });
-    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate({ failureContext: true }), '1.3.218');
+    requestUrlMock = async () => ({ status: 200, text: JSON.stringify({ version: futureTestVersion }) });
+    assert.strictEqual(await retryPlugin.maybeCheckPluginUpdate({ failureContext: true }), futureTestVersion);
   } finally {
     requestUrlMock = previousRequestUrlMock;
     noticeMessages.length = 0;

@@ -2,6 +2,7 @@
 
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const { DETAIL_CODES } = require('./failure-reason-utils');
 const { normalizeTechnicalReport, compactTechnicalReport, unavailableTechnicalReport, bytes, UNAVAILABLE_REASONS } = require('./failure-technical-report');
 
 // Keep this contract deliberately small. The server owns any association with
@@ -62,6 +63,7 @@ const SAFE_ERROR_CODES = new Set([
   'PLUGIN_VERSION_UNSUPPORTED',
 ]);
 const SAFE_ERROR_TYPES = new Set([...SAFE_ERROR_CODES].filter((code) => !code.startsWith('PLUGIN_')));
+for (const code of DETAIL_CODES) SAFE_ERROR_CODES.add(code);
 const SAFE_EVIDENCE_CODES = new Set([
   'network_timeout',
   'http_status',

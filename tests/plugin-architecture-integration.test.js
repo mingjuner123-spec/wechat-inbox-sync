@@ -39,6 +39,7 @@ const expectedModules = [
   'feishu-media-utils',
   'failure-diagnostic-scope',
   'failure-technical-report',
+  'failure-reason-utils',
   'input-normalization-utils',
   'local-asr-quality-retry',
   'local-douyin-resolver-utils',
