@@ -107,6 +107,15 @@ async function run() {
   const msg = h.buildSyncProgressMessage({ stage: 'transcribing', localProgressHeartbeatAt: '2000-01-01T00:00:00Z', localProgressCurrent: 1, localProgressTotal: 3, localProgressStage: 'transcribing' });
   assert.match(msg, /正在转写第 2\/3 段/); assert.doesNotMatch(msg, /无响应|没有启动/);
   assert.equal(h.buildSyncResultNotice([], [], [], [], [{ message: 'historical' }]), '没有需要同步的新内容');
+  row = { ...row, _id: 'record-pro', status: 'pending', retryCount: 0, syncAttemptId: '' };
+  const denied = fixture(); attach(denied);
+  denied.writeRecord = async () => { const e = new Error('内容解析失败'); e.code = 'EXTRACTION_FAILED';
+    e.diagnostic = { source: 'douyin-resolution', failureCode: 'PRO_REQUIRED', failure: { code: 'PRO_REQUIRED', stage: 'prepare' } }; throw e; };
+  const denialResult = await denied.syncBinding(binding, false);
+  assert.match(denialResult.failed[0].message, /Pro 权益校验/);
+  assert.match(denialResult.failed[0].message, /不要重复购买/);
+  assert.match(denied.getRecentSyncFailures()[0].message, /不要重复购买/);
+  assert.equal(row.status, 'failed', 'guidance does not change lifecycle or bypass entitlement');
   console.log('failure experience: first notice, restart, status-only replay, manual retry, new record, binding isolation and history preservation passed');
 }
 run().catch(e => { console.error(e); process.exitCode = 1; });
