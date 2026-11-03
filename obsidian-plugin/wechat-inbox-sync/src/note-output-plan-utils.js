@@ -3,7 +3,7 @@ const { formatTranscriptForReading } = require('./readable-content-utils');
 
 const { toSimplifiedChinese } = require('./transcription-quality-utils');
 
-const { buildTranscriptSegmentsMarkdown, transcriptSegmentsCoverText } = require('./transcript-segment-utils');
+const { buildTranscriptSegmentsMarkdown, buildUntimedTranscriptMarkdown, transcriptSegmentsCoverText } = require('./transcript-segment-utils');
 
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
@@ -188,17 +188,24 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
       body = helpers.buildWebpageMarkdownBody(record, title);
     } else if (type === 'voice') {
       const errorText = metadata.transcriptionError || metadata.aiError || '';
-      const transcription = formatTranscriptForReading(toSimplifiedChinese(metadata.transcription || ''))
+      const rawTranscription = formatTranscriptForReading(toSimplifiedChinese(metadata.transcription || ''));
+      const transcription = rawTranscription
         || (metadata.transcriptionStatus === 'failed' ? `语音转写失败。${errorText}` : '未开启语音转写。');
       const segmentsMarkdown = buildTranscriptSegmentsMarkdown(metadata.transcriptionSegments || []);
       const hasFullSegments = segmentsMarkdown
         && transcriptSegmentsCoverText(metadata.transcriptionSegments || [], metadata.transcription || '');
+      const useSegments = segmentsMarkdown
+        && (!String(metadata.transcription || '').trim() || hasFullSegments);
+      const untimedTranscript = !useSegments && rawTranscription
+        ? buildUntimedTranscriptMarkdown(rawTranscription)
+        : '';
       body = [
-        hasFullSegments ? '' : '## 转写全文',
+        useSegments || untimedTranscript ? '' : '## 转写全文',
         '',
-        hasFullSegments ? '' : transcription,
+        useSegments || untimedTranscript ? '' : transcription,
         '',
-        segmentsMarkdown,
+        untimedTranscript,
+        useSegments ? segmentsMarkdown : '',
         '## 录音文件',
         '',
         `![[${audioFileName}]]`,

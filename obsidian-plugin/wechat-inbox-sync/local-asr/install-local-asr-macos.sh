@@ -5,7 +5,7 @@ INSTALL_ROOT="$HOME/.wechat-inbox-local-asr"
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/wechat-inbox-local-asr-install.XXXXXX")"
 CACHE_ROOT="$INSTALL_ROOT/cache"
 INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"
-INSTALLER_SCRIPT_VERSION="1.3.14"
+INSTALLER_SCRIPT_VERSION="1.3.15"
 DOWNLOAD_LOW_SPEED_LIMIT=65536
 DOWNLOAD_LOW_SPEED_TIME=30
 LOCK_DIR="$INSTALL_ROOT/.install.lock"
@@ -986,6 +986,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 INPUT_PATH=""
 OUTPUT_PATH=""
+TRANSCRIPTION_LANGUAGE="zh"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -997,11 +998,20 @@ while [ "$#" -gt 0 ]; do
       OUTPUT_PATH="${2:-}"
       shift 2
       ;;
+    --language|-Language)
+      TRANSCRIPTION_LANGUAGE="${2:-zh}"
+      shift 2
+      ;;
     *)
       shift
       ;;
   esac
 done
+
+case "$TRANSCRIPTION_LANGUAGE" in
+  zh|en) ;;
+  *) echo "Unsupported transcription language: $TRANSCRIPTION_LANGUAGE" >&2; exit 2 ;;
+esac
 
 if [ -z "$INPUT_PATH" ] || [ -z "$OUTPUT_PATH" ]; then
   echo "Usage: transcribe.sh --input <audio-or-video> --output <text-file>" >&2
@@ -1078,6 +1088,9 @@ OUTPUT_BASE="$OUTPUT_PATH"
 case "$OUTPUT_BASE" in
   *.txt) OUTPUT_BASE="${OUTPUT_BASE%.txt}" ;;
 esac
+SEGMENTS_PATH="$OUTPUT_BASE.segments.json"
+# Discard only this run's generated sidecar; stale timing must never be reused.
+rm -f "$SEGMENTS_PATH"
 RUN_LOG="$ROOT/transcribe-last.log"
 
 cleanup() {
@@ -1176,7 +1189,7 @@ run_with_heartbeat() {
 }
 
 write_progress segmenting 0 0 0
-run_with_heartbeat segmenting 0 0 "$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time "$CHUNK_SECONDS" -reset_timestamps 1 "$TEMP_WORK_DIR/chunk-%03d.wav"
+run_with_heartbeat segmenting 0 0 "$FFMPEG" -hide_banner -loglevel error -y -i "$INPUT_PATH" -ar 16000 -ac 1 -c:a pcm_s16le -f segment -segment_time "$CHUNK_SECONDS" -segment_list "$TEMP_WORK_DIR/chunks.csv" -segment_list_type csv -reset_timestamps 1 "$TEMP_WORK_DIR/chunk-%03d.wav"
 
 chunk_count="$(find "$TEMP_WORK_DIR" -name 'chunk-*.wav' -type f | wc -l | tr -d ' ')"
 echo "chunkCount=$chunk_count" >> "$RUN_LOG"
@@ -1193,6 +1206,9 @@ if [ "$chunk_count" -eq 0 ]; then
 fi
 
 : > "$OUTPUT_PATH"
+SEGMENTS_TEMP="$TEMP_WORK_DIR/segments.json"
+printf '{"chunks":[' > "$SEGMENTS_TEMP"
+segments_complete=1
 chunk_index=0
 for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   chunk_base="${chunk%.wav}"
@@ -1200,7 +1216,7 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   {
     echo "--- $(basename "$chunk") ---"
   } >> "$RUN_LOG"
-  run_with_heartbeat transcribing "$chunk_index" "$chunk_count" "$WHISPER" ${WHISPER_EXTRA_ARGS[@]+"${WHISPER_EXTRA_ARGS[@]}"} -m "$MODEL" -f "$chunk" -l zh -otxt -of "$chunk_base"
+  run_with_heartbeat transcribing "$chunk_index" "$chunk_count" "$WHISPER" ${WHISPER_EXTRA_ARGS[@]+"${WHISPER_EXTRA_ARGS[@]}"} -m "$MODEL" -f "$chunk" -l "$TRANSCRIPTION_LANGUAGE" -otxt -oj -of "$chunk_base"
   if [ ! -f "$chunk_txt" ]; then
     echo "Whisper did not generate transcript: $chunk_txt" >&2
     echo "status=failed" >> "$RUN_LOG"
@@ -1209,6 +1225,20 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
   if [ -s "$chunk_txt" ]; then
     cat "$chunk_txt" >> "$OUTPUT_PATH"
     printf '\n\n' >> "$OUTPUT_PATH"
+  fi
+  # ffmpeg's segment list records actual chunk start times. Do not infer them
+  # from text length, chunk count or nominal segment duration.
+  chunk_offset_ms=""
+  if [ -f "$TEMP_WORK_DIR/chunks.csv" ]; then
+    chunk_offset_ms="$(awk -F, -v name="$(basename "$chunk")" '{ gsub(/"/, "", $1); sub(/^.*\//, "", $1); if ($1 == name && $2 ~ /^[0-9]+(\.[0-9]+)?$/) { printf "%.0f", $2 * 1000; exit } }' "$TEMP_WORK_DIR/chunks.csv")"
+  fi
+  if [ -s "$chunk_base.json" ] && [ -n "$chunk_offset_ms" ]; then
+    if [ "$chunk_index" -gt 0 ]; then printf ',' >> "$SEGMENTS_TEMP"; fi
+    printf '{"offsetMs":%s,"result":' "$chunk_offset_ms" >> "$SEGMENTS_TEMP"
+    cat "$chunk_base.json" >> "$SEGMENTS_TEMP"
+    printf '}' >> "$SEGMENTS_TEMP"
+  else
+    segments_complete=0
   fi
   chunk_index=$((chunk_index + 1))
   progress_percent=$((chunk_index * 100 / chunk_count))
@@ -1219,11 +1249,15 @@ for chunk in "$TEMP_WORK_DIR"/chunk-*.wav; do
     echo "progressPercent=$progress_percent"
   } >> "$RUN_LOG"
 done
+printf ']}' >> "$SEGMENTS_TEMP"
 
 if [ ! -s "$OUTPUT_PATH" ]; then
   echo "Whisper did not generate transcript text." >&2
   echo "status=failed" >> "$RUN_LOG"
   exit 1
+fi
+if [ "$segments_complete" = 1 ]; then
+  mv "$SEGMENTS_TEMP" "$SEGMENTS_PATH"
 fi
 
 {
@@ -1247,4 +1281,4 @@ chmod +x "$INSTALL_ROOT/transcribe.sh"
 echo ""
 echo "Local ASR installed to: $INSTALL_ROOT"
 echo "Use this Obsidian plugin command:"
-echo '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}'
+echo '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output} --language {language}'

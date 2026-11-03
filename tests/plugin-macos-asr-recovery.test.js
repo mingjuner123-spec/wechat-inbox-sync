@@ -49,8 +49,8 @@ async function matrix() {
     assert.equal(calls.length,phase==='before'?0:1);
   }
 }
-function shellFixture(cpu, nativeExit=0) {
-  const root=path.join(scratch,`shell-${cpu}-${nativeExit}`);fs.mkdirSync(path.join(root,'bin'),{recursive:true});fs.mkdirSync(path.join(root,'models'));
+function shellFixture(cpu, nativeExit=0, language='zh') {
+  const root=path.join(scratch,`shell-${cpu}-${nativeExit}-${language}`);fs.mkdirSync(path.join(root,'bin'),{recursive:true});fs.mkdirSync(path.join(root,'models'));
   fs.writeFileSync(path.join(root,'transcribe.sh'),script);
   fs.writeFileSync(path.join(root,'models','ggml-small.bin'),'fixture');
   fs.writeFileSync(path.join(root,'input.mp4'),'fixture');
@@ -59,11 +59,11 @@ function shellFixture(cpu, nativeExit=0) {
   for(const name of ['ffmpeg','whisper-cli'])fs.chmodSync(path.join(root,'bin',name),0o755);
   const bash=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'/bin/bash';
   const slash=p=>p.replace(/\\/g,'/');
-  const result=cp.spawnSync(bash,[slash(path.join(root,'transcribe.sh')),'--input',slash(path.join(root,'input.mp4')),'--output',slash(path.join(root,'output.txt'))],{env:{...process.env,WECHAT_INBOX_ASR_CPU_ONLY:cpu?'1':'0',ASR_TEST_ARGS:slash(path.join(root,'args'))},encoding:'utf8',timeout:15000});
+  const result=cp.spawnSync(bash,[slash(path.join(root,'transcribe.sh')),'--input',slash(path.join(root,'input.mp4')),'--output',slash(path.join(root,'output.txt')),'--language',language],{env:{...process.env,WECHAT_INBOX_ASR_CPU_ONLY:cpu?'1':'0',ASR_TEST_ARGS:slash(path.join(root,'args'))},encoding:'utf8',timeout:15000});
   assert.equal(result.status,nativeExit, result.stderr || result.error?.message);
   const args=fs.readFileSync(path.join(root,'args'),'utf8').split('\n');
   assert.equal(args.includes('--no-gpu'),cpu);
-  assert.ok(args.includes('-m') && args.includes('-l') && args.includes('zh'));
+  assert.ok(args.includes('-m') && args.includes('-l') && args.includes(language));
   const log=fs.readFileSync(path.join(root,'transcribe-last.log'),'utf8');
   assert.ok(log.includes(`nativeExit=${nativeExit}`));assert.ok(log.includes('progressPid='));assert.ok(log.includes('progressStage=transcribing')); if(nativeExit===0)assert.ok(log.includes('resourceSampleTime='));
 }
@@ -191,4 +191,4 @@ async function pluginIntegration() {
 
   } finally {cp.exec=originalExec;}
 }
-(async()=>{try {await matrix();shellFixture(false);shellFixture(true);shellFixture(true,139);await pluginIntegration();console.log('PASS: recovery matrix, actual Bash arguments/exit propagation, source-plugin retry and CPU preference');}finally{if(!scratch.startsWith(path.join(os.tmpdir(),'asr-recovery-test-')))throw Error('unsafe cleanup');fs.rmSync(scratch,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});
+(async()=>{try {await matrix();shellFixture(false);shellFixture(false,0,'en');shellFixture(true);shellFixture(true,139);await pluginIntegration();console.log('PASS: recovery matrix, zh/en Bash argument propagation, actual Bash exit propagation, source-plugin retry and CPU preference');}finally{if(!scratch.startsWith(path.join(os.tmpdir(),'asr-recovery-test-')))throw Error('unsafe cleanup');fs.rmSync(scratch,{recursive:true,force:true});}})().catch(e=>{console.error(e);process.exitCode=1;});

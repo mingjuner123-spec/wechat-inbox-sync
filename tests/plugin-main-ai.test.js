@@ -137,7 +137,14 @@ function runRecordBodyMarkdownModuleTests() {
 
   for (const fixture of fixtures) {
     const snapshot = JSON.stringify(fixture.record);
-    assert.strictEqual(fixture.candidate(), fixture.actual(), fixture.name);
+    if (['转写网页正文', '转写文件正文'].includes(fixture.name)) {
+      const markdown = fixture.candidate();
+      assert.ok(markdown.includes('## 分段转写'), fixture.name);
+      assert.doesNotMatch(markdown, /### \[\d{2}:\d{2}\]/, fixture.name);
+      assert.ok(markdown.includes('转写正文。'), fixture.name);
+    } else {
+      assert.strictEqual(fixture.candidate(), fixture.actual(), fixture.name);
+    }
     assert.strictEqual(JSON.stringify(fixture.record), snapshot, `${fixture.name} 不得改写输入`);
   }
 
@@ -344,6 +351,25 @@ function runConfiguredNoteOutputPlanParityTests() {
     );
     assert.strictEqual(plan.filePath, `${fixture.noteDir}/${fixture.title}.md`);
   }
+
+  const partialVoicePlan = helpers.buildNoteOutputPlan({
+    title: '部分分段转写',
+    noteDir: '临时收集',
+    syncedAt,
+    record: {
+      _id: 'plan-voice-partial-segments',
+      type: 'voice',
+      content: '录音',
+      metadata: {
+        transcription: '完整逐字稿，应该只输出这一份。',
+        transcriptionStatus: 'success',
+        transcriptionSegments: [{ startMs: 0, endMs: 1000, text: '不完整片段。' }],
+      },
+    },
+  });
+  assert.ok(partialVoicePlan.markdown.includes('完整逐字稿，应该只输出这一份。'));
+  assert.strictEqual(partialVoicePlan.markdown.includes('不完整片段。'), false, 'partial timed text must not duplicate the full note transcript');
+  assert.strictEqual((partialVoicePlan.markdown.match(/\[00:00\]/g) || []).length, 0, 'untimed fallback must not invent a timeline marker');
 
   const markedRecord = {
     _id: 'plan-markers',
@@ -591,10 +617,10 @@ const markerOnlyLegacyWindowsAsrScriptSource = [
   'recoveryTriggered=1',
 ].join('\n');
 const staleWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.33"', '$InstallerScriptVersion = "1.2.24"')
+  .replace('$InstallerScriptVersion = "1.2.34"', '$InstallerScriptVersion = "1.2.24"')
   .replace('$TranscriptQualityGuardVersion = "repeat-guard-v2"', '$SimplifiedPrompt = "请输入简体中文"\n"--prompt", $SimplifiedPrompt');
 const nonTransactionalWindowsAsrInstallerSource = windowsAsrInstallerSource
-  .replace('$InstallerScriptVersion = "1.2.33"', '$InstallerScriptVersion = "1.2.25"')
+  .replace('$InstallerScriptVersion = "1.2.34"', '$InstallerScriptVersion = "1.2.25"')
   .replaceAll('Start-TranscribeScriptUpdate', 'Start-LegacyTranscribeScriptUpdate')
   .replaceAll('Promote-TranscribeScriptUpdate', 'Promote-LegacyTranscribeScriptUpdate')
   .replaceAll('Restore-TranscribeScriptUpdate', 'Restore-LegacyTranscribeScriptUpdate')
@@ -605,7 +631,7 @@ const copyModelWindowsAsrInstallerSource = windowsAsrInstallerSource
     'Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force',
   );
 const staleMacAsrInstallerSource = macAsrInstallerSource
-  .replace('INSTALLER_SCRIPT_VERSION="1.3.14"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
+  .replace('INSTALLER_SCRIPT_VERSION="1.3.15"', 'INSTALLER_SCRIPT_VERSION="1.3.7"');
 const promptedMacAsrInstallerSource = macAsrInstallerSource
   .replace('TRANSCRIPT_QUALITY_GUARD_VERSION="repeat-guard-v2"', 'SIMPLIFIED_PROMPT="请输入简体中文"\n--prompt "$SIMPLIFIED_PROMPT"');
 const legacyUvOnlyMacAsrInstallerSource = macAsrInstallerSource
@@ -624,7 +650,7 @@ assert.strictEqual(helpers.isLocalAsrInstallerCurrent(windowsAsrInstallerSource,
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(staleWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(nonTransactionalWindowsAsrInstallerSource, false), false);
 assert.strictEqual(helpers.isLocalAsrInstallerCurrent(copyModelWindowsAsrInstallerSource, false), false);
-assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.33"'));
+assert.ok(windowsAsrInstallerSource.includes('$InstallerScriptVersion = "1.2.34"'));
 assert.ok(windowsAsrInstallerSource.includes('$env:WECHAT_INBOX_ASR_MODEL_URL'));
 assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $FfmpegAuthorizedUrls -FallbackUrls @('));
 assert.ok(windowsAsrInstallerSource.includes('-PrimaryUrls $ModelAuthorizedUrls -FallbackUrls @($ModelFallbackUrls + $ModelOfficialFallbackUrls)'));
@@ -2699,21 +2725,24 @@ assert.ok(pluginMainSource.includes('插件内置的 ASR 安装器不完整'));
 const defaultLocalTranscriptionCommand = helpers.getDefaultLocalTranscriptionCommand();
 assert.ok(defaultLocalTranscriptionCommand.includes('%USERPROFILE%'));
 assert.strictEqual(defaultLocalTranscriptionCommand.includes('$env:USERPROFILE'), false);
+assert.strictEqual(helpers.mergeSettings({}).transcriptionLanguage, 'zh');
+assert.strictEqual(helpers.mergeSettings({ transcriptionLanguage: 'en' }).transcriptionLanguage, 'en');
+assert.strictEqual(helpers.mergeSettings({ transcriptionLanguage: 'fr' }).transcriptionLanguage, 'zh');
 assert.strictEqual(
   helpers.getDefaultLocalTranscriptionCommand('darwin'),
-  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output} --language {language}',
 );
 assert.strictEqual(
   helpers.mergeSettings({
     localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
   }).localTranscriptionCommand,
-  'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output} -Language {language}',
 );
 assert.strictEqual(
   helpers.mergeSettings({
     localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
   }, 'darwin').localTranscriptionCommand,
-  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output} --language {language}',
 );
 assert.strictEqual(
   helpers.mergeSettings({
@@ -2990,12 +3019,13 @@ assert.ok(pluginMainSource.includes('showSyncProgress'));
 assert.ok(pluginMainSource.includes('syncStatusBar'));
 assert.ok(pluginMainSource.includes('setText(message)'));
 assert.ok(pluginMainSource.includes('lastSyncDiagnostic'));
-assert.ok(pluginMainSource.includes("setButtonText('复制本次失败')"));
-assert.ok(pluginMainSource.includes("setButtonText('复制完整诊断')"));
+assert.ok(pluginMainSource.includes("setButtonText('复制诊断')"));
+assert.strictEqual(pluginMainSource.includes("setButtonText('复制本次失败')"), false);
+assert.strictEqual(pluginMainSource.includes("setButtonText('复制完整诊断')"), false);
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制同步诊断')"), false);
 assert.ok(pluginMainSource.includes('同步/安装失败诊断'));
 assert.strictEqual(pluginMainSource.includes(".setName('同步失败诊断')"), false);
-assert.ok(pluginMainSource.includes('默认只复制本次失败的摘要；排查组件安装问题时再复制完整诊断。'));
+assert.ok(pluginMainSource.includes('copySupportDiagnosticText'));
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制诊断信息')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('输入短期连接码')"), false);
 assert.strictEqual(pluginMainSource.includes(".setName('云端兜底转写')"), false);
@@ -3005,7 +3035,7 @@ assert.strictEqual(pluginMainSource.includes(".setName('同步失败记录')"), 
 assert.strictEqual(pluginMainSource.includes(".setName('清理最近同步失败的内容')"), false);
 assert.strictEqual(pluginMainSource.includes("setButtonText('复制详细诊断')"), false);
 assert.ok(pluginMainSource.includes('本地转写组件安装失败'));
-assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制完整诊断」'));
+assert.ok(pluginMainSource.includes('如需协助，请点击插件设置里的「复制诊断」'));
 assert.strictEqual(
   helpers.formatLocalComponentInstallFailureReason([
     '% Total % Received % Xferd Average Speed Time Time Time Current',
@@ -4390,7 +4420,7 @@ assert.strictEqual(
 );
 assert.strictEqual(
   helpers.getDefaultLocalTranscriptionCommand('win32', 'C:\\Users\\Public\\wechat-inbox-local-asr'),
-  'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\Public\\wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
+  'powershell -NoProfile -ExecutionPolicy Bypass -File "C:\\Users\\Public\\wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output} -Language {language}',
 );
 assert.ok(
   helpers.buildLocalAsrInstallCommand(
@@ -6908,7 +6938,8 @@ const transcriptMarkdown = helpers.buildAudioTranscriptMarkdown({
   transcriptionStatus: 'success',
   transcriptionSource: 'subtitle',
 });
-assert.ok(transcriptMarkdown.includes('## 口播/音频文案'));
+assert.ok(transcriptMarkdown.includes('## 分段转写'));
+assert.doesNotMatch(transcriptMarkdown, /### \[\d{2}:\d{2}\]/);
 assert.ok(transcriptMarkdown.includes('这是视频里真正说出来的内容。'));
 assert.strictEqual(
   helpers.assertUsableTranscription('這是一段繁體中文語音辨識測試。'),
@@ -6924,11 +6955,22 @@ const traditionalTranscriptMarkdown = helpers.buildAudioTranscriptMarkdown({
   transcriptionStatus: 'success',
 });
 assert.ok(traditionalTranscriptMarkdown.includes('这是一段繁体中文语音辨识测试。'));
+assert.doesNotMatch(traditionalTranscriptMarkdown, /### \[\d{2}:\d{2}\]/);
 assert.strictEqual(traditionalTranscriptMarkdown.includes('這'), false);
 assert.strictEqual(transcriptMarkdown.includes('## 标题'), false);
 assert.strictEqual(transcriptMarkdown.includes('## 标签'), false);
 assert.strictEqual(transcriptMarkdown.includes('原始链接：'), false);
 assert.strictEqual(transcriptMarkdown.includes('转写来源：'), false);
+
+const partialSegmentsMarkdown = helpers.buildAudioTranscriptMarkdown({
+  url: 'https://www.douyin.com/video/123',
+  transcription: '这是完整逐字稿，应该只显示这一份。',
+  transcriptionStatus: 'success',
+  transcriptionSegments: [{ startMs: 0, endMs: 1000, text: '这是不完整片段。' }],
+});
+assert.ok(partialSegmentsMarkdown.includes('这是完整逐字稿，应该只显示这一份。'));
+assert.strictEqual(partialSegmentsMarkdown.includes('不完整片段。'), false, 'partial timed text must not duplicate the full transcript');
+assert.strictEqual((partialSegmentsMarkdown.match(/\[00:00\]/g) || []).length, 0, 'partial timed text fallback must not invent timestamps');
 
 const failedTranscriptMarkdown = helpers.buildAudioTranscriptMarkdown({
   url: 'https://www.douyin.com/video/123',
@@ -10388,7 +10430,7 @@ async function runLocalTranscriptionQualityFallbackTests() {
   const localOutputPath = `${localInputPath}.txt`;
   fs.writeFileSync(localInputPath, 'test media bytes');
   const managedRoot = path.resolve(localRetryRoot).replace(/\\/g, '/');
-  const managedCommand = `/bin/bash "${path.posix.join(managedRoot, 'transcribe.sh')}" --input {input} --output {output}`;
+  const managedCommand = `/bin/bash "${path.posix.join(managedRoot, 'transcribe.sh')}" --input {input} --output {output} --language {language}`;
   const priorEnsureManagedMacScript = localAsrRecovery.ensureManagedMacScript;
   const priorSaveCpuPreference = localAsrRecovery.saveCpuPreference;
   const priorExec = childProcess.exec;
@@ -13654,7 +13696,8 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
     title: '视频号-本地视频',
     syncedAt: '2026-06-30T10:05:00.000Z',
   });
-  assert.ok(markdown.includes('## 口播/音频文案'));
+  assert.ok(markdown.includes('## 分段转写'));
+  assert.doesNotMatch(markdown, /### \[\d{2}:\d{2}\]/);
   assert.ok(markdown.includes('评论区才是最好的选题库'));
   assert.match(markdown, /^description: .*评论区才是最好的选题库/m);
   assert.match(markdown, /^keywords: .+/m);
@@ -13989,7 +14032,7 @@ async function runSourceMediaAttachmentTests() {
   });
   assert.ok(savedMarkdown.includes('## 原始音视频'));
   assert.ok(savedMarkdown.includes('![[raw/wechatmd/音视频附件/2026-07-14/演示视频-media-record.mp4]]'));
-  assert.ok(savedMarkdown.indexOf('## 原始音视频') < savedMarkdown.indexOf('## 口播/音频文案'));
+  assert.ok(savedMarkdown.indexOf('## 原始音视频') < savedMarkdown.indexOf('## 分段转写'));
 
   const videoBytes = Buffer.alloc(640, 0);
   videoBytes.write('ftyp', 4, 'ascii');

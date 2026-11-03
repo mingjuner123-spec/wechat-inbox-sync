@@ -74,7 +74,7 @@ async function run() {
   fs.writeFileSync(path.join(tempRoot, 'models', 'ggml-small.bin'), 'model');
   fs.writeFileSync(path.join(tempRoot, 'bin', 'whisper-cli.exe'), 'whisper');
   fs.writeFileSync(path.join(tempRoot, 'bin', 'ffmpeg.exe'), 'ffmpeg');
-  const expectedCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${virtualInstallRoot}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+  const expectedCommand = `powershell -NoProfile -ExecutionPolicy Bypass -File "${virtualInstallRoot}\\transcribe.ps1" -InputPath {input} -OutputPath {output} -Language {language}`;
   assert.strictEqual(
     plugin.getEffectiveLocalTranscriptionCommand(),
     expectedCommand,

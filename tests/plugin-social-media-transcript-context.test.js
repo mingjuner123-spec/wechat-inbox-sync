@@ -467,7 +467,9 @@ async function run() {
   assert.ok(realShapeDouyinMarkdown.indexOf('## 标题') < realShapeDouyinMarkdown.indexOf('## 原文正文'));
   assert.ok(realShapeDouyinMarkdown.indexOf('## 原文正文') < realShapeDouyinMarkdown.indexOf('## 标签'));
   assert.ok(realShapeDouyinMarkdown.indexOf('## 标签') < realShapeDouyinMarkdown.indexOf('## 封面图'));
-  assert.ok(realShapeDouyinMarkdown.indexOf('## 封面图') < realShapeDouyinMarkdown.indexOf('## 口播/音频文案'));
+  assert.ok(realShapeDouyinMarkdown.indexOf('## 封面图') < realShapeDouyinMarkdown.indexOf('## 分段转写'));
+  assert.equal((realShapeDouyinMarkdown.match(/## 分段转写/g) || []).length, 1);
+  assert.doesNotMatch(realShapeDouyinMarkdown, /## 口播\/音频文案/);
   assert.match(realShapeDouyinMarkdown, /views:\s*3210/);
   assert.match(realShapeDouyinMarkdown, /likes:\s*88/);
   assert.match(realShapeDouyinMarkdown, /collects:\s*17/);

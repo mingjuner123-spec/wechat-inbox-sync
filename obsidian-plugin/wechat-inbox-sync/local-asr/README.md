@@ -25,7 +25,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install-local-asr.ps1
 插件默认命令：
 
 ```text
-powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.wechat-inbox-local-asr\transcribe.ps1" -InputPath {input} -OutputPath {output}
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.wechat-inbox-local-asr\transcribe.ps1" -InputPath {input} -OutputPath {output} -Language {language}
 ```
 
 ## macOS 一键安装
@@ -54,7 +54,7 @@ $HOME/.wechat-inbox-local-asr
 插件默认命令：
 
 ```text
-/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}
+/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output} --language {language}
 ```
 
 苹果芯片（M1/M2/M3）和 Intel Mac 都可使用，无需额外配置。

@@ -1,9 +1,10 @@
 'use strict';
 
 const MAX_SEGMENTS = 5000;
-const MAX_SEGMENT_TEXT = 2000;
+const { cleanTranscriptionTail } = require('./readable-content-utils');
 
 function toFiniteNumber(value) {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
   const number = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -56,7 +57,7 @@ function normalizeTranscriptSegments(value) {
     const range = readSegmentRange(item);
     if (!range) continue;
     const rawText = typeof item === 'string' ? item : (item.text || item.content || '');
-    const text = String(rawText || '').replace(/\s+/g, ' ').trim().slice(0, MAX_SEGMENT_TEXT);
+    const text = String(rawText || '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
     // A negative range means the producer did not know the timing; drop it
     // rather than rendering a misleading timestamp.
@@ -94,6 +95,7 @@ const BLOCK_MAX_CHARS = 80;
 const BLOCK_SOFT_MAX_CHARS = 140;
 const BLOCK_MAX_DURATION_MS = 30000;
 const BLOCK_GAP_BREAK_MS = 1200;
+const BLOCK_PARAGRAPH_MAX_CHARS = 44;
 const CJK_PATTERN = /[　-〿㐀-鿿＀-￯]$/;
 const CJK_START_PATTERN = /^[　-〿㐀-鿿＀-￯]/;
 const CJK_ANY_PATTERN = /[　-〿㐀-鿿＀-￯]/;
@@ -113,24 +115,166 @@ function hasCjk(text) {
   return CJK_ANY_PATTERN.test(String(text || ''));
 }
 
+function splitLongTranscriptParagraph(text) {
+  const source = String(text || '')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*([，。！？；、,.!?;:：])/g, '$1')
+    .replace(/([，,])\s*([，,])+/g, '$1')
+    .trim();
+  if (!source) return source;
+  if (!hasCjk(source)) return splitEnglishTranscript(source);
+
+  // Keep every spoken sentence in its own paragraph, even when the segment is
+  // short. Segment providers may put several sentences into one timed chunk.
+  const sentences = splitTranscriptSentences(source);
+  const paragraphs = [];
+  for (const sentence of sentences) {
+    const split = splitLongTranscriptClause(sentence.trim());
+    if (split) paragraphs.push(...split.split('\n\n'));
+  }
+  return paragraphs.join('\n\n');
+}
+
+function splitTranscriptSentences(source) {
+  // Keep abbreviations, decimals and the recognizer's words. A long sentence
+  // without punctuation can only be wrapped, not semantically reconstructed.
+  const sentences = [];
+  let start = 0;
+  const boundary = /[。！？!?…]+["'”’」』)]*|[.]+["'”’)]*(?=\s|$)/g;
+  let match;
+  while ((match = boundary.exec(source))) {
+    const end = match.index + match[0].length;
+    const prefix = source.slice(start, end);
+    if (/\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e)\.$/i.test(prefix)
+      || /\b[A-Z]\.$/.test(prefix)) continue;
+    sentences.push(prefix.trim());
+    start = end;
+  }
+  if (source.slice(start).trim()) sentences.push(source.slice(start).trim());
+  return sentences;
+}
+
+function splitEnglishTranscript(source) {
+  const sentences = splitTranscriptSentences(source);
+  const paragraphs = [];
+  for (let sentence of sentences) {
+    while (sentence.length > 240) {
+      const window = sentence.slice(0, 241);
+      const clauses = [...window.matchAll(/[,;:]\s+/g)].filter(item => item.index >= 100);
+      const splitAt = clauses.length ? clauses[clauses.length - 1].index + 1 : window.lastIndexOf(' ');
+      if (splitAt <= 0) break; // Never cut a word to meet the display limit.
+      paragraphs.push(sentence.slice(0, splitAt).trim());
+      sentence = sentence.slice(splitAt).trim();
+    }
+    if (sentence) paragraphs.push(sentence);
+  }
+  return paragraphs.join('\n\n');
+}
+
+function cleanTimedSegments(value) {
+  const segments = normalizeTranscriptSegments(value);
+  const text = segments.map(segment => segment.text).join('\n');
+  const cleaned = cleanTranscriptionTail(text);
+  return cleaned === text ? segments : segments.slice(0, cleaned.split('\n').length);
+}
+
+function splitLongTranscriptClause(source) {
+  if (!source || source.length <= BLOCK_PARAGRAPH_MAX_CHARS) return source;
+  const paragraphs = [];
+  let remaining = source;
+  while (remaining.length > BLOCK_PARAGRAPH_MAX_CHARS) {
+    const limit = BLOCK_PARAGRAPH_MAX_CHARS;
+    const minBreak = Math.floor(limit * 0.45);
+    let splitAt = -1;
+    let splitIncludesPunctuation = false;
+
+    // Prefer a clause boundary near the target length. Avoid short cues such
+    // as "再" that commonly occur inside a phrase (for example, "再也没").
+    const clauseStarts = /(接下来|与此同时|不过|但是|所以|因为|另外|此外|首先|其次|最后|然后|同时|之后|这时候|这时|这会儿|如果|比如说|比如|你看|下次|现在|我后来|我觉得|我发现|我突然|我最近|我抖音|我上个月|我现在|我反而|我直接|我认为|我做|我就|我会|我想|我们|接着|打开|点击|回到|真正|其实|等到|有一天)/g;
+    const clauseCandidates = [];
+    const sentenceCues = /^(?:接下来|首先|其次|最后|现在|我后来|我觉得|我发现|我突然|我最近|我抖音|我上个月|我现在|我反而|我直接|我认为|我做|我就|我会|我想|我们|真正|其实|有一天)$/;
+    let match;
+    while ((match = clauseStarts.exec(remaining)) !== null) {
+      if (match.index >= minBreak && match.index <= limit) clauseCandidates.push({ index: match.index, cue: match[0] });
+    }
+    let inferredPunctuation = '，';
+    if (clauseCandidates.length) {
+      const selected = clauseCandidates.reduce((best, candidate) =>
+        Math.abs(candidate.index - Math.floor(limit * 0.72)) < Math.abs(best.index - Math.floor(limit * 0.72)) ? candidate : best);
+      splitAt = selected.index;
+      if (sentenceCues.test(selected.cue)) inferredPunctuation = '。';
+    }
+
+    // Existing punctuation is the strongest boundary signal. Prefer the last
+    // comma/semicolon before the limit when no explicit clause cue is nearby.
+    if (splitAt < 0) {
+      for (let index = minBreak; index <= limit; index += 1) {
+        if (/[，,、；;]/.test(remaining[index - 1])) {
+          splitAt = index;
+          splitIncludesPunctuation = true;
+        }
+      }
+    }
+
+    // With no cue, use a bounded continuation paragraph. Mark it with a comma
+    // rather than pretending the recognizer supplied a sentence boundary.
+    if (splitAt < 0) {
+      // A display wrap is not evidence of a sentence/comma. Prefer a word
+      // boundary and leave the punctuation unchanged in this fallback.
+      const boundaries = typeof Intl.Segmenter === 'function'
+        ? [...new Intl.Segmenter('zh', { granularity: 'word' }).segment(remaining.slice(0, limit + 64))].map(part => part.index)
+        : [];
+      splitAt = boundaries.filter(index => index >= minBreak && index <= limit).pop() || limit;
+      while (splitAt < remaining.length && /[A-Za-z0-9]/.test(remaining[splitAt - 1]) && /[A-Za-z0-9]/.test(remaining[splitAt])) splitAt += 1;
+      if (splitAt > 0 && /[\uD800-\uDBFF]/.test(remaining[splitAt - 1])) splitAt += 1;
+      inferredPunctuation = '';
+    }
+    let head = remaining.slice(0, splitAt).trim();
+    remaining = remaining.slice(splitAt).trim();
+    if (!splitIncludesPunctuation) {
+      const leadingPunctuation = remaining.match(/^[，,、；;]+/);
+      if (leadingPunctuation) {
+        if (!/[，,、；;]$/.test(head)) head += '，';
+        remaining = remaining.slice(leadingPunctuation[0].length).trim();
+      }
+    }
+    if (!splitIncludesPunctuation) {
+      // A cue split is before the next clause; a hard split is only a reading
+      // aid. Neither boundary should duplicate punctuation already in the text.
+      if (head && !/[，,、；;。！？!?…]$/.test(head)) head += inferredPunctuation;
+    }
+    if (head) paragraphs.push(head);
+  }
+  if (remaining) {
+    const tail = remaining.trim();
+    paragraphs.push(SENTENCE_END_PATTERN.test(tail)
+      ? tail
+      : tail + (QUESTION_TAIL_PATTERN.test(tail) ? '？' : '。'));
+  }
+  return paragraphs.join('\n\n');
+}
+
 // Local ASR often returns unpunctuated Chinese. The pause between two segments
 // is the best free signal we have: a short gap is the same phrase, a longer one
 // is a clause, and the block break already handles real silence.
 function punctuationForGap(gapMs, previousText) {
-  if (!previousText || SENTENCE_END_PATTERN.test(String(previousText).trim())) return '';
+  if (!previousText || /[，,、；;。！？!?…]$/.test(String(previousText).trim())) return '';
   if (gapMs >= 650) return '。';
   if (gapMs >= 300) return '，';
   return '';
 }
 
 function ensureTerminalPunctuation(text) {
-  const trimmed = String(text || '').trim();
-  if (!trimmed || !hasCjk(trimmed) || SENTENCE_END_PATTERN.test(trimmed)) return trimmed;
-  return trimmed + (QUESTION_TAIL_PATTERN.test(trimmed) ? '？' : '。');
+  const trimmed = splitLongTranscriptParagraph(text);
+  if (!trimmed || !hasCjk(trimmed) || /[，,、；;。！？!?…]$/.test(trimmed)) return trimmed;
+  const parts = trimmed.split('\n\n');
+  const last = parts.pop();
+  parts.push(last + (QUESTION_TAIL_PATTERN.test(last) ? '？' : '。'));
+  return parts.join('\n\n');
 }
 
 function groupTranscriptSegments(value) {
-  const segments = normalizeTranscriptSegments(value);
+  const segments = cleanTimedSegments(value);
   const blocks = [];
   let current = null;
   for (const segment of segments) {
@@ -176,26 +320,44 @@ function buildTranscriptSegmentsMarkdown(value) {
   const lines = blocks.map((block) => {
     const stamp = `[${formatTranscriptTimestamp(block.startMs)}]`;
     const speaker = showSpeakers && block.speaker ? `${block.speaker}：` : '';
-    return `- ${stamp} ${speaker}${block.text}`;
+    const paragraphs = String(block.text || '').split('\n\n');
+    return `### ${stamp}\n\n${paragraphs.map((paragraph) => `${speaker}${paragraph}`).join('\n\n')}`;
   });
-  return ['## 分段转写', '', ...lines, ''].join('\n');
+  return ['## 分段转写', '', lines.join('\n\n'), ''].join('\n');
 }
 
-function countTranscriptCoreCharacters(value) {
-  return String(value || '').replace(/[\s\p{P}\p{S}]/gu, '').length;
+function buildUntimedTranscriptMarkdown(value) {
+  const text = cleanTranscriptionTail(value);
+  if (!text) return '';
+  // Some transcription providers return plain text without segment times.
+  // Keep the readable paragraph layout, but do not fabricate a [00:00] marker.
+  const paragraphs = ensureTerminalPunctuation(text);
+  return [
+    '## 分段转写',
+    '',
+    paragraphs,
+    '',
+  ].join('\n');
+}
+
+function normalizeTranscriptCoreText(value) {
+  return String(value || '').replace(/[\s\p{P}\p{S}]/gu, '');
 }
 
 // Notes used to print the whole transcript and then the same text again as
-// timed segments. The segment list is the better reading surface, so the flat
-// copy is only kept when the segments miss a meaningful part of the text
-// (partial chunk recovery, or a producer that only timed the first minutes).
+// timed segments. Use timed segments only when their spoken characters match
+// the full transcript; otherwise keep the full text without fabricated times.
 function transcriptSegmentsCoverText(segments, transcription) {
-  const textCharacters = countTranscriptCoreCharacters(transcription);
-  if (!textCharacters) return false;
-  const segmentCharacters = normalizeTranscriptSegments(segments)
-    .reduce((total, segment) => total + countTranscriptCoreCharacters(segment.text), 0);
-  if (!segmentCharacters) return false;
-  return segmentCharacters >= textCharacters * 0.6;
+  const fullText = normalizeTranscriptCoreText(cleanTranscriptionTail(transcription));
+  if (!fullText) return false;
+  const segmentText = cleanTimedSegments(segments)
+    .map((segment) => normalizeTranscriptCoreText(segment.text))
+    .join('');
+  if (!segmentText) return false;
+  // A percentage threshold can silently discard a transcript tail. Retain
+  // timed output only when its spoken characters match the full text exactly;
+  // otherwise the untimed full transcript is the safe output.
+  return segmentText === fullText;
 }
 
 function parseTranscriptSegmentsSidecar(value) {
@@ -208,6 +370,23 @@ function parseTranscriptSegmentsSidecar(value) {
     }
   }
   if (!payload || typeof payload !== 'object') return [];
+  if (Array.isArray(payload.chunks)) {
+    const segments = [];
+    let previousOffset = -1;
+    for (const chunk of payload.chunks) {
+      const offset = toFiniteNumber(chunk && chunk.offsetMs);
+      const items = chunk && chunk.result && chunk.result.transcription;
+      if (offset === null || offset < 0 || offset < previousOffset || !Array.isArray(items)) return [];
+      previousOffset = offset;
+      for (const item of items) {
+        const from = toFiniteNumber(item && item.offsets && item.offsets.from);
+        const to = toFiniteNumber(item && item.offsets && item.offsets.to);
+        if (from === null || to === null || from < 0 || to < from || typeof item.text !== 'string') return [];
+        segments.push({ startMs: offset + from, endMs: offset + to, text: item.text });
+      }
+    }
+    return normalizeTranscriptSegments(segments);
+  }
   const segments = Array.isArray(payload.segments)
     ? payload.segments
     : (Array.isArray(payload.transcription) ? payload.transcription : []);
@@ -260,6 +439,7 @@ module.exports = {
   formatTranscriptTimestamp,
   groupTranscriptSegments,
   buildTranscriptSegmentsMarkdown,
+  buildUntimedTranscriptMarkdown,
   transcriptSegmentsCoverText,
   parseTranscriptSegmentsSidecar,
   extractDoubaoUtteranceSegments,

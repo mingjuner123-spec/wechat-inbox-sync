@@ -41,7 +41,7 @@ printf 'Synthetic fixture transcript.' > "$base.txt"
   for (const f of ['ffmpeg', 'whisper-cli']) fs.chmodSync(path.join(dir, 'bin', f), 0o755);
   let clock = 0;
   const config = { platform: 'darwin', managed: true, installRoot: dir, installerSource: installer,
-    commandTemplate: `/bin/bash "${dir}/transcribe.sh" --input {input} --output {output}`,
+    commandTemplate: `/bin/bash "${dir}/transcribe.sh" --input {input} --output {output} --language {language}`,
     inputPath: dir + '/input.wav', outputPath: dir + '/output.txt', now: () => clock };
   const guard = helper.prepareStartupAttempt(config); assert.equal(guard.enabled, true, guard.evidence.reason);
   return { dir, guard, config, advance: ms => { clock += ms; } };

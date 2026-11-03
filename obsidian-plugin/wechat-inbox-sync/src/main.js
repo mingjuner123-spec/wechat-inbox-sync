@@ -3,6 +3,7 @@ const { membershipGuidance, setupError, isSetupRequired, setupSummary } = requir
 const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runtime-snapshot');
 const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
 const douyinBrowserSafety = require('./douyin-browser-safety');
+const xArticle = require('./x-article');
 const { createAutoSyncController } = require('./auto-sync-controller');
 const {
   createDiagnosticId,
@@ -26,7 +27,6 @@ function retainedSyncFailureContext(item = {}) {
   };
 }
 const { createFeishuImageDisplay, parseFeishuImageUrl, MAX_IMAGE_BYTES } = require('./feishu-image-display');
-const { createTranscriptMediaPlayer } = require('./transcript-media-player');
 const crypto = require('crypto');
 const asrRecovery = require('./asr-recovery-utils');
 const asrTimeoutProcessGroup = require('./asr-timeout-process-group');
@@ -383,7 +383,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.218';
+const PLUGIN_RUNTIME_VERSION = '1.3.219';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -551,6 +551,7 @@ const NOTE_PROPERTY_FIELD_KEYS = [
 ];
 
 const DEFAULT_SETTINGS = {
+  ...xArticle.DEFAULTS,
   apiBase: OFFICIAL_SYNC_API_BASE,
   settingsVersion: 2,
   // Monotonic settings revision. An older data.json (for example a restored
@@ -575,13 +576,12 @@ const DEFAULT_SETTINGS = {
   autoSyncEnabled: true,
   autoSyncStoppedRecords: [],
   aiProvider: 'off',
+  transcriptionLanguage: 'zh',
   aiMetadataEnabled: true,
   xiaohongshuCommentsEnabled: true,
   xiaohongshuImageOcrEnabled: false,
   xiaohongshuImageOcrConsentVersion: 0,
   saveOriginalMediaEnabled: false,
-  transcriptTimestampsEnabled: true,
-  transcriptScreenshotEnabled: false,
   socialArticleImageStorageMode: 'remote',
   socialArticleImageStorageModeConfigured: false,
   wechatChannelsExperimentUrl: '',
@@ -713,12 +713,12 @@ function getLocalAsrPlatformMismatchMessage(selectedPlatform, runtimePlatform = 
 
 function getDefaultLocalTranscriptionCommand(platform = os.platform(), installRoot = '') {
   if (getLocalAsrPlatform(platform) === 'darwin') {
-    return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
+    return `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output} --language {language}`;
   }
   if (installRoot) {
-    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${joinLocalAsrPath(platform, installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output}`;
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${joinLocalAsrPath(platform, installRoot, 'transcribe.ps1')}" -InputPath {input} -OutputPath {output} -Language {language}`;
   }
-  return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+  return `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output} -Language {language}`;
 }
 
 function normalizeLocalAsrInstallMode(value) {
@@ -1141,6 +1141,7 @@ function hasDiagnosticsProcessAsrRuntimeFeatures(
     ? `$NativeProcessRunnerVersion = "${nativeProcessRunnerVersion}"`
     : '$NativeProcessRunnerVersion = ';
   return source.includes('transcribe-last.log')
+    && source.includes('[ValidateSet("zh", "en")][string]$Language = "zh"')
     && source.includes('recoveryTriggered=')
     && source.includes('Split-AudioToChunks')
     && source.includes('Test-TranscriptHasRepeatHallucination')
@@ -2798,6 +2799,8 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
       && source.includes('progressHeartbeatAt')
       && source.includes('progressPid')
       && source.includes('run_with_heartbeat segmenting')
+      && source.includes('TRANSCRIPTION_LANGUAGE="${2:-zh}"')
+      && source.includes('SEGMENTS_PATH="$OUTPUT_BASE.segments.json"')
       && source.includes('validate_local_asr_inference')
       && source.includes('PUBLIC_CLOUDBASE_CDN_DISABLED=')
       && source.includes('AUTHORIZED_MODEL_URL="${WECHAT_INBOX_ASR_MODEL_URL:-}"')
@@ -2890,6 +2893,7 @@ function isLocalAsrInstallerCurrent(scriptText, isMac = false) {
     && source.includes('--max-time $DownloadTimeoutSeconds')
     && source.includes('System.Text.UTF8Encoding')
     && source.includes('ReadAllText($chunkTxt, $Utf8NoBom)')
+    && source.includes('[ValidateSet("zh", "en")][string]$Language = "zh"')
     && source.includes('WriteAllText($OutputPath');
 }
 
@@ -3398,9 +3402,14 @@ function normalizeLocalTranscriptionCommand(command, platform = os.platform()) {
   const normalized = String(command || '')
     .trim()
     .replace(/\$env:USERPROFILE/gi, '%USERPROFILE%');
-  if (getLocalAsrPlatform(platform) === 'darwin' && isWindowsLocalAsrCommand(normalized)) {
+  const localPlatform = getLocalAsrPlatform(platform);
+  const legacyWindowsDefault = `powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\${LOCAL_ASR_HOME}\\transcribe.ps1" -InputPath {input} -OutputPath {output}`;
+  const legacyMacDefault = `/bin/bash "$HOME/${LOCAL_ASR_HOME}/transcribe.sh" --input {input} --output {output}`;
+  if (localPlatform === 'darwin' && isWindowsLocalAsrCommand(normalized)) {
     return getDefaultLocalTranscriptionCommand(platform);
   }
+  if (localPlatform === 'darwin' && normalized === legacyMacDefault) return getDefaultLocalTranscriptionCommand(platform);
+  if (localPlatform === 'win32' && normalized === legacyWindowsDefault) return getDefaultLocalTranscriptionCommand(platform);
   return normalized;
 }
 
@@ -3638,6 +3647,14 @@ function mergeSettings(savedSettings, platform = os.platform()) {
     ? [...new Set(merged.autoSyncStoppedRecords.filter((key) => typeof key === 'string' && /^[a-f0-9]{64}$/.test(key)))]
     : [];
   merged.aiProvider = AI_PROVIDER_NAMES[merged.aiProvider] ? merged.aiProvider : DEFAULT_SETTINGS.aiProvider;
+  merged.xTranslationEnabled = merged.xTranslationEnabled === true;
+  merged.xSummaryEnabled = merged.xSummaryEnabled === true;
+  for (const key of ['xAiApiKey', 'xAiBaseUrl', 'xAiModel']) {
+    merged[key] = String(merged[key] || xArticle.DEFAULTS[key]).trim();
+  }
+  merged.transcriptionLanguage = ['zh', 'en'].includes(merged.transcriptionLanguage)
+    ? merged.transcriptionLanguage
+    : DEFAULT_SETTINGS.transcriptionLanguage;
   merged.settingsVersion = DEFAULT_SETTINGS.settingsVersion;
   merged.aiMetadataEnabled = true;
   merged.xiaohongshuCommentsEnabled = savedSettingsVersion < 2
@@ -3647,11 +3664,6 @@ function mergeSettings(savedSettings, platform = os.platform()) {
   merged.xiaohongshuImageOcrEnabled = merged.xiaohongshuImageOcrConsentVersion === 1
     && merged.xiaohongshuImageOcrEnabled === true;
   merged.saveOriginalMediaEnabled = merged.saveOriginalMediaEnabled === true;
-  // Jump-to-playback is the fastest way into a long transcript, so it is on for
-  // everyone who has not switched it off. Screenshots write files, so those stay
-  // opt-in.
-  merged.transcriptTimestampsEnabled = sourceSettings.transcriptTimestampsEnabled !== false;
-  merged.transcriptScreenshotEnabled = merged.transcriptScreenshotEnabled === true;
   const hasLegacyImageStoragePreference = Object.prototype.hasOwnProperty.call(sourceSettings, 'wechatArticleImageStorageMode');
   const hasExplicitSocialImageStoragePreference = sourceSettings.socialArticleImageStorageModeConfigured === true;
   merged.socialArticleImageStorageMode = hasExplicitSocialImageStoragePreference || hasLegacyImageStoragePreference
@@ -4982,6 +4994,7 @@ function isXiaohongshuUrl(url) {
 }
 
 function isSocialArticleUrl(sourceUrl) {
+  if (xArticle.isXUrl(sourceUrl)) return true;
   return isWechatArticleUrl(sourceUrl)
     || isFeishuUrl(sourceUrl)
     || isXiaohongshuUrl(sourceUrl)
@@ -5318,6 +5331,7 @@ function extractWechatChannelsRequestPayload(url) {
 }
 
 function shouldHydrateLinkAsWebpage(url) {
+  if (xArticle.isXUrl(url)) return true;
   return isWechatMpArticleUrl(url)
     || isWechatChannelsUrl(url)
     || isFeishuUrl(url)
@@ -5340,6 +5354,7 @@ function isSafeAutomaticWebpageUrl(url) {
 }
 
 function isTrustedAutomaticPlatformUrl(url) {
+  if (xArticle.isXUrl(url)) return true;
   const hostname = getHttpUrlHostname(url);
   return isHostnameWithinDomain(hostname, 'mp.weixin.qq.com')
     || isHostnameWithinDomain(hostname, 'feishu.cn')
@@ -5871,6 +5886,7 @@ function sanitizeNoteTitlePart(text, fallback = '未命名') {
 }
 
 function getWebpageSourcePrefix(url) {
+  if (xArticle.isXUrl(url)) return 'X';
   if (isFeishuUrl(url)) return '飞书';
   if (isWechatChannelsUrl(url)) return '视频号';
   if (isWechatArticleUrl(url)) return '公众号';
@@ -17585,7 +17601,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (this.syncDiagnosticReporter) this.syncDiagnosticReporter.dispose();
     });
     this.startFeishuImageDisplay();
-    this.startTranscriptMediaPlayer();
     if (this.getConfiguredLocalAsrPlatform() === 'win32') {
       try {
         const switchResult = completePendingLocalOcrSwitch(this.getConfiguredLocalOcrInstallRoot());
@@ -17871,21 +17886,6 @@ class WechatObsidianInboxPlugin extends Plugin {
       id: 'reload-feishu-note-images',
       name: '重新加载飞书图片',
       callback: () => this.feishuImageDisplay.retry(),
-    });
-  }
-
-  startTranscriptMediaPlayer() {
-    if (typeof this.registerMarkdownPostProcessor !== 'function') return;
-    const vault = this.app && this.app.vault;
-    if (!vault) return;
-    this.transcriptMediaPlayer = createTranscriptMediaPlayer({
-      vault,
-      getSettings: () => this.settings || {},
-      notify: message => new Notice(message, 6000),
-    });
-    this.registerMarkdownPostProcessor((el, context) => {
-      if (!this.settings) return;
-      this.transcriptMediaPlayer(el, context && context.sourcePath);
     });
   }
 
@@ -18307,7 +18307,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       noteDir,
       propertyFields: this.settings.notePropertyFields,
     });
-    const { markdown, filePath } = outputPlan;
+    const { filePath } = outputPlan;
+    const markdown = await this.appendAdvancedAi(outputPlan.markdown, recordForMarkdown);
     await this.app.vault.adapter.write(filePath, markdown);
     return {
       recordId: getRecordId(record),
@@ -21003,14 +21004,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     return getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
   }
 
-  getLocalAsrDiagnosticText() {
+  getLocalAsrDiagnosticText(options = {}) {
     const platform = this.getConfiguredLocalAsrPlatform();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
-    const status = getLocalAsrInstallStatus(installRoot, fs.existsSync, platform);
+    const status = this.getLocalAsrInstallStatus(installRoot, platform);
+    const ocrStatus = this.getLocalOcrInstallStatus();
     const logText = readLocalAsrInstallLog(installRoot);
-    const runLogText = asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(installRoot));
-    const syncLogText = readSyncDiagnosticLog(installRoot);
-    const lastSyncText = this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
+    const runLogText = options.installationOnly ? '' : asrRecovery.readDiagnosticLog(getLocalAsrRunLogPath(installRoot));
+    const syncLogText = options.installationOnly ? '' : readSyncDiagnosticLog(installRoot);
+    const lastSyncText = !options.installationOnly && this.lastSyncDiagnostic ? JSON.stringify(this.lastSyncDiagnostic, null, 2) : '';
     const diagnosticText = [
       'WeChat Inbox Sync 同步/安装失败诊断',
       `插件版本：${this.manifest && this.manifest.version ? this.manifest.version : 'unknown'}`,
@@ -21032,15 +21034,21 @@ class WechatObsidianInboxPlugin extends Plugin {
       `模型路径：${status.modelPath}`,
       `组件可用：${status.ready ? '是' : '否'}`,
       `缺失项：${status.missingReasons && status.missingReasons.length ? status.missingReasons.join('；') : '无'}`,
+      `OCR 可用：${ocrStatus.ready ? '是' : '否'}`,
+      `OCR 环境：${ocrStatus.hasPython ? '可用' : '缺失'}`,
+      `OCR 脚本：${ocrStatus.hasScript ? '存在' : '缺失'}`,
+      `OCR 缺失项：${ocrStatus.missingReasons && ocrStatus.missingReasons.length ? ocrStatus.missingReasons.join('；') : '无'}`,
       `绑定码：${this.getActiveBindings().map((item) => `${item.label || ''}:[REDACTED]`).join(', ') || '-'}`,
       `权限缓存：${JSON.stringify(redactSensitiveObject(this.settings.localTranscriptionEntitlementStatus || {}))}`,
       `最近权限查询失败：${this.settings.proEntitlementLastError
         ? `${this.settings.proEntitlementLastErrorAt || '时间未知'} ${this.settings.proEntitlementLastError}`
         : '无'}`,
-      '最近同步状态：',
-      lastSyncText || syncLogText || '暂无 sync-last.log',
-      '最近转写日志：',
-      runLogText || '暂无 transcribe-last.log',
+      ...(options.installationOnly ? [] : [
+        '最近同步状态：',
+        lastSyncText || syncLogText || '暂无 sync-last.log',
+        '最近转写日志：',
+        runLogText || '暂无 transcribe-last.log',
+      ]),
       '最近安装日志：',
       logText || '暂无 install.log',
     ].join('\n');
@@ -21186,6 +21194,12 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async copySyncDiagnosticText(options = {}) {
     return this.copyDiagnosticText(this.getSyncDiagnosticText(options), options.detailed ? 'sync-diagnostic-detailed.txt' : 'sync-diagnostic.txt');
+  }
+
+  async copySupportDiagnosticText() {
+    const sync = failureScope.boundedDiagnostic(this.getSyncDiagnosticText({ detailed: true }), 32768);
+    const installation = failureScope.boundedDiagnostic(this.getLocalAsrDiagnosticText({ installationOnly: true }), 16384);
+    return this.copyDiagnosticText(`${sync}\n\n${installation}`, 'sync-install-diagnostic.txt');
   }
 
   async copyCompactSyncDiagnosticText() {
@@ -22123,14 +22137,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     const reason = formatLocalComponentInstallFailureReason(error);
     const message = [
       `失败原因：${reason}`,
-      '如需协助，请点击插件设置里的「复制完整诊断」，联系开发者张张（微信：heyhmjx）。',
+      '如需协助，请点击插件设置里的「复制诊断」，联系开发者张张（微信：heyhmjx）。',
     ].join('\n');
     const modalResult = showLocalComponentInstallFailure(this.app, message);
     if (modalResult) {
       await modalResult;
       return;
     }
-    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制完整诊断」，联系开发者张张（微信：heyhmjx）。`, 12000);
+    new Notice(`本地转写组件安装失败：${reason}。如需协助，请点击插件设置里的「复制诊断」，联系开发者张张（微信：heyhmjx）。`, 12000);
   }
 
   async doInstallLocalTranscriptionComponents(options = {}) {
@@ -23957,18 +23971,31 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
+    const platform = this.getConfiguredLocalAsrPlatform();
+    const transcriptionLanguage = this.settings.transcriptionLanguage === 'en' ? 'en' : 'zh';
     if (installStatus.scriptOutdated) {
       throw new Error('本地转写脚本过旧：请在插件设置里重新点击“安装/更新本地转写组件”，安装完成后再同步。');
     }
-    const commandTemplate = this.getEffectiveLocalTranscriptionCommand();
+    let scriptSource = '';
+    try { scriptSource = fs.readFileSync(installStatus.transcribeScript, 'utf8'); } catch (_) { /* missing script is reported by the readiness check */ }
+    const supportsLanguage = platform === 'darwin'
+      ? scriptSource.includes('TRANSCRIPTION_LANGUAGE="${2:-zh}"')
+      : scriptSource.includes('[ValidateSet("zh", "en")][string]$Language = "zh"');
+    if (transcriptionLanguage === 'en' && !supportsLanguage) {
+      throw new Error('当前本地转写组件不支持 English。请在插件设置中点击“安装／更新本地组件”后重试。');
+    }
+    let commandTemplate = this.getEffectiveLocalTranscriptionCommand();
     if (!commandTemplate) {
       throw new Error('未配置本地转写命令');
     }
+    if (platform === 'win32' && !supportsLanguage) commandTemplate = commandTemplate.replace(' -Language {language}', '');
+    if (transcriptionLanguage === 'en' && !commandTemplate.includes('{language}')) {
+      throw new Error('当前自定义本地转写命令未配置语言参数。请将命令中的语言值设为 {language}，或恢复插件默认命令后重试。');
+    }
 
-    const platform = this.getConfiguredLocalAsrPlatform();
     const managed = platform === 'darwin'
       && ((commandTemplate === getDefaultLocalTranscriptionCommand('darwin') && installRoot === getLocalAsrInstallRoot(os.homedir(), 'default', 'darwin'))
-        || commandTemplate === `/bin/bash "${String(installRoot).replace(/\\/g, '/')}/transcribe.sh" --input {input} --output {output}`
+        || commandTemplate === `/bin/bash "${String(installRoot).replace(/\\/g, '/')}/transcribe.sh" --input {input} --output {output} --language {language}`
         || extractLocalAsrInstallRootFromCommand(commandTemplate, platform) === installRoot)
       && asrRecovery.ensureManagedMacScript(installRoot, EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE);
     let compatibility = { status: 'not-applicable', reason: 'not-target-runtime' };
@@ -24278,6 +24305,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           .replace(/\{input\}/g, quote(inputPath))
           .replace(/\{output\}/g, quote(outputPath))
         : `${commandTemplate} ${quote(inputPath)}`;
+      command = command.replace(/\{language\}/g, transcriptionLanguage);
       const executeTranscription = async (cpuPreferred, attemptOffset = 0) => asrRecovery.executeWithMacRecovery({
         platform, managed, signal: abortController.signal,
         cpuPreferred,
@@ -24356,7 +24384,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           const startupGuard = asrStartupTimeout.prepareStartupAttempt({
             platform: process.platform, managed, installRoot,
             installerSource: EMBEDDED_LOCAL_ASR_MACOS_INSTALLER_SOURCE,
-            commandTemplate, inputPath, outputPath,
+            commandTemplate, inputPath, outputPath, language: transcriptionLanguage,
           });
           attemptStartupGuards.set(attemptNumber, startupGuard);
           let child;
@@ -24481,7 +24509,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           ffmpegPath: currentInstallStatus.ffmpegPath,
           whisperPath: currentInstallStatus.whisperPath,
           asrModelPath: currentInstallStatus.modelPath,
-          language: options.transcriptionLanguage || 'zh',
+          language: transcriptionLanguage,
           cpuOnly: true,
           threads: 1,
           signal: abortController.signal,
@@ -24608,7 +24636,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (_) { /* Evidence collection cannot mask the original result. */ }
       try { asrRecovery.saveSession(installRoot, session, this.settings); }
       finally {
-        [inputPath, outputPath].forEach((filePath, index) => {
+        [inputPath, outputPath, outputPath ? outputPath.replace(/\.txt$/i, '') + '.segments.json' : ''].forEach((filePath, index) => {
           try {
             const canDelete = index === 0
               ? ownsInputPath && !(options.retainInputFileOnError === true && session.status === 'failed')
@@ -26741,11 +26769,60 @@ class WechatObsidianInboxPlugin extends Plugin {
       },
     };
   }
+  async requestXArticleJson(url, options = {}) {
+    // No automatic retry of AI requests. Provider response bodies never enter diagnostics.
+    const response = await requestUrl({ url, ...options, throw: false });
+    if (response.status && (response.status < 200 || response.status >= 300)) {
+      throw Object.assign(new Error('X request failed'), { status: response.status });
+    }
+    return response.json || (response.text ? tryParseJson(response.text) : null) || {};
+  }
+
+  async hydrateXArticle(record, rootDir, dateFolder, title, options = {}) {
+    const metadata = record.metadata || {};
+    const url = metadata.url || record.content;
+    const signal = options.signal;
+    const request = (endpoint, config) => this.requestXArticleJson(endpoint, config);
+    let post;
+    try {
+      if (this.xArticleBlockedUntil > Date.now()) throw Object.assign(new Error('X 暂时限制访问频率，请稍后重试。'), { code: 'X_RATE_LIMITED' });
+      post = await xArticle.fetchPost(url, request, signal);
+    }
+    catch (error) {
+      if (isAbortError(error)) throw error;
+      if (error.code === 'X_RATE_LIMITED' && !(this.xArticleBlockedUntil > Date.now())) this.xArticleBlockedUntil = Date.now() + 15 * 60 * 1000;
+      return { ...record, metadata: { ...metadata, platform: 'X', contentCategory: '图文',
+        sourceMetadataComplete: true, transcriptOnly: false, webpageMediaType: 'article',
+        conversionStatus: 'link_saved', conversionError: error.message, xArticleErrorCode: error.code,
+        markdown: `> ${error.message}\n\n原始链接：${url}` } };
+    }
+    throwIfAborted(signal);
+    const pageTitle = `${post.author || 'X'}：${post.text.slice(0, 80) || '图片'}`;
+    let markdown = xArticle.renderPost(post);
+    let imageFailures = 0;
+    try {
+      markdown = await this.saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title || pageTitle, {
+        sourceUrl: post.url, onError: () => { imageFailures += 1; },
+      });
+    } catch (error) { if (isAbortError(error)) throw error; imageFailures += 1; }
+    throwIfAborted(signal);
+    if (imageFailures) markdown += '\n\n> 部分图片未能保存到本地，已保留原始图片链接。';
+    const cleanMetadata = { ...metadata };
+    for (const key of ['transcription', 'transcriptionStatus', 'transcriptionError', 'conversionError', 'xArticleErrorCode', 'aiMetadataError']) delete cleanMetadata[key];
+    return { ...record, metadata: { ...cleanMetadata, url: post.url, title: pageTitle,
+      author: post.author, publishedAt: post.createdAt, platform: 'X', contentCategory: '图文',
+      sourceMetadataComplete: true, transcriptOnly: false, webpageMediaType: 'article',
+      conversionStatus: 'success', markdown, xOriginalText: [post.text, post.quote && post.quote.text].filter(Boolean).join('\n\n'),
+      xImageCount: post.images.length + (post.quote ? post.quote.images.length : 0),
+    } };
+  }
+
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null, options = {}) {
     const signal = options.signal || null;
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
+    if (xArticle.isXUrl(url)) return this.hydrateXArticle(record, rootDir, dateFolder, title, options);
     // Once this batch has seen a Xiaohongshu wall, later Xiaohongshu records
     // must not touch the platform again. Non-Xiaohongshu records are untouched.
     if (isXiaohongshuUrl(url) && getActiveXiaohongshuRestriction()) {
@@ -29824,6 +29901,17 @@ class WechatObsidianInboxPlugin extends Plugin {
       adapter: this.app && this.app.vault && this.app.vault.adapter,
     });
   }
+  async appendAdvancedAi(markdown, record, options = {}) {
+    const settings = xArticle.demoSettings(this.settings);
+    if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return markdown;
+    const text = xArticle.recordText(record);
+    if (!text) return markdown;
+    const result = await xArticle.processAi({ text }, settings,
+      (url, config) => this.requestXArticleJson(url, config), options.signal);
+    const addition = xArticle.renderAi(result);
+    return addition ? `${markdown}\n\n${addition}\n` : markdown;
+  }
+
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;
     let verifiedArticleLease = null;
@@ -30070,6 +30158,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       fileTitle = await this.nextTitle(targetNoteDir, fileTitle);
       filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     }
+    if (!qualityRejectedPartial) markdown = await this.appendAdvancedAi(markdown, recordForMarkdown, { signal });
     const temporaryFilePath = normalizeVaultPath(
       `${targetNoteDir}/.wechat-inbox-sync-${crypto.randomBytes(12).toString('hex')}.tmp`,
     );
@@ -31263,6 +31352,75 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
   }
 
+  renderXArticleSettings(containerEl) {
+    const panel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
+    panel.createEl('summary', { text: 'AI 高级功能' });
+    containerEl = panel;
+    const preset = xArticle.DEMO_PRESET;
+    const settings = xArticle.demoSettings(this.plugin.settings);
+    const readOnly = (name, value) => new Setting(containerEl).setName(name).addText(text => {
+      text.setValue(value);
+      text.inputEl.readOnly = true;
+    });
+    readOnly('API 模型', preset.label);
+    new Setting(containerEl).setName('API Key').addText(text => {
+      text.inputEl.type = 'password'; text.inputEl.autocomplete = 'off';
+      text.setPlaceholder('填写 DeepSeek API Key').setValue(settings.xAiApiKey || '').onChange(async value => {
+        this.plugin.settings.xAiModel = preset.model;
+        this.plugin.settings.xAiBaseUrl = preset.baseUrl;
+        this.plugin.settings.xAiApiKey = value.trim();
+        await this.plugin.saveSettings();
+      });
+    });
+    readOnly('API 地址', preset.baseUrl);
+    new Setting(containerEl).setName('连接')
+      .addButton(button => button.setButtonText('测试').onClick(async () => {
+        button.setDisabled(true);
+        try {
+          await xArticle.testConnection(xArticle.demoSettings(this.plugin.settings), (url, config) => this.plugin.requestXArticleJson(url, config));
+          new Notice('连接成功');
+        } catch (error) { new Notice(`连接失败：${xArticle.errorCode(error)}。请检查配置和网络。`); }
+        finally { button.setDisabled(false); }
+      }))
+      .addButton(button => button.setButtonText('教程').onClick(() => this.openXArticleTutorial()));
+    new Setting(containerEl).setName('多语言翻译').setDesc('默认统一翻译为中文，中文内容不翻译。')
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.xTranslationEnabled === true).onChange(async value => {
+        this.plugin.settings.xTranslationEnabled = value; await this.plugin.saveSettings();
+      }));
+    new Setting(containerEl).setName('AI 总结')
+      .addToggle(toggle => toggle.setValue(this.plugin.settings.xSummaryEnabled === true).onChange(async value => {
+        this.plugin.settings.xSummaryEnabled = value; await this.plugin.saveSettings();
+      }));
+  }
+
+  openXArticleTutorial() {
+    const modal = new Modal(this.app);
+    modal.contentEl.createEl('h3', { text: 'API 设置教程' });
+    const steps = modal.contentEl.createEl('ol');
+    for (const text of [
+      '在 DeepSeek 开放平台创建 API Key。',
+      '填写 DeepSeek API Key，模型和地址已配置。',
+      '点击测试，连接成功后按需开启翻译或 AI 总结。',
+    ]) steps.createEl('li', { text });
+    for (const preset of [xArticle.DEMO_PRESET]) {
+      const row = modal.contentEl.createEl('p');
+      row.createEl('a', { text: preset.label, href: preset.docs, attr: { target: '_blank', rel: 'noopener noreferrer' } });
+      row.createEl('span', { text: `：${preset.baseUrl}` });
+    }
+    modal.contentEl.createEl('p', { text: '对新同步的各平台已提取正文生效。开启后会将正文发送到 DeepSeek；测试及处理可能产生 API 费用。' });
+    modal.open();
+    return modal;
+  }
+
+  renderDiagnosticSetting(containerEl) {
+    new Setting(containerEl).setName('诊断信息').addButton(button => button
+      .setButtonText('复制诊断')
+      .onClick(async () => {
+        try { if (await this.plugin.copySupportDiagnosticText()) new Notice('诊断已复制'); }
+        catch (error) { new Notice(`复制失败：${error.message || error}`); }
+      }));
+  }
+
   renderFeishuSettings(containerEl) {
     const feishuPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     feishuPanel.open = true;
@@ -31488,7 +31646,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('保存根目录')
+      .setName('保存地址设置')
       .setDesc('同步笔记写入的位置；可选择是否按日期再创建子目录。')
       .addText((text) => text
         .setPlaceholder('临时收集')
@@ -31534,54 +31692,22 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName('分段转写时间戳')
-      .setDesc('音视频笔记的「分段转写」里，点击 [00:00] 时间戳可让笔记内嵌播放器跳到对应位置。')
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.settings.transcriptTimestampsEnabled === true)
+      .setName('本地转写语言')
+      .addDropdown((dropdown) => dropdown
+        .addOption('zh', '简体中文')
+        .addOption('en', 'English')
+        .setValue(this.plugin.settings.transcriptionLanguage || DEFAULT_SETTINGS.transcriptionLanguage)
         .onChange(async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, transcriptTimestampsEnabled: value === true });
+          await this.plugin.saveSettings({
+            ...this.plugin.settings,
+            transcriptionLanguage: value === 'en' ? 'en' : 'zh',
+          });
         }));
 
-    new Setting(containerEl)
-      .setName('播放器截图按钮')
-      .setDesc('在音视频笔记的内嵌视频下方显示「截图」按钮，手动保存当前画面到笔记附件目录。')
-      .addToggle((toggle) => toggle
-        .setValue(this.plugin.settings.transcriptScreenshotEnabled === true)
-        .onChange(async (value) => {
-          await this.plugin.saveSettings({ ...this.plugin.settings, transcriptScreenshotEnabled: value === true });
-        }));
+    new Setting(containerEl).setName("立即同步").addButton(button => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
 
-    new Setting(containerEl)
-      .setName('立即同步')
-      .setDesc('手动拉取云端收集箱，并写入当前 vault。')
-      .addButton((button) => button
-        .setButtonText('同步')
-        .setCta()
-        .onClick(() => this.plugin.syncInbox()));
-
-    new Setting(containerEl)
-      .setName('同步/安装失败诊断')
-      .setDesc('默认只复制本次失败的摘要；排查组件安装问题时再复制完整诊断。')
-      .addButton((button) => button
-        .setButtonText('复制本次失败')
-        .setCta()
-        .onClick(async () => {
-          try {
-            await this.plugin.copyCompactSyncDiagnosticText();
-          } catch (error) {
-            new Notice(`复制诊断信息失败：${error.message || error}`);
-          }
-        }))
-      .addButton((button) => button
-        .setButtonText('复制完整诊断')
-        .onClick(async () => {
-          try {
-            await this.plugin.copySyncDiagnosticText({ detailed: true });
-            new Notice('完整诊断信息已复制');
-          } catch (error) {
-            new Notice(`复制诊断信息失败：${error.message || error}`);
-          }
-        }));
+    this.renderDiagnosticSetting(containerEl);
+    this.renderXArticleSettings(containerEl);
 
     containerEl.createEl('h3', {
       text: '登录设置',
@@ -31859,6 +31985,7 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  WechatInboxSettingTab,
   createDiagnosticId,
   createSyncDiagnosticReporter,
   getBindingFingerprint,

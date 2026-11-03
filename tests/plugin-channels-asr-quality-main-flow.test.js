@@ -57,12 +57,14 @@ function configurePlugin() {
   fs.mkdirSync(installRoot, { recursive: true });
   const inputPath = path.join(installRoot, 'input.mp4');
   fs.writeFileSync(inputPath, 'synthetic media bytes');
-  const command = `/bin/bash "${path.join(installRoot, 'transcribe.sh').replace(/\\/g, '/')}" --input {input} --output {output}`;
+  const transcribeScript = path.join(installRoot, 'transcribe.sh');
+  fs.writeFileSync(transcribeScript, 'TRANSCRIPTION_LANGUAGE="${2:-zh}"');
+  const command = `/bin/bash "${transcribeScript.replace(/\\/g, '/')}" --input {input} --output {output} --language {language}`;
   const plugin = new Plugin();
   plugin.settings = { aiProvider: 'local' };
   plugin.ensureLocalComponentReadyForUse = async () => {};
   plugin.recoverStaleLocalTranscriptionCommand = async () => {};
-  plugin.getLocalAsrInstallStatus = () => ({ scriptOutdated: false, ready: true, ffmpegPath: 'fixture-ffmpeg', whisperPath: 'fixture-whisper', modelPath: 'fixture-model' });
+  plugin.getLocalAsrInstallStatus = () => ({ transcribeScript, scriptOutdated: false, ready: true, ffmpegPath: 'fixture-ffmpeg', whisperPath: 'fixture-whisper', modelPath: 'fixture-model' });
   plugin.getConfiguredLocalAsrInstallRoot = () => installRoot;
   plugin.getConfiguredLocalAsrPlatform = () => 'darwin';
   plugin.getEffectiveLocalTranscriptionCommand = () => command;
@@ -118,16 +120,16 @@ async function run() {
   });
   recoveryResult = verifiedRepeated;
   const directPlugin = configurePlugin();
+  directPlugin.settings.transcriptionLanguage = 'en';
   const direct = await directPlugin.runConfiguredTranscription('https://media.example.test/synthetic.mp4', {
     forceLocal: true,
     sourcePlatform: '视频号',
     retryLocalQualityOnce: true,
-    transcriptionLanguage: 'en',
   });
   assert.equal(direct.transcription, repeatedTranscript, 'verified repeated lines must be preserved exactly');
   assert.equal(direct.transcriptionQualityStatus, 'consistent_repeated_speech_candidate');
   assert.match(direct.transcriptionQualityWarning, /原文已原样保留，建议核对原音频/);
-  assert.equal(recoveryCalls.at(-1).language, 'en', 'explicit transcription language must reach VAD recovery');
+  assert.equal(recoveryCalls.at(-1).language, 'en', 'saved transcription language must reach VAD recovery on the production call path');
 
   const sourceUrl = 'https://channels.weixin.qq.com/platform/synthetic-test';
   const record = {
@@ -155,7 +157,8 @@ async function run() {
   assert.match(complete.metadata.trailingMarkdown, /质量提醒：检测到重复内容；原文已原样保留，建议核对原音频/);
   assert.equal(complete.metadata.url, sourceUrl, 'the original source link must remain attached');
   const renderedNote = Plugin.__test.buildMarkdownForRecord({ record: complete, title: '合成视频', syncedAt: '2026-10-08T00:00:00.000Z', propertyFields: 'title,url,synced_at' });
-  assert.ok(renderedNote.includes(repeatedTranscript), 'the verified repeated wording must be present in the rendered note');
+  const normalizeWhitespace = value => String(value || '').replace(/\s+/g, ' ').trim();
+  assert.ok(normalizeWhitespace(renderedNote).includes(normalizeWhitespace(repeatedTranscript)), 'the verified repeated wording must be present in the rendered note');
   assert.ok(renderedNote.includes(sourceUrl), 'the rendered note must retain the original source link');
   assert.match(renderedNote, /检测到重复内容；原文已原样保留，建议核对原音频/);
   const savedFiles = new Map();
@@ -170,7 +173,7 @@ async function run() {
   const writeResult = await completePlugin.writeRecord(record, '2026-10-08T00:00:00.000Z', null, false, { skipAi: true });
   assert.equal(writeResult.committed, true);
   const savedNote = savedFiles.get(writeResult.filePath);
-  assert.ok(savedNote.includes(repeatedTranscript), 'writeRecord must save the verified repeated wording');
+  assert.ok(normalizeWhitespace(savedNote).includes(normalizeWhitespace(repeatedTranscript)), 'writeRecord must save the verified repeated wording');
   assert.ok(savedNote.includes(sourceUrl), 'writeRecord must save the original source link');
   assert.match(savedNote, /检测到重复内容；原文已原样保留，建议核对原音频/);
 
@@ -233,6 +236,31 @@ async function run() {
   assert.equal(diagnosticPosted, false);
 
   assert.equal(recoveryCalls.length, 6);
+  // Exercise finally on the real core, including cancellation and caller-owned input.
+  for (const outcome of ['success', 'failure', 'cancelled']) {
+    const cleanupPlugin = configurePlugin();
+    const inputPath = path.join(cleanupPlugin.getConfiguredLocalAsrInstallRoot(), 'input.mp4');
+    const outputPath = inputPath + '.txt';
+    const sidecarPath = inputPath + '.segments.json';
+    const controller = new AbortController();
+    asrTimeout.execWithAsrTimeout = (_command, _options, callback) => {
+      setImmediate(() => {
+        fs.writeFileSync(outputPath, partialTranscript);
+        fs.writeFileSync(sidecarPath, JSON.stringify({ chunks: [] }));
+        if (outcome === 'cancelled') controller.abort();
+        callback(outcome === 'failure' ? new Error('synthetic execution failure') : null, '', '');
+      });
+      return { killed: false, kill() { this.killed = true; } };
+    };
+    const pending = cleanupPlugin.runLocalTranscriptionCore('https://media.example.test/synthetic.mp4', {
+      inputPath, signal: controller.signal,
+    });
+    if (outcome === 'success') assert.equal(await pending, partialTranscript);
+    else await assert.rejects(pending);
+    assert.equal(fs.existsSync(inputPath), true, `${outcome}: supplied input must survive`);
+    assert.equal(fs.existsSync(outputPath), false, `${outcome}: transcript output must be removed`);
+    assert.equal(fs.existsSync(sidecarPath), false, `${outcome}: timing sidecar must be removed`);
+  }
   console.log('PASS Channels ASR quality main flow: repeated transcript retained with warning; partial remains failed and review-only; incomplete/ordinary failures stay failed; success body rejected from diagnostics');
 }
 
