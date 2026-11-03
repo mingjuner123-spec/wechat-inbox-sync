@@ -383,7 +383,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.219';
+const PLUGIN_RUNTIME_VERSION = '1.3.220';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3761,16 +3761,19 @@ function normalizeCloudFallbackSubmission(value) {
   const bindingFingerprint = String(value.bindingFingerprint || '').trim().slice(0, 80);
   const clientId = String(value.clientId || '').trim().slice(0, 180);
   const clientRequestId = String(value.clientRequestId || value.idempotencyKey || '').trim().slice(0, 240);
-  if (sourceType !== 'uploaded_file'
-    || !fileID
-    || !isControlledCloudFallbackFileId(fileID)
+    const sourceUrl = String(value.sourceUrl || value.url || '').trim().slice(0, 4096);
+    const isUrlSource = isCloudFallbackUrlSourceType(sourceType);
+    if ((!isUrlSource && (sourceType !== 'uploaded_file'
+      || !fileID
+      || !isControlledCloudFallbackFileId(fileID)))
+      || (isUrlSource && !/^https?:\/\//i.test(sourceUrl))
     || !recordId
     || !bindingFingerprint
     || !clientId
     || !clientRequestId) return null;
   return {
     sourceType,
-    fileID,
+    ...(isUrlSource ? { sourceUrl } : { fileID }),
     recordId,
     bindingFingerprint,
     clientId,
@@ -5268,13 +5271,26 @@ function shouldResolveMediaDownloadUrl(url) {
 }
 
 function isBilibiliUrl(url) {
-  const text = String(url || '').toLowerCase();
-  return text.includes('bilibili.com') || text.includes('b23.tv');
+  try {
+    const parsed = new URL(String(url || '').trim());
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    return /^https?:$/.test(parsed.protocol)
+      && (host === 'b23.tv' || host === 'bilibili.com' || host.endsWith('.bilibili.com'));
+  } catch (_) {
+    return false;
+  }
 }
 
 function isXiaoyuzhouUrl(url) {
-  const text = String(url || '').toLowerCase();
-  return text.includes('xiaoyuzhoufm.com') || text.includes('xiaoyuzhou.com');
+  try {
+    const parsed = new URL(String(url || '').trim());
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    return /^https?:$/.test(parsed.protocol)
+      && (host === 'xiaoyuzhoufm.com' || host.endsWith('.xiaoyuzhoufm.com')
+        || host === 'xiaoyuzhou.com' || host.endsWith('.xiaoyuzhou.com'));
+  } catch (_) {
+    return false;
+  }
 }
 
 const WECHAT_CHANNELS_FEED_INFO_URL = 'https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info';
@@ -19180,8 +19196,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     const sameRequest = (item) => item.bindingFingerprint === submission.bindingFingerprint
       && item.clientId === submission.clientId
       && item.recordId === submission.recordId
-      && item.recordRetryCount === submission.recordRetryCount
-      && item.clientRequestId === submission.clientRequestId;
+      && item.clientRequestId === submission.clientRequestId
+      && item.sourceFingerprint === submission.sourceFingerprint;
     return await this.persistCloudFallbackSubmissions([
       ...submissions.filter((item) => !sameRequest(item)),
       submission,
@@ -19210,11 +19226,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     const clientId = String(this.settings && this.settings.clientId || '').trim();
     const recordId = String(options.recordId || '').trim();
     const recordRetryCount = normalizeCloudFallbackRecordRetryCount(options.retryCount);
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    const sourceFingerprint = String(options.sourceFingerprint || '').trim();
     return normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions)
       .find((item) => item.bindingFingerprint === bindingFingerprint
         && item.clientId === clientId
         && item.recordId === recordId
-        && item.recordRetryCount === recordRetryCount);
+        && (sourceType ? item.sourceType === sourceType : true)
+        && (sourceFingerprint ? item.sourceFingerprint === sourceFingerprint : true)
+        && (isCloudFallbackUrlSourceType(item.sourceType) || item.recordRetryCount === recordRetryCount));
   }
 
   async upsertCloudFallbackJob(value) {
@@ -19337,11 +19357,29 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (isCloudFallbackUrlSourceType(sourceType)) {
       sourceUrl = String(options.sourceUrl || options.url || '').trim();
       const isAcceptedLink = /^https?:\/\//i.test(sourceUrl)
-        && (sourceType === 'douyin_url' ? isDouyinUrl(sourceUrl) : isXiaohongshuUrl(sourceUrl));
+        && (sourceType === 'douyin_url'
+          ? isDouyinUrl(sourceUrl)
+          : sourceType === 'xiaohongshu_url'
+            ? isXiaohongshuUrl(sourceUrl)
+            : sourceType === 'wechat_article'
+              ? isWechatArticleUrl(sourceUrl)
+              : sourceType === 'wechat_channels_url'
+                ? isWechatChannelsUrl(sourceUrl)
+                : sourceType === 'bilibili_url'
+                  ? isBilibiliUrl(sourceUrl)
+                  : isXiaoyuzhouUrl(sourceUrl));
       if (!isAcceptedLink) {
         const error = new Error(sourceType === 'douyin_url'
           ? '云端兜底只接受有效的抖音原始链接'
-          : '云端兜底只接受有效的小红书原始链接');
+          : sourceType === 'xiaohongshu_url'
+            ? '云端兜底只接受有效的小红书原始链接'
+            : sourceType === 'wechat_article'
+              ? '云端兜底只接受有效的公众号原始链接'
+              : sourceType === 'wechat_channels_url'
+                ? '云端兜底只接受有效的视频号原始链接'
+                : sourceType === 'bilibili_url'
+                  ? '云端兜底只接受有效的 B 站原始链接'
+                  : '云端兜底只接受有效的小宇宙原始链接');
         error.code = 'CLOUD_FALLBACK_SOURCE_INVALID';
         throw error;
       }
@@ -19363,6 +19401,9 @@ class WechatObsidianInboxPlugin extends Plugin {
     const retryCount = options.retryCount === undefined && processingContext?.recordSnapshot
       ? getCloudFallbackRecordRetryCount(processingContext.recordSnapshot)
       : Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const pendingSubmission = recordId
+      ? this.findCloudFallbackSubmission({ binding, recordId, retryCount, sourceType, sourceFingerprint })
+      : null;
     const scopedJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs)
       .filter((item) => item.bindingFingerprint === bindingFingerprint
         && item.clientId === clientId
@@ -19382,7 +19423,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       recordId,
       recordRetryCount: retryCount,
       ...(processingContext?.recordSnapshot ? { recordSourceFingerprint: cloudFallbackRecordSourceFingerprint(processingContext.recordSnapshot) } : {}),
-      clientRequestId: this.buildCloudFallbackClientRequestId({
+      clientRequestId: explicitClientRequestId || pendingSubmission && pendingSubmission.clientRequestId || this.buildCloudFallbackClientRequestId({
         ...options,
         sourceType,
         sourceUrl,
@@ -19413,7 +19454,34 @@ class WechatObsidianInboxPlugin extends Plugin {
     // the server accepted the job, the returned ID is persisted and cancelled
     // explicitly below instead of leaving an untracked paid task behind.
     throwIfAborted(options.signal || null);
-    const payload = await this.requestJson('/transcriptions/fallback/jobs', 'POST', requestBody, binding);
+    const submission = recordId ? normalizeCloudFallbackSubmission({
+      sourceType,
+      ...(isCloudFallbackUrlSourceType(sourceType) ? { sourceUrl } : { fileID }),
+      recordId,
+      bindingFingerprint,
+      clientId,
+      sourceFingerprint,
+      clientRequestId: requestBody.clientRequestId,
+      recordRetryCount: retryCount,
+      createdAt: pendingSubmission && pendingSubmission.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }) : null;
+    if (submission) await this.rememberCloudFallbackSubmission(submission);
+    let payload;
+    try {
+      payload = await this.requestJson('/transcriptions/fallback/jobs', 'POST', requestBody, binding);
+    } catch (error) {
+      if (submission && !isCloudFallbackSubmissionUncertain(error)) {
+        await this.clearCloudFallbackSubmission({
+          bindingFingerprint,
+          clientId,
+          recordId,
+          recordRetryCount: retryCount,
+          clientRequestId: requestBody.clientRequestId,
+        });
+      }
+      throw error;
+    }
     const data = payload && payload.data ? payload.data : payload;
     const job = normalizeCloudFallbackJob({
       ...data,
@@ -23228,6 +23296,50 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw error;
   }
 
+  async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || '').trim();
+    if (!isWechatChannelsUrl(pageUrl)) {
+      const error = new Error('运营节点只接受视频号分享链接');
+      error.code = 'OPERATOR_MEDIA_SOURCE_INVALID';
+      error.retryable = false;
+      throw error;
+    }
+    throwIfAborted(signal);
+    const feed = await this.fetchWechatChannelsFeedInfo(pageUrl);
+    const candidates = [];
+    const addCandidate = (url, decryptKey = '') => {
+      const normalizedUrl = normalizeExtractedUrl(url);
+      if (!/^https?:\/\//i.test(normalizedUrl) || candidates.some(item => item.url === normalizedUrl)) return;
+      candidates.push({ url: normalizedUrl, decryptKey: String(decryptKey || '').trim() });
+    };
+    (Array.isArray(feed && feed.mediaItems) ? feed.mediaItems : []).forEach(item => {
+      addCandidate(item && item.url, item && (item.decryptKey || item.decodeKey) || feed.decodeKey);
+    });
+    addCandidate(feed && feed.videoUrl, feed && feed.decodeKey);
+    let lastError = null;
+    for (const candidate of candidates.slice(0, 5)) {
+      throwIfAborted(signal);
+      try {
+        return await this.downloadMediaToTempFile(candidate.url, {
+          sourceUrl: pageUrl,
+          signal,
+          decryptKey: candidate.decryptKey,
+          maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+        });
+      } catch (error) {
+        lastError = error;
+        if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+      }
+    }
+    const error = new Error(candidates.length
+      ? '运营节点无法下载或解密视频号原链接媒体'
+      : '运营节点未从视频号原链接解析到媒体');
+    error.code = candidates.length ? 'OPERATOR_CHANNELS_MEDIA_UNAVAILABLE' : 'OPERATOR_CHANNELS_MEDIA_EMPTY';
+    error.retryable = true;
+    error.cause = lastError || null;
+    throw error;
+  }
+
   /**
    * Operator-node capture for a Douyin graphic note. A note has no media to
    * download, so the answer is the note content itself; a video link returns
@@ -23543,10 +23655,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     let job;
     try {
       job = await this.submitCloudFallbackJob({
-        sourceType: 'uploaded_file',
-        fileID: pending.fileID,
+        sourceType: pending.sourceType,
+        ...(isCloudFallbackUrlSourceType(pending.sourceType)
+          ? { sourceUrl: pending.sourceUrl }
+          : { fileID: pending.fileID }),
         recordId: pending.recordId,
-        retryCount: pending.recordRetryCount,
+        retryCount: options.retryCount === undefined ? pending.recordRetryCount : options.retryCount,
         clientRequestId: pending.clientRequestId,
         title: options.title,
         durationSeconds: options.durationSeconds,
@@ -23619,22 +23733,37 @@ class WechatObsidianInboxPlugin extends Plugin {
         // below turns it into yet another user-retry record. Dead links, a
         // missing local component, and a silent video stay local verdicts —
         // no cloud node can improve any of them.
-        if (isXiaohongshuUrl(xiaohongshuSourceUrl)
+        const sourceUrl = String(options.sourceUrl || '').trim();
+        const fallbackSourceType = isDouyinUrl(sourceUrl)
+          ? 'douyin_url'
+          : (isXiaohongshuUrl(sourceUrl)
+            ? 'xiaohongshu_url'
+            : (isWechatChannelsUrl(sourceUrl)
+              ? 'wechat_channels_url'
+              : (isBilibiliUrl(sourceUrl)
+                ? 'bilibili_url'
+                : (isXiaoyuzhouUrl(sourceUrl) ? 'xiaoyuzhou_url' : ''))));
+
+        // A recoverable local ASR/network error must not short-circuit before
+        // the original platform link reaches the operator plugin. The node
+        // resolves the same link with its own native extractor; do not upload
+        // the user's downloaded media as a substitute.
+        if (fallbackSourceType
           && this.settings.cloudFallbackEnabled === true
           && options.binding
           && !(error && (error.linkExpired === true || error.code === 'XIAOHONGSHU_LINK_UNAVAILABLE'))
           && error && error.transcriptionSetupRequired !== true
           && !isSetupRequired(error)
-          && error.code !== 'TRANSCRIPTION_NO_SPEECH') {
-          const gate = await this.evaluateCloudFallbackUserGate({
-            binding: options.binding,
-            featureName: '小红书云端兜底',
-          });
+          && error.code !== 'TRANSCRIPTION_NO_SPEECH'
+          && !(isAbortError(error) || options.signal?.aborted)) {
+          const gate = await this.evaluateCloudFallbackUserGate(fallbackSourceType === 'douyin_url'
+            ? { binding: options.binding, requireDouyinLogin: true, requireDouyinResolver: true, featureName: '抖音云端兜底' }
+            : { binding: options.binding, featureName: '小红书云端兜底' });
           if (gate.allowed) {
             try {
               const job = await this.submitCloudFallbackJob({
-                sourceType: 'xiaohongshu_url',
-                sourceUrl: xiaohongshuSourceUrl,
+                sourceType: fallbackSourceType,
+                sourceUrl,
                 recordId: options.recordId,
                 retryCount: options.retryCount,
                 title: options.title,
@@ -23656,9 +23785,17 @@ class WechatObsidianInboxPlugin extends Plugin {
             } catch (fallbackError) {
               if (fallbackError && fallbackError.code === 'CLOUD_FALLBACK_QUEUED') throw fallbackError;
               if (isAbortError(fallbackError) || options.signal?.aborted) throw createAbortError();
+              if (isCloudFallbackSubmissionUncertain(fallbackError)) {
+                fallbackError.code = 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN';
+                fallbackError.message = '本地转写失败，云端兜底提交结果暂未确认；重试时会沿用同一链接和幂等请求号，避免重复建单。';
+                throw fallbackError;
+              }
               // Keep the Xiaohongshu content outcome below: a submission
               // problem is not a transcription defect.
             }
+          } else if (gate && gate.message) {
+            error.message = [error.message, gate.message].filter(Boolean).join('；');
+            error.cloudFallbackGateCode = gate.code || '';
           }
         }
 
@@ -23676,7 +23813,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         // A downloaded Douyin candidate is retained only for this failed local
         // attempt. Upload failure deliberately falls through to the original
         // URL submission below, so the backend can resolve fresh media itself.
-        if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true) {
+        if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true
+          && !sourceUrl) {
           let uploadedArtifactReady = false;
           try {
             const uploaded = await this.uploadLocalMediaForCloudFallback(retainedInputPath, {
@@ -25798,6 +25936,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     mediaResolutionDiagnostic = null,
     refreshMediaUrls = null,
     preparedMedia = false,
+    forceLocal = false,
     signal = null,
   }) {
     throwIfAborted(signal);
@@ -25898,13 +26037,18 @@ class WechatObsidianInboxPlugin extends Plugin {
     const candidates = getCandidates();
     if (mediaDiagnosticTrace?.source === 'xiaohongshu-browser') mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
 
-    // The cloud nodes now serve two platform links: Douyin and Xiaohongshu.
-    // Douyin still needs the login and resolver the local attempt was meant to
-    // have; a Xiaohongshu failure is never a Douyin setup gap, so the gate for
-    // it is the plain binding/Pro/component check.
+    // Keep cloud fallback tied to explicit native platform source types. The
+    // Douyin login/resolver gate remains local-user-specific; other eligible
+    // platforms use the ordinary binding/Pro/component checks.
     const fallbackSourceType = isDouyinUrl(url)
       ? 'douyin_url'
-      : (isXiaohongshuUrl(url) ? 'xiaohongshu_url' : '');
+      : (isXiaohongshuUrl(url)
+        ? 'xiaohongshu_url'
+        : (isWechatChannelsUrl(url)
+          ? 'wechat_channels_url'
+          : (isBilibiliUrl(url)
+            ? 'bilibili_url'
+            : (isXiaoyuzhouUrl(url) ? 'xiaoyuzhou_url' : ''))));
     const fallbackGate = (!candidates.length
       && this.settings.cloudFallbackEnabled === true
       && fallbackSourceType
@@ -25923,9 +26067,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             retryCount: record.retryCount,
             title: title || metadata.title || '',
             durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
-            localError: noMediaError || (fallbackSourceType === 'douyin_url'
-              ? '抖音媒体地址获取失败'
-              : '小红书媒体地址获取失败'),
+            localError: noMediaError || `${platform || '平台'}媒体地址获取失败`,
             provider: this.settings.aiProvider || '',
             binding,
             signal,
@@ -26028,7 +26170,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               recordId: getRecordId(record),
               diagnosticAttemptId: mediaDiagnosticTrace?.source === 'xiaohongshu-browser' ? mediaDiagnosticTrace.attemptId : '',
               decryptKey: candidateDecryptKey,
-              forceLocal: platform === '视频号' || metadata.transcriptionMode === 'local',
+              forceLocal: forceLocal === true || platform === '视频号' || metadata.transcriptionMode === 'local',
               sourcePlatform: platform,
               retryLocalQualityOnce: platform === '视频号',
               preserveLocalMediaForCloudFallback: isDouyinUrl(url) && this.settings.cloudFallbackEnabled === true,
@@ -26139,7 +26281,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         && error.transcriptionSetupRequired !== true
         && !isSetupRequired(error)
         && error.code !== 'TRANSCRIPTION_NO_SPEECH')
-        ? await this.evaluateCloudFallbackUserGate({ binding })
+        ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === 'douyin_url'
+          ? { binding, requireDouyinLogin: true, requireDouyinResolver: true }
+          : { binding })
         : null;
       if (fallbackGate && fallbackGate.allowed) {
         try {
@@ -26242,7 +26386,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = '') {
+  async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = '', options = {}) {
     const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
     const html = response.text || '';
     const markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, url);
@@ -26259,6 +26403,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       title,
       sourceTitle: pageMetadata.title,
       socialMetrics: extractSocialMetricsFromHtml(html),
+      forceLocal: options.forceLocal === true,
+      signal: options.signal || null,
     });
   }
 
@@ -26356,7 +26502,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     };
   }
 
-  async hydrateBilibiliTranscript(record, url, binding = null, title = '') {
+  async hydrateBilibiliTranscript(record, url, binding = null, title = '', options = {}) {
     const redirectResult = shouldResolvePlatformRedirect(url)
       ? await resolveRedirectUrlWithDiagnostics(url)
       : { url, diagnostic: null };
@@ -26501,6 +26647,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         sourceTitle,
         socialMetrics: bilibiliSocialMetrics,
         mediaResolutionDiagnostic: diagnostic,
+        forceLocal: options.forceLocal === true,
+        signal: options.signal || null,
       });
     }
 
@@ -26559,6 +26707,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       socialMetrics: bilibiliSocialMetrics,
       mediaResolutionDiagnostic: diagnostic,
       refreshMediaUrls,
+      forceLocal: options.forceLocal === true,
+      signal: options.signal || null,
     });
   }
 

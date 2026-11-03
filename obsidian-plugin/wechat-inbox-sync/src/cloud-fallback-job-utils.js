@@ -267,7 +267,7 @@ function normalizeCloudFallbackAcks(value) {
   }).slice(-100);
 }
 
-const CLOUD_FALLBACK_URL_SOURCE_TYPES = ['douyin_url', 'xiaohongshu_url'];
+const CLOUD_FALLBACK_URL_SOURCE_TYPES = ['douyin_url', 'xiaohongshu_url', 'wechat_article', 'wechat_channels_url', 'bilibili_url', 'xiaoyuzhou_url'];
 const MAX_CLOUD_FALLBACK_CONTENT_MARKDOWN = 400000;
 const MAX_CLOUD_FALLBACK_CONTENT_IMAGES = 60;
 const MAX_CLOUD_FALLBACK_CONTENT_TAGS = 40;

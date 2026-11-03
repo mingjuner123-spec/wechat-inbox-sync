@@ -258,6 +258,72 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   assert.strictEqual(submitPlugin.settings.cloudFallbackJobs[0].bindingFingerprint.length, 32);
   assert.strictEqual(submitPlugin.settings.cloudFallbackJobs[0].clientId, 'client-test-1');
 
+  const articleSubmitPlugin = makePlugin();
+  let articleRequest = null;
+  articleSubmitPlugin.requestJson = async (_path, _method, body) => {
+    articleRequest = body;
+    return { success: true, data: {
+      jobId: 'job-article-1', recordId: 'record-article-1', sourceType: 'wechat_article',
+      sourceUrl: body.sourceUrl, clientRequestId: body.clientRequestId, status: 'queued',
+    } };
+  };
+  await articleSubmitPlugin.submitCloudFallbackJob({
+    sourceType: 'wechat_article',
+    sourceUrl: 'https://mp.weixin.qq.com/s/article-fallback',
+    recordId: 'record-article-1',
+    retryCount: 0,
+    binding: articleSubmitPlugin.settings.bindings[0],
+  });
+  assert.equal(articleRequest.sourceType, 'wechat_article', '公众号原文兜底 must pass the plugin source whitelist');
+  assert.equal(articleRequest.sourceUrl, 'https://mp.weixin.qq.com/s/article-fallback');
+  assert.equal(articleSubmitPlugin.settings.cloudFallbackSubmissions.length, 0, 'accepted source job clears its pending submission');
+
+  const channelsSubmitPlugin = makePlugin();
+  let channelsRequest = null;
+  channelsSubmitPlugin.requestJson = async (_path, _method, body) => {
+    channelsRequest = body;
+    return { success: true, data: {
+      jobId: 'job-channels-1', recordId: 'record-channels-1', sourceType: 'wechat_channels_url',
+      sourceUrl: body.sourceUrl, clientRequestId: body.clientRequestId, status: 'queued',
+    } };
+  };
+  await channelsSubmitPlugin.submitCloudFallbackJob({
+    sourceType: 'wechat_channels_url',
+    sourceUrl: 'https://weixin.qq.com/sph/channels-fallback',
+    recordId: 'record-channels-1', retryCount: 0,
+    binding: channelsSubmitPlugin.settings.bindings[0],
+  });
+  assert.equal(channelsRequest.sourceType, 'wechat_channels_url');
+  assert.equal(channelsRequest.sourceUrl, 'https://weixin.qq.com/sph/channels-fallback');
+  for (const [sourceType, sourceUrl] of [
+    ['bilibili_url', 'https://www.bilibili.com/video/BV1234567890'],
+    ['xiaoyuzhou_url', 'https://www.xiaoyuzhoufm.com/episode/native-fallback'],
+  ]) {
+    const platformPlugin = makePlugin();
+    let acceptedSourceType = '';
+    platformPlugin.requestJson = async (_path, _method, body) => {
+      acceptedSourceType = body.sourceType;
+      return { success: true, data: { jobId: `job-${sourceType}`, recordId: `record-${sourceType}`, sourceType, sourceUrl, clientRequestId: body.clientRequestId, status: 'queued' } };
+    };
+    await platformPlugin.submitCloudFallbackJob({ sourceType, sourceUrl, recordId: `record-${sourceType}`, retryCount: 0, binding: platformPlugin.settings.bindings[0] });
+    assert.equal(acceptedSourceType, sourceType, `${sourceType} uses a platform-specific native worker route`);
+  }
+
+  const channelsAcquirePlugin = Object.create(PluginClass.prototype);
+  const channelsAcquireCalls = [];
+  channelsAcquirePlugin.fetchWechatChannelsFeedInfo = async url => {
+    channelsAcquireCalls.push({ kind: 'feed', url });
+    return { videoUrl: 'https://finder.video.qq.com/media/encrypted.mp4', decodeKey: 'synthetic-key', mediaItems: [] };
+  };
+  channelsAcquirePlugin.downloadMediaToTempFile = async (url, options) => {
+    channelsAcquireCalls.push({ kind: 'download', url, options });
+    return '/tmp/channels-native.mp4';
+  };
+  assert.equal(await channelsAcquirePlugin.acquireOperatorWechatChannelsMediaToTempFile('https://weixin.qq.com/sph/channels-fallback'), '/tmp/channels-native.mp4');
+  assert.equal(channelsAcquireCalls[1].options.decryptKey, 'synthetic-key');
+  assert.equal(channelsAcquireCalls[1].options.sourceUrl, 'https://weixin.qq.com/sph/channels-fallback');
+  await assert.rejects(channelsAcquirePlugin.acquireOperatorWechatChannelsMediaToTempFile('https://evil.example/sph/channels-fallback'), error => error && error.code === 'OPERATOR_MEDIA_SOURCE_INVALID');
+
   const racedSubmitPlugin = makePlugin();
   const racedAbortController = new AbortController();
   const racedRequests = [];
@@ -894,24 +960,24 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   const uploadFlowPlugin = makePlugin();
   uploadFlowPlugin.settings.aiProvider = 'local';
   uploadFlowPlugin.settings.cloudFallbackSubmissions = [];
-  let retainedPathSeen = '';
-  let uploadedFileSeen = null;
+  let uploadAttempted = false;
+  let sourceJobSeen = null;
   uploadFlowPlugin.runLocalTranscription = async (_audioUrl, options) => {
     await options.onInputPathReady(mediaPath);
     throw new Error('本地 ASR 失败');
   };
-  uploadFlowPlugin.uploadLocalMediaForCloudFallback = async (filePath) => {
-    retainedPathSeen = filePath;
-    assert.strictEqual(fs.existsSync(filePath), true, 'failed local ASR must retain media until upload attempt');
+  uploadFlowPlugin.evaluateCloudFallbackUserGate = async () => ({ allowed: true });
+  uploadFlowPlugin.uploadLocalMediaForCloudFallback = async () => {
+    uploadAttempted = true;
     return { fileID: 'cloud://bucket/uploaded-test.mp3' };
   };
   uploadFlowPlugin.submitCloudFallbackJob = async (options) => {
-    uploadedFileSeen = options;
+    sourceJobSeen = options;
     return {
       jobId: 'job-uploaded-test',
       recordId: 'record-uploaded-test',
-      sourceType: 'uploaded_file',
-      fileID: options.fileID,
+      sourceType: 'douyin_url',
+      sourceUrl: options.sourceUrl,
       status: 'queued',
     };
   };
@@ -924,9 +990,61 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     }),
     error => error && error.code === 'CLOUD_FALLBACK_QUEUED',
   );
-  assert.strictEqual(uploadedFileSeen.sourceType, 'uploaded_file');
-  assert.strictEqual(uploadedFileSeen.fileID, 'cloud://bucket/uploaded-test.mp3');
-  assert.strictEqual(fs.existsSync(retainedPathSeen), false, 'retained media must be removed after fallback submission');
+  assert.strictEqual(sourceJobSeen.sourceType, 'douyin_url');
+  assert.strictEqual(sourceJobSeen.sourceUrl, 'https://www.douyin.com/video/uploaded-test');
+  assert.strictEqual(uploadAttempted, false, 'URL-backed fallback must be processed from the original link, without uploading media');
+  assert.strictEqual(fs.existsSync(mediaPath), false, 'temporary local media must be cleaned after local failure');
+
+  const retryableAsrPlugin = makePlugin();
+  retryableAsrPlugin.settings.aiProvider = 'local';
+  retryableAsrPlugin.evaluateCloudFallbackUserGate = async options => {
+    assert.equal(options.requireDouyinLogin, true);
+    assert.equal(options.requireDouyinResolver, true);
+    return { allowed: true };
+  };
+  let retryableSourceJob = null;
+  retryableAsrPlugin.runLocalTranscription = async () => {
+    throw Object.assign(new Error('运营节点 HTTP 请求超时'), { code: 'NODE_HTTP_TIMEOUT', retryable: true });
+  };
+  retryableAsrPlugin.submitCloudFallbackJob = async options => {
+    retryableSourceJob = options;
+    return { jobId: 'job-retryable-asr', sourceType: options.sourceType, sourceUrl: options.sourceUrl, status: 'queued' };
+  };
+  await assert.rejects(retryableAsrPlugin.runConfiguredTranscription('https://cdn.example.test/local-copy.mp4', {
+    sourceUrl: 'https://www.douyin.com/video/retryable-asr',
+    recordId: 'record-retryable-asr',
+    binding: retryableAsrPlugin.settings.bindings[0],
+    preserveLocalMediaForCloudFallback: true,
+  }), error => error && error.code === 'CLOUD_FALLBACK_QUEUED');
+  assert.equal(retryableSourceJob.sourceType, 'douyin_url', 'retryable ASR failure must reach the source-link fallback before the retryable-error short circuit');
+  assert.equal(retryableSourceJob.sourceUrl, 'https://www.douyin.com/video/retryable-asr');
+
+  for (const { sourceType, sourceUrl } of [
+    { sourceType: 'wechat_channels_url', sourceUrl: 'https://weixin.qq.com/sph/stage-two-failure' },
+    { sourceType: 'bilibili_url', sourceUrl: 'https://www.bilibili.com/video/BV-stage-two-failure' },
+    { sourceType: 'xiaoyuzhou_url', sourceUrl: 'https://www.xiaoyuzhoufm.com/episode/stage-two-failure' },
+  ]) {
+    const platformAsrFailurePlugin = makePlugin();
+    platformAsrFailurePlugin.settings.aiProvider = 'local';
+    platformAsrFailurePlugin.settings.cloudFallbackEnabled = true;
+    platformAsrFailurePlugin.runLocalTranscription = async () => {
+      throw Object.assign(new Error('本地 ASR 临时失败'), { code: 'LOCAL_ASR_FAILED', retryable: true });
+    };
+    platformAsrFailurePlugin.evaluateCloudFallbackUserGate = async () => ({ allowed: true });
+    let submittedPlatformFailure = null;
+    platformAsrFailurePlugin.submitCloudFallbackJob = async options => {
+      submittedPlatformFailure = options;
+      return { jobId: `job-${sourceType}-stage-two`, sourceType, sourceUrl, status: 'queued' };
+    };
+    await assert.rejects(platformAsrFailurePlugin.runConfiguredTranscription('https://media.example.test/local-copy.mp4', {
+      sourceUrl,
+      recordId: `record-${sourceType}-stage-two`,
+      retryCount: 0,
+      binding: platformAsrFailurePlugin.settings.bindings[0],
+    }), error => error && error.code === 'CLOUD_FALLBACK_QUEUED', `${sourceType} local ASR failure enters Stage 3`);
+    assert.equal(submittedPlatformFailure.sourceType, sourceType, `${sourceType} keeps its native platform task type`);
+    assert.equal(submittedPlatformFailure.sourceUrl, sourceUrl, `${sourceType} submits the original link, not downloaded media`);
+  }
 
   const noSpeechUploadPlugin = makePlugin();
   noSpeechUploadPlugin.settings.aiProvider = 'local';
@@ -998,8 +1116,10 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     throw new Error('本地 ASR 失败');
   };
   uncertainPlugin.uploadLocalMediaForCloudFallback = async () => ({ fileID: 'cloud://bucket/idempotent.mp3' });
-  uncertainPlugin.requestJson = async (requestPath, method) => {
+  let uncertainRequestBody = null;
+  uncertainPlugin.requestJson = async (requestPath, method, body) => {
     if (requestPath === '/transcriptions/fallback/jobs' && method === 'POST') {
+      uncertainRequestBody = body;
       const error = new Error('服务端暂不可用');
       error.status = 503;
       error.statusCode = 503;
@@ -1017,11 +1137,11 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     }),
     error => error && error.code === 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN',
   );
-  assert.strictEqual(uncertainPlugin.settings.cloudFallbackSubmissions.length, 1, 'uncertain POST must retain the exact uploaded source');
-  const pendingSubmission = uncertainPlugin.settings.cloudFallbackSubmissions[0];
+  assert.strictEqual(uncertainPlugin.settings.cloudFallbackSubmissions.length, 1, 'uncertain URL fallback must persist its idempotency request before the HTTP call');
+  const firstUncertainRequestId = uncertainRequestBody && uncertainRequestBody.clientRequestId;
   const replayPlugin = makePlugin();
-  replayPlugin.settings.cloudFallbackSubmissions = [pendingSubmission];
   replayPlugin.settings.aiProvider = 'local';
+  replayPlugin.settings.cloudFallbackSubmissions = structuredClone(uncertainPlugin.settings.cloudFallbackSubmissions);
   let replayLocalCalled = false;
   let replayBody = null;
   replayPlugin.runLocalTranscription = async () => {
@@ -1035,25 +1155,26 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     return { success: true, data: {
       jobId: 'job-idempotent-replayed',
       recordId: 'record-idempotent',
-      sourceType: 'uploaded_file',
-      fileID: pendingSubmission.fileID,
-      clientRequestId: pendingSubmission.clientRequestId,
+      sourceType: 'douyin_url',
+      sourceUrl: body.sourceUrl,
+      clientRequestId: body.clientRequestId,
       status: 'succeeded',
-      transcription: '按原文件恢复的结果',
+      transcription: '按原链接恢复的结果',
     } };
   };
   const replayed = await replayPlugin.runConfiguredTranscription('https://cdn.example.test/expired.mp4', {
     sourceUrl: 'https://www.douyin.com/video/idempotent',
     recordId: 'record-idempotent',
-    retryCount: 0,
+    retryCount: 1,
     binding: replayPlugin.settings.bindings[0],
     preserveLocalMediaForCloudFallback: true,
   });
-  assert.strictEqual(replayed.transcription, '按原文件恢复的结果');
-  assert.strictEqual(replayLocalCalled, false);
-  assert.strictEqual(replayBody.fileID, pendingSubmission.fileID);
-  assert.strictEqual(replayBody.clientRequestId, pendingSubmission.clientRequestId);
-  assert.strictEqual(replayPlugin.settings.cloudFallbackSubmissions.length, 0);
+  assert.strictEqual(replayed.transcription, '按原链接恢复的结果');
+  assert.strictEqual(replayLocalCalled, false, 'a durable uncertain URL request is recovered before another local transcription attempt');
+  assert.strictEqual(replayBody.sourceType, 'douyin_url');
+  assert.strictEqual(replayBody.recordRetryCount, 1, 'the replay is fenced to the current record generation');
+  assert.strictEqual(replayBody.clientRequestId, firstUncertainRequestId, 'retry after uncertain POST must reuse its persisted URL idempotency key across generations');
+  assert.strictEqual((replayPlugin.settings.cloudFallbackSubmissions || []).length, 0);
 
   const operatorResolutionPlugin = Object.create(PluginClass.prototype);
   const operatorResolutionCalls = [];
@@ -1120,7 +1241,13 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
       return operatorMediaPath;
     },
     getLocalAsrInstallStatus: () => ({ ready: true }),
-    isOperatorLocalAsrAvailable: () => false,
+    isOperatorLocalAsrAvailable: () => true,
+    transcodeCloudFallbackMediaToMp3: async inputPath => ({ path: inputPath, owned: false }),
+    runOperatorLocalTranscription: async (inputPath, options) => {
+      assert.strictEqual(inputPath, operatorMediaPath);
+      assert.strictEqual(options.sourceUrl, operatorJob.sourceUrl);
+      return { transcription: 'operator transcript from original link' };
+    },
   });
   const operator = operatorNode.createOperatorMediaNode({
     plugin: operatorPlugin,
@@ -1180,21 +1307,91 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   await operator.poll();
   await operator.stop();
   await new Promise((resolve) => operatorUploadServer.close(resolve));
-  assert.ok(operatorUpload, 'real worker upload helper must send bytes to the signed URL');
-  assert.strictEqual(operatorUpload.method, 'PUT');
-  assert.deepStrictEqual(operatorUpload.body, Buffer.from('operator-media'));
-  assert.strictEqual(operatorUpload.headers.signature, 'test-signature');
-  assert.strictEqual(mediaCompletions.length, 1, 'worker media complete must atomically advance media to ASR');
-  assert.strictEqual(mediaCompletions[0].uploadId, 'upload-1');
-  assert.strictEqual(mediaCompletions[0].jobId, operatorJob.jobId);
-  assert.strictEqual(genericCompletions.length, 0, 'media completion must not call generic outcome media_ready');
+  assert.strictEqual(operatorUpload, null, 'URL fallback must never upload acquired media to CloudBase');
+  assert.strictEqual(mediaCompletions.length, 0, 'native plugin extraction and ASR complete the job in one worker lease');
+  assert.strictEqual(genericCompletions.length, 1);
+  assert.strictEqual(genericCompletions[0].phase, 'media');
+  assert.strictEqual(genericCompletions[0].outcome, 'succeeded');
+  assert.strictEqual(genericCompletions[0].transcription, 'operator transcript from original link');
   assert.ok(heartbeatBodies.length >= 1);
   assert.ok(heartbeatBodies.every((item) => item.stage === 'acquiring'), 'media heartbeat must use the backend-supported acquiring stage');
   assert.ok(capacityBodies.length >= 1, 'operator must register capacity before claiming work');
-  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article']);
-  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article']);
-  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article']);
+  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
   assert.strictEqual(fs.existsSync(operatorMediaPath), false, 'operator temp media must never remain after completion');
+
+  const channelsOperatorJob = {
+    ...operatorJob,
+    jobId: 'channels-operator-job',
+    sourceType: 'wechat_channels_url',
+    sourceUrl: 'https://weixin.qq.com/sph/operator-channel',
+  };
+  const channelsOperatorCompletions = [];
+  const channelsOperatorPlugin = Object.create(PluginClass.prototype);
+  Object.assign(channelsOperatorPlugin, {
+    acquireOperatorWechatChannelsMediaToTempFile: async sourceUrl => {
+      assert.equal(sourceUrl, channelsOperatorJob.sourceUrl);
+      return operatorMediaPath;
+    },
+    getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'ffmpeg' }),
+    isOperatorLocalAsrAvailable: () => true,
+    transcodeCloudFallbackMediaToMp3: async inputPath => ({ path: inputPath, owned: false }),
+    runOperatorLocalTranscription: async () => ({ transcription: 'video channels operator transcript' }),
+  });
+  const channelsOperator = operatorNode.createOperatorMediaNode({
+    plugin: channelsOperatorPlugin,
+    env: {
+      WECHAT_INBOX_OPERATOR_NODE_ENABLED: '1',
+      WECHAT_INBOX_OPERATOR_NODE_ID: 'channels-operator-node',
+      WECHAT_INBOX_OPERATOR_NODE_TOKEN: 'test-token',
+      WECHAT_INBOX_OPERATOR_NODE_API_BASE: 'https://worker.example.test/sync',
+    },
+    request: async (requestPath, body) => {
+      if (requestPath.endsWith('/claim')) return { jobs: [channelsOperatorJob] };
+      if (requestPath.endsWith('/complete')) { channelsOperatorCompletions.push(body); return { success: true, data: body }; }
+      return { success: true, data: body };
+    },
+  });
+  channelsOperator.start();
+  await channelsOperator.poll();
+  await channelsOperator.stop();
+  assert.equal(channelsOperatorCompletions.length, 1, 'video channel fallback is handled by the native Obsidian node');
+  assert.equal(channelsOperatorCompletions[0].outcome, 'succeeded');
+  assert.equal(channelsOperatorCompletions[0].transcription, 'video channels operator transcript');
+
+  for (const platformCase of [
+    { sourceType: 'bilibili_url', sourceUrl: 'https://www.bilibili.com/video/BV1234567890', method: 'hydrateBilibiliTranscript', platform: 'bilibili' },
+    { sourceType: 'xiaoyuzhou_url', sourceUrl: 'https://www.xiaoyuzhoufm.com/episode/native-worker', method: 'hydrateXiaoyuzhouTranscript', platform: 'xiaoyuzhou' },
+  ]) {
+    const platformJob = { ...channelsOperatorJob, jobId: `${platformCase.platform}-operator-job`, ...platformCase };
+    const platformCompletions = [];
+    const platformPlugin = Object.create(PluginClass.prototype);
+    platformPlugin[platformCase.method] = async (_record, sourceUrl, _binding, _title, options) => {
+      assert.equal(sourceUrl, platformCase.sourceUrl);
+      assert.equal(options.forceLocal, true, 'operator extraction must use plugin-native local ASR');
+      return { metadata: { transcriptionStatus: 'success', transcription: `${platformCase.platform} transcript` } };
+    };
+    const platformNode = operatorNode.createOperatorMediaNode({
+      plugin: platformPlugin,
+      env: {
+        WECHAT_INBOX_OPERATOR_NODE_ENABLED: '1',
+        WECHAT_INBOX_OPERATOR_NODE_ID: `${platformCase.platform}-operator-node`,
+        WECHAT_INBOX_OPERATOR_NODE_TOKEN: 'test-token',
+        WECHAT_INBOX_OPERATOR_NODE_API_BASE: 'https://worker.example.test/sync',
+      },
+      request: async (requestPath, body) => {
+        if (requestPath.endsWith('/claim')) return { jobs: [platformJob] };
+        if (requestPath.endsWith('/complete')) { platformCompletions.push(body); return { success: true, data: body }; }
+        return { success: true, data: body };
+      },
+    });
+    platformNode.start();
+    await platformNode.poll();
+    await platformNode.stop();
+    assert.equal(platformCompletions.length, 1, `${platformCase.platform} original link uses native plugin extraction`);
+    assert.equal(platformCompletions[0].transcription, `${platformCase.platform} transcript`);
+  }
 
   // An idle always-on node backs off geometrically so it does not spend
   // CloudBase quota on an empty queue; claiming work resets the interval.

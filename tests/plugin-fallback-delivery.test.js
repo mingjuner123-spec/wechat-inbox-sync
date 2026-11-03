@@ -57,12 +57,12 @@ async function test(name, run) { await run(); count++; console.log(`PASS ${name}
     assert.equal(body.recordRetryCount, 0); assert.equal(body.recordSourceFingerprint, cloudFallbackRecordSourceFingerprint(record)); assert.equal(result.recordSnapshot.id, record.id); assert.equal(result.syncAttemptId, 'attempt-a');
     assert.equal(p.settings.cloudFallbackJobs[0].recordSnapshot.id, record.id);
   });
-  await test('accepted job persistence error remains queued and never triggers new candidate', async () => {
+  await test('submission idempotency persistence failure prevents an untracked create request', async () => {
     const p = plugin(); let requests = 0;
     p.requestJson = async () => { requests++; return { data: job({ status: 'queued' }) }; };
     p.saveData = async () => { throw Error('disk full'); };
-    await assert.rejects(p.submitCloudFallbackJob({ recordId: record.id, sourceType: 'douyin_url', sourceUrl: record.content, binding }), error => error.code === 'CLOUD_FALLBACK_QUEUED' && error.persistenceWarning);
-    assert.equal(requests, 1);
+    await assert.rejects(p.submitCloudFallbackJob({ recordId: record.id, sourceType: 'douyin_url', sourceUrl: record.content, binding }), /disk full/);
+    assert.equal(requests, 0, 'do not create a remote task until its idempotency key is durable locally');
   });
   await test('clearing submission failure after accepted job is still queued', async () => {
     const p = plugin(); let saved = 0;
@@ -70,7 +70,7 @@ async function test(name, run) { await run(); count++; console.log(`PASS ${name}
     p.saveData = async () => { saved++; };
     p.clearCloudFallbackSubmission = async () => { throw Error('second settings write failed'); };
     await assert.rejects(p.submitCloudFallbackJob({ recordId: record.id, sourceType: 'douyin_url', sourceUrl: record.content, binding }), error => error.code === 'CLOUD_FALLBACK_QUEUED' && error.persistenceWarning);
-    assert.equal(saved, 1); assert.equal(p.settings.cloudFallbackJobs.length, 1);
+    assert.equal(saved, 2); assert.equal(p.settings.cloudFallbackJobs.length, 1);
   });
   await test('earlier same-media success beats later failure, sharing recovery context', async () => {
     const p = plugin([job(), job({ jobId: 'job-last', status: 'failed', transcription: '', updatedAt: '2026-10-28T02:00:00Z', recordSnapshot: { ...record, metadata: { ...record.metadata, cloudFallbackJobId: 'job-last' } } })]);
