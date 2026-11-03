@@ -2735,7 +2735,7 @@ assert.strictEqual(
 assert.strictEqual(
   helpers.mergeSettings({
     localTranscriptionCommand: 'powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output}',
-  }).localTranscriptionCommand,
+  }, 'win32').localTranscriptionCommand,
   'powershell -NoProfile -ExecutionPolicy Bypass -File "%USERPROFILE%\\.wechat-inbox-local-asr\\transcribe.ps1" -InputPath {input} -OutputPath {output} -Language {language}',
 );
 assert.strictEqual(
