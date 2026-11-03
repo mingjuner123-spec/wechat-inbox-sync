@@ -3,7 +3,7 @@ const { cleanTranscriptionTail, formatTranscriptForReading } = require('./readab
 
 const { toSimplifiedChinese, NO_SPEECH_SAVED_MESSAGE, isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
 const { QUALITY_NOTICE_START, QUALITY_NOTICE_END, QUALITY_PARTIAL_NOTICE } = require('./transcription-partial-note-utils');
-const { buildTranscriptSegmentsMarkdown, normalizeTranscriptSegments, transcriptSegmentsCoverText } = require('./transcript-segment-utils');
+const { buildTranscriptSegmentsMarkdown, buildUntimedTranscriptMarkdown, normalizeTranscriptSegments, transcriptSegmentsCoverText } = require('./transcript-segment-utils');
 
 function requireFunction(value, name) {
   if (typeof value !== 'function') {
@@ -44,29 +44,28 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     }
     const isCloudPending = ['queued', 'processing'].includes(status)
       && String(transcriptionSource || '').includes('cloud');
-    const content = formatTranscriptForReading(toSimplifiedChinese(transcription))
+    const rawTranscription = formatTranscriptForReading(toSimplifiedChinese(transcription));
+    const content = rawTranscription
       || (status === 'failed'
         ? `转写失败。${transcriptionError || '未能提取到视频/音频文案。'}`
         : isCloudPending
           ? '云端转写中，下次同步会自动更新。'
           : '转写处理中，或未配置可用的转写方案。');
     const segmentsMarkdown = buildTranscriptSegmentsMarkdown(transcriptionSegments);
-    // Timed segments already contain the text, so the flat copy is only kept
-    // when the segments are missing a substantial part of the transcript. A
-    // producer that returns only segments has no flat text to fall back on;
-    // printing the placeholder above real segments would just be noise.
+    // Use one transcript representation. Prefer timed paragraphs only when
+    // they cover the full text (or are the only transcript returned); partial
+    // segments must not be printed alongside a second, overlapping transcript.
     if (segmentsMarkdown && (
       !String(transcription || '').trim()
       || transcriptSegmentsCoverText(transcriptionSegments, transcription)
     )) {
       return segmentsMarkdown;
     }
+    if (rawTranscription) return buildUntimedTranscriptMarkdown(rawTranscription);
     return [
       '## 口播/音频文案',
       '',
       content,
-      '',
-      segmentsMarkdown,
     ].filter((line) => line !== '').join('\n');
   }
 
@@ -335,17 +334,23 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
       const segmentsMarkdown = buildTranscriptSegmentsMarkdown(metadata.transcriptionSegments || []);
       const hasFullSegments = segmentsMarkdown
         && transcriptSegmentsCoverText(metadata.transcriptionSegments || [], metadata.transcription || '');
+      const useSegments = segmentsMarkdown
+        && (!transcription || hasFullSegments);
+      const untimedTranscript = !useSegments && transcription
+        ? buildUntimedTranscriptMarkdown(transcription)
+        : '';
       return [
         `文件名：${fileName}`,
         attachmentLine,
         fileID ? `云端文件：${fileID}` : '',
         metadata.transcriptionSource ? `转写来源：${metadata.transcriptionSource}` : '',
         '',
-        hasFullSegments ? '' : '## 口播/音频文案',
+        useSegments || untimedTranscript ? '' : '## 口播/音频文案',
         '',
-        hasFullSegments ? '' : content,
+        useSegments || untimedTranscript ? '' : content,
+        untimedTranscript,
         '',
-        segmentsMarkdown,
+        useSegments ? segmentsMarkdown : '',
         '',
       ].filter((line) => line !== '').join('\n');
     }

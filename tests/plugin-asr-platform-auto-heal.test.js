@@ -31,7 +31,7 @@ const migrated = helpers.mergeSettings({
 assert.strictEqual(migrated.localAsrPlatform, 'auto');
 assert.strictEqual(
   migrated.localTranscriptionCommand,
-  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output}',
+  '/bin/bash "$HOME/.wechat-inbox-local-asr/transcribe.sh" --input {input} --output {output} --language {language}',
 );
 assert.strictEqual(helpers.getLocalAsrPlatformMismatchMessage(migrated.localAsrPlatform, 'darwin'), '');
 assert.strictEqual(helpers.shouldPersistAutoLocalAsrPlatform({ localAsrPlatform: 'win32' }), true);

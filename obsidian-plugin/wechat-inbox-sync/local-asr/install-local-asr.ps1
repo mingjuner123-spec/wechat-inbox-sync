@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.33"
+$InstallerScriptVersion = "1.2.34"
 $DownloadResumeVersion = "asr-resume-v1"
 $script:DownloadEvents = @()
 $script:AuthorizedDownloadAssets = @()
@@ -1441,8 +1441,11 @@ try {
   $embeddedTranscribeTemplate = @'
 param(
   [Parameter(Mandatory = $true)][string]$InputPath,
-  [Parameter(Mandatory = $true)][string]$OutputPath
+  [Parameter(Mandatory = $true)][string]$OutputPath,
+  [ValidateSet("zh", "en")][string]$Language = "zh"
 )
+
+$TranscriptionLanguage = $Language
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -1678,6 +1681,12 @@ function ConvertTo-SimplifiedChinese {
   }
 }
 
+function ConvertTo-TranscriptionLanguageText {
+  param([AllowNull()][string]$Text)
+  if ($TranscriptionLanguage -eq "en") { return [string]$Text }
+  return ConvertTo-SimplifiedChinese $Text
+}
+
 function Write-ProgressLog {
   param(
     [Parameter(Mandatory = $true)][string]$Stage,
@@ -1903,7 +1912,7 @@ function Invoke-WhisperChunk {
     "-m", (& $PathForNative $attemptModelPath),
     "-f", (& $PathForNative $ChunkPath),
     "-t", [string]$WhisperThreads,
-    "-l", "zh"
+    "-l", $TranscriptionLanguage
   ) + $ExtraArguments + @(
     "-otxt",
     "-oj",
@@ -1933,7 +1942,7 @@ function Read-WhisperChunkSegments {
   $segments = New-Object System.Collections.Generic.List[object]
   foreach ($item in @($payload.transcription)) {
     if (-not $item) { continue }
-    $text = (ConvertTo-SimplifiedChinese ([string]$item.text)).Trim()
+    $text = (ConvertTo-TranscriptionLanguageText ([string]$item.text)).Trim()
     if (-not $text) { continue }
     $fromMs = [int64]0
     $toMs = [int64]0
@@ -2461,14 +2470,14 @@ function Invoke-RecoverRepeatedChunkText {
     if (Test-Path -LiteralPath $recoverTxt) {
       $recoverText = ([System.IO.File]::ReadAllText($recoverTxt, $Utf8NoBom)).Trim()
       if ($recoverText) {
-        $texts.Add((ConvertTo-SimplifiedChinese $recoverText))
+        $texts.Add((ConvertTo-TranscriptionLanguageText $recoverText))
       }
     }
   }
   return [PSCustomObject]@{
     ExitCode = 0
     Logs = ($logs -join [Environment]::NewLine)
-    Text = (ConvertTo-SimplifiedChinese ($texts -join "`n"))
+    Text = (ConvertTo-TranscriptionLanguageText ($texts -join "`n"))
   }
 }
 
@@ -2580,7 +2589,7 @@ function Invoke-TranscribeAttempt {
     if (Test-Path -LiteralPath $chunkTxt) {
       $text = ([System.IO.File]::ReadAllText($chunkTxt, $Utf8NoBom)).Trim()
       if ($text) {
-        $normalizedText = ConvertTo-SimplifiedChinese $text
+        $normalizedText = ConvertTo-TranscriptionLanguageText $text
         if (Test-TranscriptHasRepeatHallucination $normalizedText) {
           $recoveryTriggered = 1
           $whisperLogs.Add("--- $($chunk.Name) repeat-detected preview ---")
@@ -2659,7 +2668,7 @@ function Invoke-TranscribeAttempt {
     $result.FfmpegExit = $ffmpegExit
     $result.WhisperLogs = ($whisperLogs -join [Environment]::NewLine)
     $result.WhisperExit = $whisperExit
-    $result.Text = ConvertTo-SimplifiedChinese ($mergedText -join "`n`n")
+    $result.Text = ConvertTo-TranscriptionLanguageText ($mergedText -join "`n`n")
     $result | Add-Member -NotePropertyName Segments -NotePropertyValue @($mergedSegments.ToArray()) -Force
     $result | Add-Member -NotePropertyName RecoveryTriggered -NotePropertyValue $recoveryTriggered -Force
     $result | Add-Member -NotePropertyName SkippedRepeatChunks -NotePropertyValue $skippedRepeatChunks -Force
@@ -2772,7 +2781,7 @@ try {
     throw "Whisper did not generate transcript text. See $RunLog"
   }
 
-  $finalText = ConvertTo-SimplifiedChinese $finalAttempt.Text
+  $finalText = ConvertTo-TranscriptionLanguageText $finalAttempt.Text
   [System.IO.File]::WriteAllText($OutputPath, $finalText, $Utf8NoBom)
   $segmentsPath = [System.IO.Path]::ChangeExtension($OutputPath, ".segments.json")
   $finalSegments = @()
@@ -2786,7 +2795,7 @@ try {
     }
     $segmentsPayload = [PSCustomObject]@{
       version = 1
-      language = "zh"
+      language = $TranscriptionLanguage
       chunkSeconds = $ChunkSeconds
       speakers = $speakerCount
       segments = $finalSegments
@@ -2825,7 +2834,7 @@ try {
   Write-Host "speaker diarization: $(if ($diarizationInstalled) { 'installed' } else { 'unavailable' })"
   Write-Host "Local ASR installed to: $InstallRoot"
   Write-Host "Use this Obsidian plugin command:"
-  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output}"
+  Write-Host "powershell -NoProfile -ExecutionPolicy Bypass -File `"$InstallRoot\transcribe.ps1`" -InputPath {input} -OutputPath {output} -Language {language}"
 } catch {
   $originalInstallError = $_
   try { Restore-TranscribeScriptUpdate -State $transcribeScriptUpdate }

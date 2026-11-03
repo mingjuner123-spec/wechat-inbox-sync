@@ -58,7 +58,7 @@ wi_asr_prep() {
   result = replaceExactlyOnce(result, '  wait "$native_pid" || native_exit=$?', '  wait "$native_pid" || native_exit=$?\n  if [ "$wi_prep" = 1 ]; then /bin/rmdir "$WI_ASR_GATE" || return 75; fi');
   return result;
 }
-function prepareStartupAttempt({ platform = process.platform, managed, installRoot, installerSource, commandTemplate, inputPath, outputPath, timeoutMs = ASR_STARTUP_TIMEOUT_MS, now = () => Number(process.hrtime.bigint() / 1000000n) } = {}) {
+function prepareStartupAttempt({ platform = process.platform, managed, installRoot, installerSource, commandTemplate, inputPath, outputPath, language = 'zh', timeoutMs = ASR_STARTUP_TIMEOUT_MS, now = () => Number(process.hrtime.bigint() / 1000000n) } = {}) {
   const evidence = { status: 'skipped', reason: 'unsupported_platform', timeoutMs: ASR_STARTUP_TIMEOUT_MS, permissionGranted: false, nativeStartStatus: 'unknown', elapsedIdleMs: 0 };
   const skipped = reason => ({ enabled: false, evidence: Object.assign(evidence, { reason }), dispose() {} });
   if (platform !== 'darwin') return skipped('unsupported_platform');
@@ -76,7 +76,7 @@ function prepareStartupAttempt({ platform = process.platform, managed, installRo
     // Never silently drop custom shell operations, flags or substitutions.
     const commandPath = installRoot.replace(/\\/g, '/') + '/transcribe.sh';
     const homePath = '$HOME/' + path.relative(os.homedir(), installRoot).replace(/\\/g, '/') + '/transcribe.sh';
-    const accepted = [commandPath, homePath].map(p => `/bin/bash "${p}" --input {input} --output {output}`);
+    const accepted = [commandPath, homePath].map(p => `/bin/bash "${p}" --input {input} --output {output} --language {language}`);
     if (!accepted.includes(commandTemplate)) return skipped('unknown_command_template');
     directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-asr-startup-'));
     const instrumented = instrumentManagedScript(source, { installRoot, directory });
@@ -93,7 +93,7 @@ function prepareStartupAttempt({ platform = process.platform, managed, installRo
     const exists = file => { try { fs.lstatSync(file); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
     return {
       enabled: true, evidence, directory,
-      command: `/bin/bash ${quote(temporaryScript.replace(/\\/g, '/'))} --input ${quote(inputPath.replace(/\\/g, '/'))} --output ${quote(outputPath.replace(/\\/g, '/'))}`,
+      command: `/bin/bash ${quote(temporaryScript.replace(/\\/g, '/'))} --input ${quote(inputPath.replace(/\\/g, '/'))} --output ${quote(outputPath.replace(/\\/g, '/'))} --language ${language === 'en' ? 'en' : 'zh'}`,
       observeGrant() {
         try { if (exists(started)) {
           evidence.status = 'permission_granted'; evidence.reason = 'wrapper_won_atomic_gate'; evidence.permissionGranted = true;

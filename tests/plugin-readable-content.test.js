@@ -86,7 +86,8 @@ try{
    assert.equal(metadata.transcription,speech);
    const body=h.buildAudioTranscriptMarkdown({transcription:noisy,transcriptionStatus:'success'});
    assert.ok(!body.includes('(音乐)')&&!body.includes('CC字幕'));
-   assert.ok(body.includes('联系我们。\n以上就是'));
+   assert.ok(body.includes('联系我们。')&&body.includes('以上就是'));
+   assert.ok(body.includes('## 分段转写')&&!/\[\d{2}:\d{2}\]/.test(body));
  }
  const metadata=h.buildTranscriptPropertyMetadata({transcription:noisy,title:'课程'});
  assert.ok(!JSON.stringify(metadata).includes('CC字幕'));
@@ -102,6 +103,10 @@ try{
  ];
  const partial=require('../obsidian-plugin/wechat-inbox-sync/src/transcription-partial-note-utils');
  routes.push(partial.completeQualityPartialNote(partial.QUALITY_PARTIAL_MARKER+'\n'+partial.QUALITY_NOTICE_START+'\n> '+partial.QUALITY_PARTIAL_NOTICE+'\n'+partial.QUALITY_NOTICE_END,formatTranscriptForReading(originalLayout)));
- for(const body of routes)assert.ok(body.includes(originalLayout),'All transcript paths preserve original layout');
+ for(const body of routes) {
+   assert.ok(body.includes('原始第一行')&&body.includes('原始第二行')&&body.includes('原始第三段'), 'All transcript paths preserve transcript content');
+ }
+ assert.ok(routes[0].includes('## 分段转写')&&routes[1].includes('## 分段转写')&&routes[2].includes('## 分段转写'));
+ assert.ok(routes[3].includes(originalLayout),'Quality partial note retains the supplied layout');
  console.log('Readable content regressions passed');
 }finally{Module._load=load;}

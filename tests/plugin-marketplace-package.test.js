@@ -356,7 +356,7 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.33"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.34"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'));
 assert.ok(windowsInstaller.includes('$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsAuthorizedUrls = @($env:WECHAT_INBOX_ASR_WHISPER_URL)'));
@@ -412,7 +412,7 @@ assert.ok(windowsInstaller.includes('$WhisperModelFileName = "ggml-small.bin"'),
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('-C - -o $OutFile'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.33"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.34"'));
 assert.strictEqual(windowsInstaller.includes('tcloudbaseapp.com'), false, 'Windows ASR must never embed the public CloudBase static domain');
 assert.ok(windowsInstaller.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
 assert.strictEqual(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'), false);
@@ -820,7 +820,7 @@ assert.ok(macInstaller.includes('ASR_PACKAGE_REQUIREMENTS=("whisper.cpp-cli==0.0
 assert.ok(macInstaller.includes('install_asr_packages "$VENV_PYTHON"'));
 assert.ok(macInstaller.indexOf('if install_asr_packages_from_wheelhouse') < macInstaller.indexOf('Authorized ASR wheelhouse unavailable; trying Tencent PyPI mirror.'));
 assert.ok(macInstaller.includes('INSTALL_STATE_PATH="$INSTALL_ROOT/.install-state.json"'));
-assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.14"'));
+assert.ok(macInstaller.includes('INSTALLER_SCRIPT_VERSION="1.3.15"'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_LIMIT=65536'));
 assert.ok(macInstaller.includes('DOWNLOAD_LOW_SPEED_TIME=30'));
 assert.ok(macInstaller.includes('--speed-limit "$DOWNLOAD_LOW_SPEED_LIMIT"'));
