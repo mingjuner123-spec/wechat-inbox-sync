@@ -14832,7 +14832,7 @@ var require_cloud_fallback_job_utils = __commonJS({
       }).slice(-100);
     }
     __name(normalizeCloudFallbackAcks2, "normalizeCloudFallbackAcks");
-    var CLOUD_FALLBACK_URL_SOURCE_TYPES = ["douyin_url", "xiaohongshu_url"];
+    var CLOUD_FALLBACK_URL_SOURCE_TYPES = ["douyin_url", "xiaohongshu_url", "wechat_article", "wechat_channels_url", "bilibili_url", "xiaoyuzhou_url"];
     var MAX_CLOUD_FALLBACK_CONTENT_MARKDOWN = 4e5;
     var MAX_CLOUD_FALLBACK_CONTENT_IMAGES = 60;
     var MAX_CLOUD_FALLBACK_CONTENT_TAGS = 40;
@@ -15283,6 +15283,9 @@ var require_operator_media_node = __commonJS({
     var DEFAULT_CAPABILITIES = Object.freeze(["media_acquire", "local_asr"]);
     var XIAOHONGSHU_CAPABILITY = "xiaohongshu";
     var WECHAT_ARTICLE_CAPABILITY = "wechat_article";
+    var WECHAT_CHANNELS_CAPABILITY = "wechat_channels";
+    var BILIBILI_CAPABILITY = "bilibili";
+    var XIAOYUZHOU_CAPABILITY = "xiaoyuzhou";
     var MEDIA_TRANSCODE_CAPABILITY = "media_transcode";
     var DEFAULT_POLL_INTERVAL_MS = 15e3;
     var DEFAULT_MAX_IDLE_POLL_INTERVAL_MS = 12e4;
@@ -15481,12 +15484,50 @@ var require_operator_media_node = __commonJS({
       }
     }
     __name(isWechatArticleSourceUrl, "isWechatArticleSourceUrl");
+    function isWechatChannelsSourceUrl(value) {
+      try {
+        const url = new URL(String(value || "").trim());
+        if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
+        return /^channels\.weixin\.qq\.com$/i.test(url.hostname) || /^weixin\.qq\.com$/i.test(url.hostname) && /^\/sph\//i.test(url.pathname);
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isWechatChannelsSourceUrl, "isWechatChannelsSourceUrl");
+    function hasOfficialHost(value, domains) {
+      try {
+        const url = new URL(String(value || "").trim());
+        if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
+        const host = url.hostname.toLowerCase().replace(/\.$/, "");
+        return domains.some((domain) => host === domain || host.endsWith(`.${domain}`));
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(hasOfficialHost, "hasOfficialHost");
+    function isBilibiliSourceUrl(value) {
+      try {
+        const url = new URL(String(value || "").trim());
+        const host = url.hostname.toLowerCase().replace(/\.$/, "");
+        return /^https?:$/.test(url.protocol) && !url.username && !url.password && (host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com"));
+      } catch (_) {
+        return false;
+      }
+    }
+    __name(isBilibiliSourceUrl, "isBilibiliSourceUrl");
+    function isXiaoyuzhouSourceUrl(value) {
+      return hasOfficialHost(value, ["xiaoyuzhoufm.com", "xiaoyuzhou.com"]);
+    }
+    __name(isXiaoyuzhouSourceUrl, "isXiaoyuzhouSourceUrl");
     function resolveMediaSourcePlatform(job) {
       const sourceType = String(job && job.sourceType || "").trim().toLowerCase();
       const sourceUrl = String(job && job.sourceUrl || "").trim();
       if (sourceType === "douyin_url" && isDouyinSourceUrl(sourceUrl)) return "douyin";
       if (sourceType === "xiaohongshu_url" && isXiaohongshuSourceUrl(sourceUrl)) return "xiaohongshu";
       if (sourceType === "wechat_article" && isWechatArticleSourceUrl(sourceUrl)) return "wechat_article";
+      if (sourceType === "wechat_channels_url" && isWechatChannelsSourceUrl(sourceUrl)) return "wechat_channels";
+      if (sourceType === "bilibili_url" && isBilibiliSourceUrl(sourceUrl)) return "bilibili";
+      if (sourceType === "xiaoyuzhou_url" && isXiaoyuzhouSourceUrl(sourceUrl)) return "xiaoyuzhou";
       return "";
     }
     __name(resolveMediaSourcePlatform, "resolveMediaSourcePlatform");
@@ -15582,6 +15623,47 @@ var require_operator_media_node = __commonJS({
       const complete = /* @__PURE__ */ __name(async (job, body) => {
         return await callApi("/transcriptions/fallback/worker/complete", { ...baseForJob(job), ...body }, { signal: null });
       }, "complete");
+      const transcribeCapturedMedia = /* @__PURE__ */ __name(async (job, inputPath) => {
+        if (!plugin || typeof plugin.transcodeCloudFallbackMediaToMp3 !== "function" || typeof plugin.runOperatorLocalTranscription !== "function" && typeof plugin.runLocalTranscription !== "function") {
+          throw nodeError("OPERATOR_ASR_HANDLER_UNAVAILABLE", "运营节点本地转写能力未就绪", { retryable: true });
+        }
+        if (typeof plugin.isOperatorLocalAsrAvailable === "function" && !plugin.isOperatorLocalAsrAvailable()) {
+          throw nodeError("OPERATOR_ASR_BUSY", "运营节点本地转写正忙", { retryable: true });
+        }
+        const prepared = await plugin.transcodeCloudFallbackMediaToMp3(inputPath, { signal: activeController.signal });
+        const asrPath = String(prepared && prepared.path || "").trim();
+        if (!asrPath) throw nodeError("OPERATOR_MEDIA_TRANSCODE_EMPTY", "运营节点未准备好本地转写音频", { retryable: true });
+        try {
+          activeJob.stage = "acquiring";
+          activeJob.progress = 55;
+          const runLocalAsr = typeof plugin.runOperatorLocalTranscription === "function" ? plugin.runOperatorLocalTranscription.bind(plugin) : plugin.runLocalTranscription.bind(plugin);
+          const result = await runLocalAsr(asrPath, {
+            inputPath: asrPath,
+            signal: activeController.signal,
+            includeQualityDetails: true,
+            recordId: "",
+            sourceUrl: String(job && job.sourceUrl || ""),
+            operatorNode: true
+          });
+          const transcription = String(result && typeof result === "object" ? result.transcription : result || "").trim();
+          if (!transcription) throw nodeError("OPERATOR_ASR_EMPTY", "运营节点本地转写结果为空", { retryable: true });
+          activeJob.progress = 100;
+          stopHeartbeat();
+          return await complete(job, {
+            phase: "media",
+            backend: "local_whisper_cpp",
+            outcome: "succeeded",
+            transcription
+          });
+        } finally {
+          if (prepared && prepared.owned === true && asrPath !== inputPath) {
+            try {
+              await fs2.promises.rm(asrPath, { force: true });
+            } catch (_) {
+            }
+          }
+        }
+      }, "transcribeCapturedMedia");
       const rejectedCapabilities = /* @__PURE__ */ new Set();
       const getCapabilities = /* @__PURE__ */ __name(() => {
         const capabilities = ["media_acquire"];
@@ -15599,6 +15681,11 @@ var require_operator_media_node = __commonJS({
         if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY) && plugin && typeof plugin.acquireOperatorWechatArticleContent === "function") {
           capabilities.push(WECHAT_ARTICLE_CAPABILITY);
         }
+        if (!rejectedCapabilities.has(WECHAT_CHANNELS_CAPABILITY) && plugin && typeof plugin.acquireOperatorWechatChannelsMediaToTempFile === "function") {
+          capabilities.push(WECHAT_CHANNELS_CAPABILITY);
+        }
+        if (!rejectedCapabilities.has(BILIBILI_CAPABILITY) && plugin && typeof plugin.hydrateBilibiliTranscript === "function") capabilities.push(BILIBILI_CAPABILITY);
+        if (!rejectedCapabilities.has(XIAOYUZHOU_CAPABILITY) && plugin && typeof plugin.hydrateXiaoyuzhouTranscript === "function") capabilities.push(XIAOYUZHOU_CAPABILITY);
         try {
           if (!rejectedCapabilities.has("local_asr") && plugin && typeof plugin.getLocalAsrInstallStatus === "function" && plugin.getLocalAsrInstallStatus().ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
         } catch (_) {
@@ -15611,7 +15698,7 @@ var require_operator_media_node = __commonJS({
             return await send();
           } catch (error) {
             if (!error || error.code !== "WORKER_CAPABILITY_FORBIDDEN") throw error;
-            const candidate = [XIAOHONGSHU_CAPABILITY, "local_asr"].find((capability) => getCapabilities().includes(capability));
+            const candidate = [XIAOHONGSHU_CAPABILITY, WECHAT_ARTICLE_CAPABILITY, WECHAT_CHANNELS_CAPABILITY, BILIBILI_CAPABILITY, XIAOYUZHOU_CAPABILITY, "local_asr"].find((capability) => getCapabilities().includes(capability));
             if (!candidate) throw error;
             rejectedCapabilities.add(candidate);
             lastErrorCode = "WORKER_CAPABILITY_DOWNGRADED";
@@ -15718,11 +15805,10 @@ var require_operator_media_node = __commonJS({
         activeJob = { phase, backend: String(job.backend || "").trim(), stage: "acquiring", progress: 5 };
         startHeartbeat(job);
         let tempPath = "";
-        let mediaCompletionAttempted = false;
         try {
           await heartbeat(job, "acquiring", 5);
           if (phase === "media" && mediaPlatform === "xiaohongshu") {
-            if (!plugin || typeof plugin.acquireOperatorXiaohongshuContent !== "function" || typeof plugin.uploadWorkerMediaForJob !== "function") {
+            if (!plugin || typeof plugin.acquireOperatorXiaohongshuContent !== "function") {
               throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点小红书抓取能力未就绪", { retryable: true });
             }
             const acquired = await plugin.acquireOperatorXiaohongshuContent(job.sourceUrl, { signal: activeController.signal });
@@ -15741,20 +15827,7 @@ var require_operator_media_node = __commonJS({
             if (!videoPath) throw nodeError("OPERATOR_XIAOHONGSHU_EMPTY", "运营节点未取得小红书视频文件", { retryable: true });
             tempPath = videoPath;
             activeJob.progress = 45;
-            const uploadedXiaohongshu = await plugin.uploadWorkerMediaForJob(tempPath, job, {
-              signal: activeController.signal,
-              workerConfig: config,
-              request: callApi,
-              beforeComplete: /* @__PURE__ */ __name(() => {
-                mediaCompletionAttempted = true;
-                stopHeartbeat();
-              }, "beforeComplete")
-            });
-            activeJob.progress = 100;
-            stopHeartbeat();
-            const xiaohongshuCompletion = uploadedXiaohongshu && uploadedXiaohongshu.completion;
-            if (!xiaohongshuCompletion) throw nodeError("OPERATOR_MEDIA_COMPLETE_INVALID", "运营节点媒体上传未完成", { retryable: true });
-            return xiaohongshuCompletion;
+            return await transcribeCapturedMedia(job, tempPath);
           }
           if (phase === "media" && mediaPlatform === "wechat_article") {
             if (!plugin || typeof plugin.acquireOperatorWechatArticleContent !== "function") {
@@ -15769,8 +15842,43 @@ var require_operator_media_node = __commonJS({
             stopHeartbeat();
             return await complete(job, { phase: "media", outcome: "succeeded", content: articleContent });
           }
+          if (phase === "media" && mediaPlatform === "wechat_channels") {
+            if (!plugin || typeof plugin.acquireOperatorWechatChannelsMediaToTempFile !== "function") {
+              throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点视频号原生提取能力未就绪", { retryable: true });
+            }
+            tempPath = await plugin.acquireOperatorWechatChannelsMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
+            if (!tempPath) throw nodeError("OPERATOR_MEDIA_ACQUIRE_EMPTY", "运营节点未能从视频号原链接获取媒体", { retryable: true });
+            activeJob.progress = 45;
+            return await transcribeCapturedMedia(job, tempPath);
+          }
+          if (phase === "media" && ["bilibili", "xiaoyuzhou"].includes(mediaPlatform)) {
+            const methodName = mediaPlatform === "bilibili" ? "hydrateBilibiliTranscript" : "hydrateXiaoyuzhouTranscript";
+            if (!plugin || typeof plugin[methodName] !== "function") {
+              throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点原生平台提取能力未就绪", { retryable: true });
+            }
+            const sourceUrl = String(job.sourceUrl || "").trim();
+            const sourceRecord = {
+              _id: String(job.recordId || job.jobId),
+              type: "webpage",
+              content: sourceUrl,
+              metadata: { url: sourceUrl, title: String(job.title || ""), platform: mediaPlatform === "bilibili" ? "B站" : "小宇宙" }
+            };
+            const result2 = await plugin[methodName](sourceRecord, sourceUrl, null, String(job.title || ""), {
+              signal: activeController.signal,
+              forceLocal: true,
+              operatorNode: true
+            });
+            const metadata = result2 && result2.metadata && typeof result2.metadata === "object" ? result2.metadata : {};
+            const transcription2 = String(metadata.transcription || "").trim();
+            if (metadata.transcriptionStatus !== "success" || !transcription2) {
+              throw nodeError("OPERATOR_NATIVE_TRANSCRIPTION_FAILED", String(metadata.transcriptionError || "运营节点原生平台转写未成功"), { retryable: true });
+            }
+            activeJob.progress = 100;
+            stopHeartbeat();
+            return await complete(job, { phase: "media", backend: "local_whisper_cpp", outcome: "succeeded", transcription: transcription2 });
+          }
           if (phase === "media") {
-            if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== "function" || typeof plugin.uploadWorkerMediaForJob !== "function") {
+            if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== "function") {
               throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点媒体能力未就绪", { retryable: true });
             }
             if (typeof plugin.acquireOperatorDouyinNoteContent === "function") {
@@ -15789,20 +15897,7 @@ var require_operator_media_node = __commonJS({
             }
             tempPath = await plugin.acquireOperatorDouyinMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
             activeJob.progress = 45;
-            const uploaded = await plugin.uploadWorkerMediaForJob(tempPath, job, {
-              signal: activeController.signal,
-              workerConfig: config,
-              request: callApi,
-              beforeComplete: /* @__PURE__ */ __name(() => {
-                mediaCompletionAttempted = true;
-                stopHeartbeat();
-              }, "beforeComplete")
-            });
-            activeJob.progress = 100;
-            stopHeartbeat();
-            const completedPayload = uploaded && uploaded.completion;
-            if (!completedPayload) throw nodeError("OPERATOR_MEDIA_COMPLETE_INVALID", "运营节点媒体上传未完成", { retryable: true });
-            return completedPayload;
+            return await transcribeCapturedMedia(job, tempPath);
           }
           if (!plugin || typeof plugin.downloadMediaToTempFile !== "function" || typeof plugin.runOperatorLocalTranscription !== "function" && typeof plugin.runLocalTranscription !== "function") {
             throw nodeError("OPERATOR_ASR_HANDLER_UNAVAILABLE", "运营节点本地转写能力未就绪", { retryable: true });
@@ -15841,7 +15936,6 @@ var require_operator_media_node = __commonJS({
           });
         } catch (error) {
           lastErrorCode = redactError(error).code;
-          if (phase === "media" && mediaCompletionAttempted) throw error;
           try {
             return await complete(job, failBody(error, activeJob && activeJob.stage, { shutdown: stopRequested }));
           } catch (completionError) {
@@ -22800,7 +22894,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.219";
+var PLUGIN_RUNTIME_VERSION = "1.3.220";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -25513,10 +25607,12 @@ function normalizeCloudFallbackSubmission(value) {
   const bindingFingerprint = String(value.bindingFingerprint || "").trim().slice(0, 80);
   const clientId = String(value.clientId || "").trim().slice(0, 180);
   const clientRequestId = String(value.clientRequestId || value.idempotencyKey || "").trim().slice(0, 240);
-  if (sourceType !== "uploaded_file" || !fileID || !isControlledCloudFallbackFileId(fileID) || !recordId || !bindingFingerprint || !clientId || !clientRequestId) return null;
+  const sourceUrl = String(value.sourceUrl || value.url || "").trim().slice(0, 4096);
+  const isUrlSource = isCloudFallbackUrlSourceType(sourceType);
+  if (!isUrlSource && (sourceType !== "uploaded_file" || !fileID || !isControlledCloudFallbackFileId(fileID)) || isUrlSource && !/^https?:\/\//i.test(sourceUrl) || !recordId || !bindingFingerprint || !clientId || !clientRequestId) return null;
   return {
     sourceType,
-    fileID,
+    ...isUrlSource ? { sourceUrl } : { fileID },
     recordId,
     bindingFingerprint,
     clientId,
@@ -26840,13 +26936,23 @@ function shouldResolveMediaDownloadUrl(url) {
 }
 __name(shouldResolveMediaDownloadUrl, "shouldResolveMediaDownloadUrl");
 function isBilibiliUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("bilibili.com") || text.includes("b23.tv");
+  try {
+    const parsed = new URL(String(url || "").trim());
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    return /^https?:$/.test(parsed.protocol) && (host === "b23.tv" || host === "bilibili.com" || host.endsWith(".bilibili.com"));
+  } catch (_) {
+    return false;
+  }
 }
 __name(isBilibiliUrl, "isBilibiliUrl");
 function isXiaoyuzhouUrl(url) {
-  const text = String(url || "").toLowerCase();
-  return text.includes("xiaoyuzhoufm.com") || text.includes("xiaoyuzhou.com");
+  try {
+    const parsed = new URL(String(url || "").trim());
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    return /^https?:$/.test(parsed.protocol) && (host === "xiaoyuzhoufm.com" || host.endsWith(".xiaoyuzhoufm.com") || host === "xiaoyuzhou.com" || host.endsWith(".xiaoyuzhou.com"));
+  } catch (_) {
+    return false;
+  }
 }
 __name(isXiaoyuzhouUrl, "isXiaoyuzhouUrl");
 var WECHAT_CHANNELS_FEED_INFO_URL = "https://channels.weixin.qq.com/finder-preview/api/feed/get_feed_info";
@@ -39348,7 +39454,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const submission = normalizeCloudFallbackSubmission(value);
     if (!submission) throw new Error("云端兜底待提交记录无效");
     const submissions = normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions);
-    const sameRequest = /* @__PURE__ */ __name((item) => item.bindingFingerprint === submission.bindingFingerprint && item.clientId === submission.clientId && item.recordId === submission.recordId && item.recordRetryCount === submission.recordRetryCount && item.clientRequestId === submission.clientRequestId, "sameRequest");
+    const sameRequest = /* @__PURE__ */ __name((item) => item.bindingFingerprint === submission.bindingFingerprint && item.clientId === submission.clientId && item.recordId === submission.recordId && item.clientRequestId === submission.clientRequestId && item.sourceFingerprint === submission.sourceFingerprint, "sameRequest");
     return await this.persistCloudFallbackSubmissions([
       ...submissions.filter((item) => !sameRequest(item)),
       submission
@@ -39371,7 +39477,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const clientId = String(this.settings && this.settings.clientId || "").trim();
     const recordId = String(options.recordId || "").trim();
     const recordRetryCount = normalizeCloudFallbackRecordRetryCount(options.retryCount);
-    return normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions).find((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId && item.recordId === recordId && item.recordRetryCount === recordRetryCount);
+    const sourceType = normalizeCloudFallbackSourceType(options.sourceType);
+    const sourceFingerprint = String(options.sourceFingerprint || "").trim();
+    return normalizeCloudFallbackSubmissions(this.settings && this.settings.cloudFallbackSubmissions).find((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId && item.recordId === recordId && (sourceType ? item.sourceType === sourceType : true) && (sourceFingerprint ? item.sourceFingerprint === sourceFingerprint : true) && (isCloudFallbackUrlSourceType(item.sourceType) || item.recordRetryCount === recordRetryCount));
   }
   async upsertCloudFallbackJob(value) {
     const job = normalizeCloudFallbackJob(value);
@@ -39474,9 +39582,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     let fileID = "";
     if (isCloudFallbackUrlSourceType(sourceType)) {
       sourceUrl = String(options.sourceUrl || options.url || "").trim();
-      const isAcceptedLink = /^https?:\/\//i.test(sourceUrl) && (sourceType === "douyin_url" ? isDouyinUrl(sourceUrl) : isXiaohongshuUrl(sourceUrl));
+      const isAcceptedLink = /^https?:\/\//i.test(sourceUrl) && (sourceType === "douyin_url" ? isDouyinUrl(sourceUrl) : sourceType === "xiaohongshu_url" ? isXiaohongshuUrl(sourceUrl) : sourceType === "wechat_article" ? isWechatArticleUrl(sourceUrl) : sourceType === "wechat_channels_url" ? isWechatChannelsUrl(sourceUrl) : sourceType === "bilibili_url" ? isBilibiliUrl(sourceUrl) : isXiaoyuzhouUrl(sourceUrl));
       if (!isAcceptedLink) {
-        const error = new Error(sourceType === "douyin_url" ? "云端兜底只接受有效的抖音原始链接" : "云端兜底只接受有效的小红书原始链接");
+        const error = new Error(sourceType === "douyin_url" ? "云端兜底只接受有效的抖音原始链接" : sourceType === "xiaohongshu_url" ? "云端兜底只接受有效的小红书原始链接" : sourceType === "wechat_article" ? "云端兜底只接受有效的公众号原始链接" : sourceType === "wechat_channels_url" ? "云端兜底只接受有效的视频号原始链接" : sourceType === "bilibili_url" ? "云端兜底只接受有效的 B 站原始链接" : "云端兜底只接受有效的小宇宙原始链接");
         error.code = "CLOUD_FALLBACK_SOURCE_INVALID";
         throw error;
       }
@@ -39496,6 +39604,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     });
     const processingContext = ((_a = this.currentProcessingContext) == null ? void 0 : _a.recordId) === recordId ? this.currentProcessingContext : null;
     const retryCount = options.retryCount === void 0 && (processingContext == null ? void 0 : processingContext.recordSnapshot) ? getCloudFallbackRecordRetryCount(processingContext.recordSnapshot) : Math.max(0, Math.floor(Number(options.retryCount) || 0));
+    const pendingSubmission = recordId ? this.findCloudFallbackSubmission({ binding, recordId, retryCount, sourceType, sourceFingerprint }) : null;
     const scopedJobs = normalizeCloudFallbackJobs(this.settings && this.settings.cloudFallbackJobs).filter((item) => item.bindingFingerprint === bindingFingerprint && item.clientId === clientId && item.recordId === recordId && item.sourceType === sourceType && item.sourceFingerprint === sourceFingerprint && isCloudFallbackJobForRecord(item, { retryCount }));
     const hasCancelledJob = scopedJobs.some((item) => item.status === "cancelled");
     const explicitClientRequestId = String(options.clientRequestId || options.idempotencyKey || "").trim();
@@ -39509,7 +39618,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       recordId,
       recordRetryCount: retryCount,
       ...(processingContext == null ? void 0 : processingContext.recordSnapshot) ? { recordSourceFingerprint: cloudFallbackRecordSourceFingerprint(processingContext.recordSnapshot) } : {},
-      clientRequestId: this.buildCloudFallbackClientRequestId({
+      clientRequestId: explicitClientRequestId || pendingSubmission && pendingSubmission.clientRequestId || this.buildCloudFallbackClientRequestId({
         ...options,
         sourceType,
         sourceUrl,
@@ -39537,7 +39646,34 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       message: "本地转写不可用，正在提交云端兜底任务"
     });
     throwIfAborted(options.signal || null);
-    const payload = await this.requestJson("/transcriptions/fallback/jobs", "POST", requestBody, binding);
+    const submission = recordId ? normalizeCloudFallbackSubmission({
+      sourceType,
+      ...isCloudFallbackUrlSourceType(sourceType) ? { sourceUrl } : { fileID },
+      recordId,
+      bindingFingerprint,
+      clientId,
+      sourceFingerprint,
+      clientRequestId: requestBody.clientRequestId,
+      recordRetryCount: retryCount,
+      createdAt: pendingSubmission && pendingSubmission.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }) : null;
+    if (submission) await this.rememberCloudFallbackSubmission(submission);
+    let payload;
+    try {
+      payload = await this.requestJson("/transcriptions/fallback/jobs", "POST", requestBody, binding);
+    } catch (error) {
+      if (submission && !isCloudFallbackSubmissionUncertain(error)) {
+        await this.clearCloudFallbackSubmission({
+          bindingFingerprint,
+          clientId,
+          recordId,
+          recordRetryCount: retryCount,
+          clientRequestId: requestBody.clientRequestId
+        });
+      }
+      throw error;
+    }
     const data = payload && payload.data ? payload.data : payload;
     const job = normalizeCloudFallbackJob({
       ...data,
@@ -43103,6 +43239,47 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     error.retryable = true;
     throw error;
   }
+  async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || "").trim();
+    if (!isWechatChannelsUrl(pageUrl)) {
+      const error2 = new Error("运营节点只接受视频号分享链接");
+      error2.code = "OPERATOR_MEDIA_SOURCE_INVALID";
+      error2.retryable = false;
+      throw error2;
+    }
+    throwIfAborted(signal);
+    const feed = await this.fetchWechatChannelsFeedInfo(pageUrl);
+    const candidates = [];
+    const addCandidate = /* @__PURE__ */ __name((url, decryptKey = "") => {
+      const normalizedUrl = normalizeExtractedUrl(url);
+      if (!/^https?:\/\//i.test(normalizedUrl) || candidates.some((item) => item.url === normalizedUrl)) return;
+      candidates.push({ url: normalizedUrl, decryptKey: String(decryptKey || "").trim() });
+    }, "addCandidate");
+    (Array.isArray(feed && feed.mediaItems) ? feed.mediaItems : []).forEach((item) => {
+      addCandidate(item && item.url, item && (item.decryptKey || item.decodeKey) || feed.decodeKey);
+    });
+    addCandidate(feed && feed.videoUrl, feed && feed.decodeKey);
+    let lastError = null;
+    for (const candidate of candidates.slice(0, 5)) {
+      throwIfAborted(signal);
+      try {
+        return await this.downloadMediaToTempFile(candidate.url, {
+          sourceUrl: pageUrl,
+          signal,
+          decryptKey: candidate.decryptKey,
+          maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES
+        });
+      } catch (error2) {
+        lastError = error2;
+        if (isAbortError(error2) || signal && signal.aborted) throw createAbortError();
+      }
+    }
+    const error = new Error(candidates.length ? "运营节点无法下载或解密视频号原链接媒体" : "运营节点未从视频号原链接解析到媒体");
+    error.code = candidates.length ? "OPERATOR_CHANNELS_MEDIA_UNAVAILABLE" : "OPERATOR_CHANNELS_MEDIA_EMPTY";
+    error.retryable = true;
+    error.cause = lastError || null;
+    throw error;
+  }
   /**
    * Operator-node capture for a Douyin graphic note. A note has no media to
    * download, so the answer is the note content itself; a video link returns
@@ -43397,10 +43574,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     let job;
     try {
       job = await this.submitCloudFallbackJob({
-        sourceType: "uploaded_file",
-        fileID: pending.fileID,
+        sourceType: pending.sourceType,
+        ...isCloudFallbackUrlSourceType(pending.sourceType) ? { sourceUrl: pending.sourceUrl } : { fileID: pending.fileID },
         recordId: pending.recordId,
-        retryCount: pending.recordRetryCount,
+        retryCount: options.retryCount === void 0 ? pending.recordRetryCount : options.retryCount,
         clientRequestId: pending.clientRequestId,
         title: options.title,
         durationSeconds: options.durationSeconds,
@@ -43428,7 +43605,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     var _a;
     const provider = this.settings.aiProvider;
     const runLocalWithCloudFallback = /* @__PURE__ */ __name(async ({ sourcePrefix = "", includeQualityDetails = false } = {}) => {
-      var _a2, _b, _c;
+      var _a2, _b, _c, _d;
       const preserveLocalMedia = options.preserveLocalMediaForCloudFallback === true;
       let retainedInputPath = "";
       const localOptions = {
@@ -43458,16 +43635,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         if (isAbortError(error) && !isRetryableTranscriptionError(error) || ((_a2 = options.signal) == null ? void 0 : _a2.aborted)) throw createAbortError();
         const xiaohongshuSourceUrl = String(options.sourceUrl || "").trim();
         const isXiaohongshuFailure = isXiaohongshuUrl(xiaohongshuSourceUrl) || isXiaohongshuMediaUrl(audioUrl) || isRetryableXiaohongshuContentError(error);
-        if (isXiaohongshuUrl(xiaohongshuSourceUrl) && this.settings.cloudFallbackEnabled === true && options.binding && !(error && (error.linkExpired === true || error.code === "XIAOHONGSHU_LINK_UNAVAILABLE")) && error && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH") {
-          const gate = await this.evaluateCloudFallbackUserGate({
-            binding: options.binding,
-            featureName: "小红书云端兜底"
-          });
+        const sourceUrl = String(options.sourceUrl || "").trim();
+        const fallbackSourceType = isDouyinUrl(sourceUrl) ? "douyin_url" : isXiaohongshuUrl(sourceUrl) ? "xiaohongshu_url" : isWechatChannelsUrl(sourceUrl) ? "wechat_channels_url" : isBilibiliUrl(sourceUrl) ? "bilibili_url" : isXiaoyuzhouUrl(sourceUrl) ? "xiaoyuzhou_url" : "";
+        if (fallbackSourceType && this.settings.cloudFallbackEnabled === true && options.binding && !(error && (error.linkExpired === true || error.code === "XIAOHONGSHU_LINK_UNAVAILABLE")) && error && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" && !(isAbortError(error) || ((_b = options.signal) == null ? void 0 : _b.aborted))) {
+          const gate = await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding: options.binding, requireDouyinLogin: true, requireDouyinResolver: true, featureName: "抖音云端兜底" } : { binding: options.binding, featureName: "小红书云端兜底" });
           if (gate.allowed) {
             try {
               const job = await this.submitCloudFallbackJob({
-                sourceType: "xiaohongshu_url",
-                sourceUrl: xiaohongshuSourceUrl,
+                sourceType: fallbackSourceType,
+                sourceUrl,
                 recordId: options.recordId,
                 retryCount: options.retryCount,
                 title: options.title,
@@ -43488,8 +43664,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
               throw createCloudFallbackPendingError(job, error && error.message);
             } catch (fallbackError) {
               if (fallbackError && fallbackError.code === "CLOUD_FALLBACK_QUEUED") throw fallbackError;
-              if (isAbortError(fallbackError) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw createAbortError();
+              if (isAbortError(fallbackError) || ((_c = options.signal) == null ? void 0 : _c.aborted)) throw createAbortError();
+              if (isCloudFallbackSubmissionUncertain(fallbackError)) {
+                fallbackError.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
+                fallbackError.message = "本地转写失败，云端兜底提交结果暂未确认；重试时会沿用同一链接和幂等请求号，避免重复建单。";
+                throw fallbackError;
+              }
             }
+          } else if (gate && gate.message) {
+            error.message = [error.message, gate.message].filter(Boolean).join("；");
+            error.cloudFallbackGateCode = gate.code || "";
           }
         }
         if (error.transcriptionSetupRequired || error.code === "TRANSCRIPTION_NO_SPEECH") throw error;
@@ -43498,7 +43682,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           throw error;
         }
         if (isRetryableTranscriptionError(error)) throw error;
-        if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true) {
+        if (preserveLocalMedia && retainedInputPath && this.settings.cloudFallbackEnabled === true && !sourceUrl) {
           let uploadedArtifactReady = false;
           try {
             const uploaded = await this.uploadLocalMediaForCloudFallback(retainedInputPath, {
@@ -43558,7 +43742,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             throw createCloudFallbackPendingError(job, error && error.message);
           } catch (fallbackError) {
             if (fallbackError && fallbackError.code === "CLOUD_FALLBACK_QUEUED") throw fallbackError;
-            if (isAbortError(fallbackError) || ((_c = options.signal) == null ? void 0 : _c.aborted)) throw createAbortError();
+            if (isAbortError(fallbackError) || ((_d = options.signal) == null ? void 0 : _d.aborted)) throw createAbortError();
             if (uploadedArtifactReady && isCloudFallbackSubmissionUncertain(fallbackError)) {
               fallbackError.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
               throw fallbackError;
@@ -45447,6 +45631,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     mediaResolutionDiagnostic = null,
     refreshMediaUrls = null,
     preparedMedia = false,
+    forceLocal = false,
     signal = null
   }) {
     throwIfAborted(signal);
@@ -45534,7 +45719,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const getCandidates = /* @__PURE__ */ __name(() => (preparedMedia ? Array.from(candidateMap.keys()) : sortMediaUrlsForTranscription(Array.from(candidateMap.keys()))).map((candidateUrl) => candidateMap.get(candidateUrl)).filter(Boolean), "getCandidates");
     const candidates = getCandidates();
     if ((mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser") mediaDiagnosticTrace.mediaCandidateCount = candidates.length;
-    const fallbackSourceType = isDouyinUrl(url) ? "douyin_url" : isXiaohongshuUrl(url) ? "xiaohongshu_url" : "";
+    const fallbackSourceType = isDouyinUrl(url) ? "douyin_url" : isXiaohongshuUrl(url) ? "xiaohongshu_url" : isWechatChannelsUrl(url) ? "wechat_channels_url" : isBilibiliUrl(url) ? "bilibili_url" : isXiaoyuzhouUrl(url) ? "xiaoyuzhou_url" : "";
     const fallbackGate = !candidates.length && this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding, requireDouyinLogin: true, requireDouyinResolver: true } : { binding }) : null;
     if (!candidates.length) {
       if (fallbackGate && fallbackGate.allowed) {
@@ -45546,7 +45731,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             retryCount: record.retryCount,
             title: title || metadata.title || "",
             durationSeconds: Number(metadata.durationSeconds || metadata.duration || 0) || null,
-            localError: noMediaError || (fallbackSourceType === "douyin_url" ? "抖音媒体地址获取失败" : "小红书媒体地址获取失败"),
+            localError: noMediaError || `${platform || "平台"}媒体地址获取失败`,
             provider: this.settings.aiProvider || "",
             binding,
             signal
@@ -45635,7 +45820,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             recordId: getRecordId(record),
             diagnosticAttemptId: (mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser" ? mediaDiagnosticTrace.attemptId : "",
             decryptKey: candidateDecryptKey,
-            forceLocal: platform === "视频号" || metadata.transcriptionMode === "local",
+            forceLocal: forceLocal === true || platform === "视频号" || metadata.transcriptionMode === "local",
             sourcePlatform: platform,
             retryLocalQualityOnce: platform === "视频号",
             preserveLocalMediaForCloudFallback: isDouyinUrl(url) && this.settings.cloudFallbackEnabled === true,
@@ -45733,7 +45918,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw error;
       }
       let finalError = error;
-      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate({ binding }) : null;
+      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding, requireDouyinLogin: true, requireDouyinResolver: true } : { binding }) : null;
       if (fallbackGate2 && fallbackGate2.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
@@ -45822,7 +46007,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       };
     }
   }
-  async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = "") {
+  async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = "", options = {}) {
     const response = await requestUrl({ url, method: "GET", headers: getSocialRequestHeaders(url) });
     const html = response.text || "";
     const markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, url);
@@ -45838,7 +46023,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       binding,
       title,
       sourceTitle: pageMetadata.title,
-      socialMetrics: extractSocialMetricsFromHtml(html)
+      socialMetrics: extractSocialMetricsFromHtml(html),
+      forceLocal: options.forceLocal === true,
+      signal: options.signal || null
     });
   }
   async requestBilibiliResourceViaNode(url, headers = {}, options = {}) {
@@ -45928,7 +46115,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       subtitleUrl: ""
     };
   }
-  async hydrateBilibiliTranscript(record, url, binding = null, title = "") {
+  async hydrateBilibiliTranscript(record, url, binding = null, title = "", options = {}) {
     const redirectResult = shouldResolvePlatformRedirect(url) ? await resolveRedirectUrlWithDiagnostics(url) : { url, diagnostic: null };
     const resolvedUrl = redirectResult.url || url;
     const requestedPageNumber = extractBilibiliPageNumber(resolvedUrl || url);
@@ -46056,7 +46243,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         title,
         sourceTitle,
         socialMetrics: bilibiliSocialMetrics,
-        mediaResolutionDiagnostic: diagnostic
+        mediaResolutionDiagnostic: diagnostic,
+        forceLocal: options.forceLocal === true,
+        signal: options.signal || null
       });
     }
     if (bvid && cid) {
@@ -46107,7 +46296,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       sourceTitle,
       socialMetrics: bilibiliSocialMetrics,
       mediaResolutionDiagnostic: diagnostic,
-      refreshMediaUrls
+      refreshMediaUrls,
+      forceLocal: options.forceLocal === true,
+      signal: options.signal || null
     });
   }
   async prepareWechatChannelsMedia(record, url, binding = null, title = "", options = {}) {

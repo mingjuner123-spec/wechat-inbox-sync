@@ -131,21 +131,23 @@ async function run() {
     assert.deepEqual(submissions, []);
   }
 
-  // 5. The added branch is Xiaohongshu-only: a Douyin failure keeps its own
-  // route and never masquerades as a Xiaohongshu submission.
+  // 5. A retryable Douyin ASR failure must submit its original link through
+  // the Douyin-specific gate, not upload the locally acquired media.
   {
     const plugin = fixture();
     plugin.runLocalTranscription = async () => { throw new Error('whisper failed'); };
-    stubGate(plugin, { allowed: true });
+    const gateCalls = stubGate(plugin, { allowed: true });
     const submissions = stubSubmit(plugin, { status: 'succeeded', transcription: '不应出现' });
-    await assert.rejects(
-      plugin.runConfiguredTranscription('https://v3-web.douyinvod.com/one.mp4', {
-        sourceUrl: DOUYIN_URL,
-        binding: { token: 'PRO-1' },
-      }),
-      /whisper failed/,
-    );
-    assert.deepEqual(submissions, [], 'the Xiaohongshu branch must not fire for Douyin');
+    const result = await plugin.runConfiguredTranscription('https://v3-web.douyinvod.com/one.mp4', {
+      sourceUrl: DOUYIN_URL,
+      binding: { token: 'PRO-1' },
+    });
+    assert.equal(result.transcription, '不应出现');
+    assert.equal(gateCalls[0].requireDouyinLogin, true);
+    assert.equal(gateCalls[0].requireDouyinResolver, true);
+    assert.equal(submissions.length, 1);
+    assert.equal(submissions[0].sourceType, 'douyin_url');
+    assert.equal(submissions[0].sourceUrl, DOUYIN_URL);
   }
 
   // 6. No media candidate at all: the cloud answer for a graphic note is the

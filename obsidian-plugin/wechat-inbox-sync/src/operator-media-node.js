@@ -14,6 +14,9 @@ const DEFAULT_CAPABILITIES = Object.freeze(['media_acquire', 'local_asr']);
 // and the deployment's node registry accepted the capability.
 const XIAOHONGSHU_CAPABILITY = 'xiaohongshu';
 const WECHAT_ARTICLE_CAPABILITY = 'wechat_article';
+const WECHAT_CHANNELS_CAPABILITY = 'wechat_channels';
+const BILIBILI_CAPABILITY = 'bilibili';
+const XIAOYUZHOU_CAPABILITY = 'xiaoyuzhou';
 const MEDIA_TRANSCODE_CAPABILITY = 'media_transcode';
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 // An idle node backs off to one claim per two minutes. This stays well under
@@ -227,12 +230,52 @@ function isWechatArticleSourceUrl(value) {
   }
 }
 
+function isWechatChannelsSourceUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
+    return /^channels\.weixin\.qq\.com$/i.test(url.hostname)
+      || (/^weixin\.qq\.com$/i.test(url.hostname) && /^\/sph\//i.test(url.pathname));
+  } catch (_) {
+    return false;
+  }
+}
+
+function hasOfficialHost(value, domains) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return false;
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    return domains.some(domain => host === domain || host.endsWith(`.${domain}`));
+  } catch (_) {
+    return false;
+  }
+}
+
+function isBilibiliSourceUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    return /^https?:$/.test(url.protocol) && !url.username && !url.password
+      && (host === 'b23.tv' || host === 'bilibili.com' || host.endsWith('.bilibili.com'));
+  } catch (_) {
+    return false;
+  }
+}
+
+function isXiaoyuzhouSourceUrl(value) {
+  return hasOfficialHost(value, ['xiaoyuzhoufm.com', 'xiaoyuzhou.com']);
+}
+
 function resolveMediaSourcePlatform(job) {
   const sourceType = String(job && job.sourceType || '').trim().toLowerCase();
   const sourceUrl = String(job && job.sourceUrl || '').trim();
   if (sourceType === 'douyin_url' && isDouyinSourceUrl(sourceUrl)) return 'douyin';
   if (sourceType === 'xiaohongshu_url' && isXiaohongshuSourceUrl(sourceUrl)) return 'xiaohongshu';
   if (sourceType === 'wechat_article' && isWechatArticleSourceUrl(sourceUrl)) return 'wechat_article';
+  if (sourceType === 'wechat_channels_url' && isWechatChannelsSourceUrl(sourceUrl)) return 'wechat_channels';
+  if (sourceType === 'bilibili_url' && isBilibiliSourceUrl(sourceUrl)) return 'bilibili';
+  if (sourceType === 'xiaoyuzhou_url' && isXiaoyuzhouSourceUrl(sourceUrl)) return 'xiaoyuzhou';
   return '';
 }
 
@@ -330,6 +373,49 @@ function createOperatorMediaNode({
   const complete = async (job, body) => {
     return await callApi('/transcriptions/fallback/worker/complete', { ...baseForJob(job), ...body }, { signal: null });
   };
+  const transcribeCapturedMedia = async (job, inputPath) => {
+    if (!plugin || typeof plugin.transcodeCloudFallbackMediaToMp3 !== 'function'
+      || (typeof plugin.runOperatorLocalTranscription !== 'function' && typeof plugin.runLocalTranscription !== 'function')) {
+      throw nodeError('OPERATOR_ASR_HANDLER_UNAVAILABLE', '运营节点本地转写能力未就绪', { retryable: true });
+    }
+    if (typeof plugin.isOperatorLocalAsrAvailable === 'function' && !plugin.isOperatorLocalAsrAvailable()) {
+      throw nodeError('OPERATOR_ASR_BUSY', '运营节点本地转写正忙', { retryable: true });
+    }
+    const prepared = await plugin.transcodeCloudFallbackMediaToMp3(inputPath, { signal: activeController.signal });
+    const asrPath = String(prepared && prepared.path || '').trim();
+    if (!asrPath) throw nodeError('OPERATOR_MEDIA_TRANSCODE_EMPTY', '运营节点未准备好本地转写音频', { retryable: true });
+    try {
+      activeJob.stage = 'acquiring';
+      activeJob.progress = 55;
+      const runLocalAsr = typeof plugin.runOperatorLocalTranscription === 'function'
+        ? plugin.runOperatorLocalTranscription.bind(plugin)
+        : plugin.runLocalTranscription.bind(plugin);
+      const result = await runLocalAsr(asrPath, {
+        inputPath: asrPath,
+        signal: activeController.signal,
+        includeQualityDetails: true,
+        recordId: '',
+        sourceUrl: String(job && job.sourceUrl || ''),
+        operatorNode: true,
+      });
+      const transcription = String(result && typeof result === 'object' ? result.transcription : result || '').trim();
+      if (!transcription) throw nodeError('OPERATOR_ASR_EMPTY', '运营节点本地转写结果为空', { retryable: true });
+      activeJob.progress = 100;
+      stopHeartbeat();
+      // URL jobs are completed by the Obsidian plugin node itself. The media
+      // stays on that node; only the Markdown transcript returns to CloudBase.
+      return await complete(job, {
+        phase: 'media',
+        backend: 'local_whisper_cpp',
+        outcome: 'succeeded',
+        transcription,
+      });
+    } finally {
+      if (prepared && prepared.owned === true && asrPath !== inputPath) {
+        try { await fs.promises.rm(asrPath, { force: true }); } catch (_) { /* Best-effort temp cleanup. */ }
+      }
+    }
+  };
   // Optional capabilities are negotiated, never assumed. A deployment whose
   // node registry predates one of them rejects the whole worker request
   // (WORKER_CAPABILITY_FORBIDDEN), which would take the node offline the moment
@@ -356,6 +442,14 @@ function createOperatorMediaNode({
       && plugin && typeof plugin.acquireOperatorWechatArticleContent === 'function') {
       capabilities.push(WECHAT_ARTICLE_CAPABILITY);
     }
+    if (!rejectedCapabilities.has(WECHAT_CHANNELS_CAPABILITY)
+      && plugin && typeof plugin.acquireOperatorWechatChannelsMediaToTempFile === 'function') {
+      capabilities.push(WECHAT_CHANNELS_CAPABILITY);
+    }
+    if (!rejectedCapabilities.has(BILIBILI_CAPABILITY)
+      && plugin && typeof plugin.hydrateBilibiliTranscript === 'function') capabilities.push(BILIBILI_CAPABILITY);
+    if (!rejectedCapabilities.has(XIAOYUZHOU_CAPABILITY)
+      && plugin && typeof plugin.hydrateXiaoyuzhouTranscript === 'function') capabilities.push(XIAOYUZHOU_CAPABILITY);
     try {
       if (!rejectedCapabilities.has('local_asr')
         && plugin && typeof plugin.getLocalAsrInstallStatus === 'function'
@@ -370,7 +464,7 @@ function createOperatorMediaNode({
         return await send();
       } catch (error) {
         if (!error || error.code !== 'WORKER_CAPABILITY_FORBIDDEN') throw error;
-        const candidate = [XIAOHONGSHU_CAPABILITY, 'local_asr']
+        const candidate = [XIAOHONGSHU_CAPABILITY, WECHAT_ARTICLE_CAPABILITY, WECHAT_CHANNELS_CAPABILITY, BILIBILI_CAPABILITY, XIAOYUZHOU_CAPABILITY, 'local_asr']
           .find((capability) => getCapabilities().includes(capability));
         if (!candidate) throw error;
         rejectedCapabilities.add(candidate);
@@ -475,11 +569,10 @@ function createOperatorMediaNode({
     activeJob = { phase, backend: String(job.backend || '').trim(), stage: 'acquiring', progress: 5 };
     startHeartbeat(job);
     let tempPath = '';
-    let mediaCompletionAttempted = false;
     try {
       await heartbeat(job, 'acquiring', 5);
       if (phase === 'media' && mediaPlatform === 'xiaohongshu') {
-        if (!plugin || typeof plugin.acquireOperatorXiaohongshuContent !== 'function' || typeof plugin.uploadWorkerMediaForJob !== 'function') {
+        if (!plugin || typeof plugin.acquireOperatorXiaohongshuContent !== 'function') {
           throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点小红书抓取能力未就绪', { retryable: true });
         }
         const acquired = await plugin.acquireOperatorXiaohongshuContent(job.sourceUrl, { signal: activeController.signal });
@@ -501,20 +594,7 @@ function createOperatorMediaNode({
         if (!videoPath) throw nodeError('OPERATOR_XIAOHONGSHU_EMPTY', '运营节点未取得小红书视频文件', { retryable: true });
         tempPath = videoPath;
         activeJob.progress = 45;
-        const uploadedXiaohongshu = await plugin.uploadWorkerMediaForJob(tempPath, job, {
-          signal: activeController.signal,
-          workerConfig: config,
-          request: callApi,
-          beforeComplete: () => {
-            mediaCompletionAttempted = true;
-            stopHeartbeat();
-          },
-        });
-        activeJob.progress = 100;
-        stopHeartbeat();
-        const xiaohongshuCompletion = uploadedXiaohongshu && uploadedXiaohongshu.completion;
-        if (!xiaohongshuCompletion) throw nodeError('OPERATOR_MEDIA_COMPLETE_INVALID', '运营节点媒体上传未完成', { retryable: true });
-        return xiaohongshuCompletion;
+        return await transcribeCapturedMedia(job, tempPath);
       }
       if (phase === 'media' && mediaPlatform === 'wechat_article') {
         if (!plugin || typeof plugin.acquireOperatorWechatArticleContent !== 'function') {
@@ -529,8 +609,43 @@ function createOperatorMediaNode({
         stopHeartbeat();
         return await complete(job, { phase: 'media', outcome: 'succeeded', content: articleContent });
       }
+      if (phase === 'media' && mediaPlatform === 'wechat_channels') {
+        if (!plugin || typeof plugin.acquireOperatorWechatChannelsMediaToTempFile !== 'function') {
+          throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点视频号原生提取能力未就绪', { retryable: true });
+        }
+        tempPath = await plugin.acquireOperatorWechatChannelsMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
+        if (!tempPath) throw nodeError('OPERATOR_MEDIA_ACQUIRE_EMPTY', '运营节点未能从视频号原链接获取媒体', { retryable: true });
+        activeJob.progress = 45;
+        return await transcribeCapturedMedia(job, tempPath);
+      }
+      if (phase === 'media' && ['bilibili', 'xiaoyuzhou'].includes(mediaPlatform)) {
+        const methodName = mediaPlatform === 'bilibili' ? 'hydrateBilibiliTranscript' : 'hydrateXiaoyuzhouTranscript';
+        if (!plugin || typeof plugin[methodName] !== 'function') {
+          throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点原生平台提取能力未就绪', { retryable: true });
+        }
+        const sourceUrl = String(job.sourceUrl || '').trim();
+        const sourceRecord = {
+          _id: String(job.recordId || job.jobId),
+          type: 'webpage',
+          content: sourceUrl,
+          metadata: { url: sourceUrl, title: String(job.title || ''), platform: mediaPlatform === 'bilibili' ? 'B站' : '小宇宙' },
+        };
+        const result = await plugin[methodName](sourceRecord, sourceUrl, null, String(job.title || ''), {
+          signal: activeController.signal,
+          forceLocal: true,
+          operatorNode: true,
+        });
+        const metadata = result && result.metadata && typeof result.metadata === 'object' ? result.metadata : {};
+        const transcription = String(metadata.transcription || '').trim();
+        if (metadata.transcriptionStatus !== 'success' || !transcription) {
+          throw nodeError('OPERATOR_NATIVE_TRANSCRIPTION_FAILED', String(metadata.transcriptionError || '运营节点原生平台转写未成功'), { retryable: true });
+        }
+        activeJob.progress = 100;
+        stopHeartbeat();
+        return await complete(job, { phase: 'media', backend: 'local_whisper_cpp', outcome: 'succeeded', transcription });
+      }
       if (phase === 'media') {
-        if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== 'function' || typeof plugin.uploadWorkerMediaForJob !== 'function') {
+        if (!plugin || typeof plugin.acquireOperatorDouyinMediaToTempFile !== 'function') {
           throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点媒体能力未就绪', { retryable: true });
         }
         // A Douyin graphic note has no media to download; its answer is the
@@ -551,20 +666,7 @@ function createOperatorMediaNode({
         }
         tempPath = await plugin.acquireOperatorDouyinMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
         activeJob.progress = 45;
-        const uploaded = await plugin.uploadWorkerMediaForJob(tempPath, job, {
-          signal: activeController.signal,
-          workerConfig: config,
-          request: callApi,
-          beforeComplete: () => {
-            mediaCompletionAttempted = true;
-            stopHeartbeat();
-          },
-        });
-        activeJob.progress = 100;
-        stopHeartbeat();
-        const completedPayload = uploaded && uploaded.completion;
-        if (!completedPayload) throw nodeError('OPERATOR_MEDIA_COMPLETE_INVALID', '运营节点媒体上传未完成', { retryable: true });
-        return completedPayload;
+        return await transcribeCapturedMedia(job, tempPath);
       }
       if (!plugin || typeof plugin.downloadMediaToTempFile !== 'function'
         || (typeof plugin.runOperatorLocalTranscription !== 'function' && typeof plugin.runLocalTranscription !== 'function')) {
@@ -606,10 +708,6 @@ function createOperatorMediaNode({
       });
     } catch (error) {
       lastErrorCode = redactError(error).code;
-      // /worker/media/complete atomically advances media -> ASR. Once that
-      // request has been attempted, a generic /worker/complete failure would
-      // target the wrong phase and could overwrite a server-side success.
-      if (phase === 'media' && mediaCompletionAttempted) throw error;
       try {
         return await complete(job, failBody(error, activeJob && activeJob.stage, { shutdown: stopRequested }));
       } catch (completionError) {
