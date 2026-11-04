@@ -373,6 +373,28 @@ test('verify detects controlled drift but ignores opaque install-only user files
   assert.match(`${invalid.stderr}\n${invalid.stdout}`, /main\.js|drift|mismatch/i);
 });
 
+test('installed candidate verification checks only the four managed plugin assets', (t) => {
+  const fixture = createPackageFixture();
+  t.after(fixture.cleanup);
+  const prepared = parseJsonOutput(runNode('scripts/prepare-plugin-release-candidate.js', [
+    '--source', fixture.pluginRoot,
+    '--artifacts-root', path.join(fixture.tempRoot, '.artifacts', 'plugin'),
+  ]));
+  const installedRoot = path.join(fixture.tempRoot, 'vault', '.obsidian', 'plugins', 'wechat-inbox-sync');
+  fs.mkdirSync(installedRoot, { recursive: true });
+  for (const name of ['main.js', 'manifest.json', 'styles.css', 'versions.json']) {
+    fs.copyFileSync(path.join(prepared.packageDirectory, name), path.join(installedRoot, name));
+  }
+  fs.writeFileSync(path.join(installedRoot, 'data.json'), '{"userConfig":"untouched"}', 'utf8');
+  const result = runNode('scripts/verify-plugin-release-candidate.js', [
+    '--candidate', prepared.candidateDirectory,
+    '--source', fixture.pluginRoot,
+    '--installed', installedRoot,
+  ]);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.readFileSync(path.join(installedRoot, 'data.json'), 'utf8'), '{"userConfig":"untouched"}');
+});
+
 test('candidate provenance does not participate in deterministic identity', (t) => {
   const fixture = createPackageFixture();
   t.after(fixture.cleanup);

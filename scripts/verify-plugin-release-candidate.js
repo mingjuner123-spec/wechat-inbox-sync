@@ -71,6 +71,34 @@ function assertIdentityEqual(actual, expected, label) {
   }
 }
 
+function installedAssetIdentity(installedDirectory) {
+  const root = path.resolve(installedDirectory);
+  return LOOSE_ASSETS.map((relativePath) => {
+    const filePath = path.join(root, ...relativePath.split('/'));
+    let stat;
+    try {
+      stat = fs.lstatSync(filePath);
+    } catch (error) {
+      throw new Error(`installed plugin is missing required asset: ${relativePath}`);
+    }
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`installed plugin asset must be a regular file: ${relativePath}`);
+    }
+    const bytes = normalizePackageBytes(relativePath, fs.readFileSync(filePath));
+    return { path: relativePath, bytes: bytes.length, sha256: sha256(bytes) };
+  });
+}
+
+function assertInstalledAssetsEqual(actual, expected) {
+  const expectedByPath = new Map(expected.map((entry) => [entry.path, entry]));
+  const actualByPath = new Map(actual.map((entry) => [entry.path, entry]));
+  const paths = new Set([...expectedByPath.keys(), ...actualByPath.keys()]);
+  const drifted = [...paths].filter((entryPath) => (
+    JSON.stringify(expectedByPath.get(entryPath)) !== JSON.stringify(actualByPath.get(entryPath))
+  ));
+  if (drifted.length) throw new Error(`installed plugin assets mismatch: ${drifted.join(', ')}`);
+}
+
 function assertRootMirror(rootMirror, candidatePackage, identity) {
   const root = path.resolve(rootMirror);
   for (const relativePath of LOOSE_ASSETS) {
@@ -120,10 +148,9 @@ function verifyCandidate({
     assertRootMirror(rootMirror, packageDirectory, receipt.identity);
   }
   if (installed) {
-    assertIdentityEqual(
-      identityForDirectory(path.resolve(installed), receipt.identity),
-      receipt.identity,
-      'installed plugin',
+    assertInstalledAssetsEqual(
+      installedAssetIdentity(installed),
+      receipt.identity.entries.filter((entry) => LOOSE_ASSETS.includes(entry.path)),
     );
   }
   if (promotion) {
@@ -175,6 +202,7 @@ module.exports = {
   assertIdentityEqual,
   assertRootMirror,
   identityForDirectory,
+  installedAssetIdentity,
   parseArgs,
   verifyCandidate,
 };

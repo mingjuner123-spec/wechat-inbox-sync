@@ -18,7 +18,9 @@ async function main(){
   const plugin={settings:Plugin.__test.mergeSettings({}),getActiveBindings:()=>[],getLocalTranscriptionComponentReadiness:()=>({ready:true,missingComponents:[],platformName:'Windows'}),refreshProAndMaybePromptLocalComponentInstall:async()=>{},checkDouyinLogin:async()=>false,checkXiaohongshuLogin:async()=>false,saveSettings:async function(next){saves++;if(next)this.settings=next;}};
   const tab=Object.create(Plugin.__test.WechatInboxSettingTab.prototype);tab.plugin=plugin;tab.containerEl=new Element();
   const before=JSON.stringify(plugin.settings);tab.display();await Promise.resolve();await Promise.resolve();
-  assert.equal(tab.createSettingsNavigation,undefined,'rejected menu must not return');
+  assert.equal(typeof tab.createSettingsNavigation,'function','the accepted settings category menu must remain available');
+  const settingsNav=tab.containerEl.children.find(e=>e.attributes&&e.attributes.role==='tablist');
+  assert.ok(settingsNav);assert.deepEqual(settingsNav.children.map(e=>e.options.text),['绑定与保存','服务与高级功能','AI 功能']);
   for(const name of ['输入绑定码','保存地址设置','笔记保存方式','图文图片保存方式','立即同步','微信小程序绑定教程','飞书官方 API 连接教程','诊断信息','飞书 App ID','本地转写组件','绑定额外设备','抖音登录状态','登录小红书','API 模型','API Key','API 地址','多语言翻译','AI 总结','本地转写语言'])assert.ok(entries.some(e=>e.name===name),name);
   assert.ok(!entries.some(e=>/分段转写时间戳|播放器截图/.test(e.name||'')));
   const ai=entries.find(e=>e.name==='AI 总结').parent;assert.equal(ai.tag,'details');assert.ok(!ai.open);assert.equal(ai.children[0].options.text,'AI 高级功能');

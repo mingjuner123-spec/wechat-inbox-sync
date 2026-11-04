@@ -121,6 +121,9 @@ jobs:
           node tests/plugin-xhs-static-document.test.js
           node tests/plugin-xhs-runtime-snapshot.test.js
           node tests/plugin-main-ai.test.js
+          node tests/x-article-local.test.js
+          node tests/x-article-fallback.test.js
+          node tests/x-article-integration.test.js
           node tests/plugin-sync-failure-reconcile.test.js
           node tests/plugin-douyin-browser-safety.test.js
           node tests/plugin-douyin-diagnostics.test.js
@@ -142,6 +145,9 @@ jobs:
           node --check tests/plugin-release-candidate.test.js
           node --check tests/plugin-audio-repeat-local-dedupe.test.js
           node --check tests/plugin-release-identity.test.js
+          node --check tests/x-article-local.test.js
+          node --check tests/x-article-fallback.test.js
+          node --check tests/x-article-integration.test.js
           node --check tests/plugin-processing-cancellation.test.js
           node --check tests/failure-diagnostic-scope.test.js
           node --check tests/platform-article-recovery.test.js

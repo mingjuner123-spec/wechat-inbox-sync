@@ -17,11 +17,32 @@ async function main() {
   for (const url of ['https://x.com.evil.test/a/status/123456', 'https://evil.test/x.com/a/status/123456', 'https://a@x.com/a/status/123456', 'https://x.com/home', 'https://x.com/a/status/123456/evil']) assert.equal(x.postId(url), '');
   const post = x.normalizeTweet(tweet, '123456');
   assert.equal(post.images.length, 1);
+  const notePost = x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: 'short preview', note_tweet: { note_tweet_results: { result: { text: 'Complete note text.' } } } }, '123456');
+  assert.equal(notePost.text, 'Complete note text.');
+  const articlePost = x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: '', article: { title: 'Long article title', content: { blocks: [{ text: 'First article paragraph.' }, { text: 'Second article paragraph.' }] } } }, '123456');
+  assert.equal(articlePost.title, 'Long article title'); assert.match(articlePost.text, /Second article paragraph/);
+  const titleOnlyBody = x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: '', article: { title: 'Headline!', content: { blocks: [{ text: ' headline ' }] } }, photos: [{ url: 'https://pbs.twimg.com/media/a.jpg' }] }, '123456');
+  assert.equal(titleOnlyBody.text, '', 'article title repeated as body is not accepted as substantive text');
+  const noteTitleOnly = x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: 'preview', note_tweet: { note_tweet_results: { result: { title: 'Headline!', content: { blocks: [{ text: ' headline ' }] } } } }, photos: [{ url: 'https://pbs.twimg.com/media/a.jpg' }] }, '123456');
+  assert.equal(noteTitleOnly.text, '', 'nested note_tweet title repeated as body is not accepted as substantive text');
+  const flatNoteTitleOnly = x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: '', note_tweet: { title: 'Headline', text: 'Headline' }, photos: [{ url: 'https://pbs.twimg.com/media/a.jpg' }] }, '123456');
+  assert.equal(flatNoteTitleOnly.text, '', 'flat note_tweet title repeated as body is not accepted as substantive text');
+  for (const malformed of [
+    { article: { title: 'Only title' } },
+    { article: { title: 'Headline', preview_text: 'Preview only' } },
+    { text: 'Read more' },
+    { text: 'Read more →' },
+    { text: '阅读全文' },
+    { text: 'https://x.com/i/article/123' },
+  ]) assert.throws(() => x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', ...malformed }, '123456'), /可保存|完整正文/);
+  assert.equal(x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: 'Hi' }, '123456').text, 'Hi');
+  const extendedVideo = x.normalizeTweet({ __typename: 'Tweet', id_str: '123456', text: '', extended_entities: { media: [{ video_info: { variants: [{ content_type: 'video/mp4', url: 'https://video.twimg.com/ext_tw_video/123/video.mp4' }] } }] } }, '123456');
+  assert.equal(extendedVideo.hasVideo, true); assert.equal(extendedVideo.text, ''); assert.equal(extendedVideo.videos.length, 1);
   assert.throws(() => x.normalizeTweet(tweet, '999'), /目标推文/);
   assert.throws(() => x.normalizeTweet({}, '123456'), /目标推文/);
   assert.throws(() => x.normalizeTweet({ ...tweet, truncated: true }, '123456'), /完整正文/);
   assert.throws(() => x.normalizeTweet({ ...tweet, photos: [{ url: 'http://localhost/a.jpg' }] }, '123456'), /图片地址/);
-  assert.throws(() => x.normalizeTweet({ ...tweet, text: '', photos: [], mediaDetails: [] }, '123456'), /图文内容/);
+  assert.throws(() => x.normalizeTweet({ ...tweet, text: '', photos: [], mediaDetails: [] }, '123456'), /图文或视频内容/);
   const quoted = x.normalizeTweet({ ...tweet, quoted_tweet: { ...tweet, id_str: '987', text: 'Quoted.' } }, '123456');
   assert.match(x.renderPost(quoted), /引用推文/);
   assert.match(x.renderPost(quoted), /status\/987/);
@@ -59,7 +80,7 @@ async function main() {
   assert.deepEqual(oversized.warnings, ['X_AI_INPUT_TOO_LARGE']);
   for (const text of ['这是一段中文原文，不需要再次翻译。', '使用 API 设置同步中文内容。', '繁體中文原文也不用翻譯。', '123456']) {
     const skipped = await x.processAi({ text }, { ...settings, xTranslationEnabled: true }, async () => { throw Error('Chinese must not call translation'); });
-    assert.deepEqual(skipped, { pairs: [], summary: '', warnings: [] });
+    assert.deepEqual(skipped, { titleTranslation: '', pairs: [], summary: '', warnings: [] });
   }
   for (const text of ['Hello world.', 'これは日本語です。', '안녕하세요.', 'Bonjour tout le monde.', 'مرحبا بالعالم']) assert.equal(x.needsTranslation(text), true);
   const mixedInputs = [];
@@ -85,7 +106,14 @@ async function main() {
   const controller = new AbortController(); controller.abort();
   await assert.rejects(x.fetchPost(post.url, async () => tweet, controller.signal), { name: 'AbortError' });
   await assert.rejects(x.boundedRequest(() => new Promise(() => {}), 'https://example.test', {}, null, 5), { code: 'X_REQUEST_TIMEOUT' });
-  await assert.rejects(x.fetchPost(post.url, async () => { throw Object.assign(Error(), { status: 429 }); }), { code: 'X_RATE_LIMITED' });
+  let limitedCalls = 0;
+  await assert.rejects(x.fetchPost(post.url, async () => { limitedCalls++; throw Object.assign(Error(), { status: 429 }); }), error => {
+    assert.equal(error.code, 'X_FXEMBED_RATE_LIMITED');
+    assert.equal(error.xSyndicationErrorCode, 'X_RATE_LIMITED');
+    assert.equal(error.status, 429);
+    return true;
+  });
+  assert.equal(limitedCalls, 2, 'a primary 429 is followed by one fallback attempt');
   const fetched = await x.fetchPost(post.url, async (url, opts) => { assert.match(url, /^https:\/\/cdn.syndication.twimg.com/); assert.equal(opts.headers.Authorization, undefined); return tweet; });
   assert.equal(fetched.id, '123456');
   assert.throws(() => x.aiConfig({ ...settings, xAiBaseUrl: 'http://example.com/v1' }), /HTTPS/);

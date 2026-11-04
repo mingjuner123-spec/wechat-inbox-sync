@@ -43,6 +43,109 @@ async function main() {
   assert.equal(await plugin.enrichRecordMetadataWithAi(result), result);
   assert.ok(!Plugin.__test.getSyncLifecycleOutcomeError(result));
   assert.match(Plugin.__test.buildWebpageMarkdownBody(result, 'title'), /Hello world/);
+  const originalXRequest = plugin.requestXArticleJson;
+  plugin.requestXArticleJson = async () => ({ __typename: 'Tweet', id_str: '123456', text: '', article: {
+    title: 'Original long article title', content: { blocks: [{ text: 'A real paragraph from the article body.' }] },
+  } });
+  const titledArticle = await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: record.content, metadata: {} }, 'Inbox', '2026-11-02', 'fallback');
+  assert.match(titledArticle.metadata.title, /Original long article title/);
+  assert.match(titledArticle.metadata.markdown, /# X：Original long article title/);
+  const lifecycleUrl = `https://x.com/example/status/${tweet.id_str}`;
+  for (const markdown of [
+    '# X：Only title',
+    '# X：Headline\n\n## 正文\n\nhttps://x.com/i/article/123',
+    '# X：Headline\n\n## 正文\n\nRead more',
+    '# X：Author：Headline\n\n## 正文\n\nHeadline',
+    '# X：Author：Headline\n\n## 正文\n\nRead more →',
+    '# X：Author：Headline\n\n## 正文\n\n阅读全文',
+  ]) {
+    const error = Plugin.__test.getSyncLifecycleOutcomeError({ type: 'webpage', content: lifecycleUrl, metadata: {
+      url: lifecycleUrl, platform: 'X', conversionStatus: 'success', markdown,
+    } });
+    assert.equal(error && error.code, 'EXTRACTION_FAILED', 'X title, URL, and shell text cannot count as a saved body');
+  }
+  assert.equal(Plugin.__test.getSyncLifecycleOutcomeError({ type: 'webpage', content: lifecycleUrl, metadata: {
+    url: lifecycleUrl, platform: 'X', conversionStatus: 'success', xOriginalText: 'Hi', markdown: '# X：A title\n\n## 正文\n\nHi',
+  } }), null, 'short real X text remains a valid body');
+  for (const metadata of [
+    { xOriginalText: 'Headline', xOriginalTitle: 'Headline' },
+    { xOriginalText: 'Headline', title: 'Author：Headline' },
+    { xOriginalText: 'Read more →' },
+    { xOriginalText: '阅读全文' },
+  ]) {
+    assert.equal(Plugin.__test.getSyncLifecycleOutcomeError({ type: 'webpage', content: lifecycleUrl, metadata: {
+      url: lifecycleUrl, platform: 'X', conversionStatus: 'success', ...metadata,
+      markdown: '# X：Author：Headline\n\n## 正文\n\nHeadline',
+    } })?.code, 'EXTRACTION_FAILED', 'legacy X title-only and shell text cannot be accepted as body');
+  }
+  assert.equal(Plugin.__test.getSyncLifecycleOutcomeError({ type: 'webpage', content: lifecycleUrl, metadata: {
+    url: lifecycleUrl, platform: 'X', conversionStatus: 'success', markdown: '# X：A title\n\n![X 图片 1](https://pbs.twimg.com/media/a.jpg)',
+  } }), null, 'an X post with a real image remains deliverable');
+  const originalRunLocal = plugin.runLocalTranscription;
+  const originalPluginSettings = plugin.settings;
+  const localOptionsSeen = [];
+  plugin.settings = { ...plugin.settings, aiProvider: 'local', cloudFallbackEnabled: false };
+  plugin.runLocalTranscription = async (_url, options) => { localOptionsSeen.push(options); return { transcription: 'captured locally' }; };
+  await plugin.runConfiguredTranscription('https://media.example/non-x.mp4', { sourceUrl: 'https://example.com/post' });
+  await plugin.runConfiguredTranscription('https://video.twimg.com/ext_tw_video/123/test.mp4', { maxBytes: 100 * 1024 * 1024 });
+  assert.equal(Number(localOptionsSeen[0].maxBytes) || 0, 0, 'non-X local transcription keeps its existing size behavior');
+  assert.equal(localOptionsSeen[1].maxBytes, 100 * 1024 * 1024, 'the X-specific size cap is still forwarded');
+  plugin.runLocalTranscription = originalRunLocal;
+  plugin.settings = originalPluginSettings;
+  const originalTranscriptBuilder = plugin.buildTranscriptRecordFromMedia;
+  const videoUrl = 'https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/test.mp4?tag=12';
+  const articleVideo = { ...tweet, mediaDetails: [{ type: 'video', video_info: { variants: [
+    { content_type: 'video/mp4', bitrate: 256000, url: videoUrl },
+  ] } }] };
+  const videoRecord = { type: 'webpage', content: 'https://x.com/example/status/123456', metadata: {} };
+  const signal = new AbortController().signal;
+  const binding = { label: 'fixture-binding' };
+  let videoTranscriptionCalls = 0;
+  plugin.requestXArticleJson = async () => articleVideo;
+  plugin.buildTranscriptRecordFromMedia = async (sourceRecord, options) => {
+    videoTranscriptionCalls++;
+    assert.equal(options.platform, 'X'); assert.equal(options.mediaUrl, videoUrl);
+    assert.ok(Number(options.maxBytes) > 0, 'X video transcription downloads have a size limit');
+    assert.equal(options.binding, binding); assert.equal(options.signal, signal);
+    assert.match(options.markdown, /Hello world/); assert.match(options.markdown, /pbs.twimg.com\/media\/a.jpg/);
+    return { ...sourceRecord, metadata: { ...sourceRecord.metadata, transcriptOnly: true,
+      transcription: '识别到的视频语音。', transcriptionStatus: 'success', conversionStatus: 'success',
+      markdown: options.markdown, mediaUrl: options.mediaUrl, title: options.sourceTitle } };
+  };
+  const transcribedVideo = await plugin.hydrateWebpageMarkdown(videoRecord, 'Inbox', '2026-11-02', 'X video', binding, { signal });
+  assert.equal(videoTranscriptionCalls, 1); assert.equal(transcribedVideo.metadata.transcriptionStatus, 'success');
+  assert.equal(transcribedVideo.metadata.platform, 'X'); assert.equal(transcribedVideo.metadata.transcriptOnly, false);
+  const videoBody = Plugin.__test.buildWebpageMarkdownBody(transcribedVideo, 'X video');
+  assert.match(videoBody, /Hello world/); assert.match(videoBody, /pbs.twimg.com\/media\/b.jpg/);
+  assert.match(videoBody, /识别到的视频语音/);
+  const secondVideoUrl = 'https://video.twimg.com/ext_tw_video/456/pu/vid/avc1/1280x720/test-2.mp4?tag=12';
+  plugin.requestXArticleJson = async () => ({ ...articleVideo, mediaDetails: [
+    ...articleVideo.mediaDetails,
+    { type: 'video', video_info: { variants: [{ content_type: 'video/mp4', bitrate: 128000, url: secondVideoUrl }] } },
+  ] });
+  plugin.buildTranscriptRecordFromMedia = async (sourceRecord, options) => ({ ...sourceRecord, metadata: {
+    ...sourceRecord.metadata, transcriptOnly: true, transcription: options.mediaUrl === videoUrl ? '第一段视频。' : '第二段视频。',
+    transcriptionStatus: 'success', conversionStatus: 'success', markdown: options.markdown,
+  } });
+  const multiVideo = await plugin.hydrateWebpageMarkdown(videoRecord, 'Inbox', '2026-11-02', 'X video', binding, { signal });
+  assert.equal(multiVideo.metadata.transcriptionStatus, 'success');
+  assert.match(multiVideo.metadata.transcription, /第一段视频/); assert.match(multiVideo.metadata.transcription, /第二段视频/);
+  assert.deepEqual(multiVideo.metadata.mediaUrls, [videoUrl, secondVideoUrl]);
+  plugin.buildTranscriptRecordFromMedia = async () => { throw new Error('temporary ASR failure'); };
+  const videoWithAsrFailure = await plugin.hydrateWebpageMarkdown(videoRecord, 'Inbox', '2026-11-02', 'X video', binding, { signal });
+  assert.equal(videoWithAsrFailure.metadata.conversionStatus, 'success');
+  assert.equal(videoWithAsrFailure.metadata.transcriptionStatus, 'failed');
+  assert.match(videoWithAsrFailure.metadata.markdown, /原帖文字和图片已保留/);
+  plugin.requestXArticleJson = async () => ({ ...articleVideo, mediaDetails: [{ type: 'video', video_info: { variants: [
+    { content_type: 'video/mp4', url: 'https://evil.example/video.mp4' },
+  ] } }] });
+  const videoWithoutDirectUrl = await plugin.hydrateWebpageMarkdown(videoRecord, 'Inbox', '2026-11-02', 'X video', binding, { signal });
+  assert.equal(videoTranscriptionCalls, 1, 'a non-X host is never passed to the downloader');
+  assert.equal(videoWithoutDirectUrl.metadata.conversionStatus, 'success');
+  assert.equal(videoWithoutDirectUrl.metadata.transcriptionStatus, 'failed');
+  assert.match(videoWithoutDirectUrl.metadata.markdown, /X 视频转写未完成/);
+  plugin.requestXArticleJson = originalXRequest;
+  plugin.buildTranscriptRecordFromMedia = originalTranscriptBuilder;
   // Exercise real ingestion routes and the atomic note writer, not just hydration.
   const files = new Map();
   plugin.settings = { ...plugin.settings, inboxDir: 'Inbox', noteSaveMode: 'root', socialArticleImageStorageMode: 'remote' };
@@ -53,6 +156,15 @@ async function main() {
   } } };
   plugin.ensureFolder = async () => {}; plugin.showSyncProgress = () => {};
   plugin.saveSourceMediaAttachment = async r => r;
+  const hydrateForWrite = plugin.hydrateWebpageMarkdown;
+  plugin.hydrateWebpageMarkdown = async r => r;
+  plugin.nextRecordTitle = async () => 'X-video-asr-failed';
+  const failedVideoWrite = await plugin.writeRecord({ ...videoWithAsrFailure, _id: 'x-video-asr-failed', createdAt: '2026-11-02T00:00:00Z' }, '2026-11-02T00:01:00Z', null, false, { skipAi: true });
+  assert.equal(failedVideoWrite.committed, true, 'an X article remains deliverable if only its video transcript failed');
+  const failedVideoNote = files.get(failedVideoWrite.filePath);
+  assert.match(failedVideoNote, /Hello world/); assert.match(failedVideoNote, /X 视频转写未完成/);
+  assert.equal(Plugin.__test.getSyncLifecycleOutcomeError(videoWithAsrFailure), null);
+  plugin.hydrateWebpageMarkdown = hydrateForWrite;
   for (const type of ['link', 'text', 'webpage']) {
     plugin.nextRecordTitle = async () => `X-${type}`;
     const written = await plugin.writeRecord({ _id: `x-${type}`, type, content: type === 'text' ? 'Read this: https://x.com/example/status/123456' : record.content, createdAt: '2026-11-02T00:00:00Z', metadata: {} }, '2026-11-02T00:01:00Z');
@@ -67,10 +179,16 @@ async function main() {
   requestMock = async () => ({ status: 200, json: {} });
   result = await plugin.hydrateWebpageMarkdown(record, 'Inbox', '2026-11-02', 'title');
   assert.equal(result.metadata.conversionStatus, 'link_saved'); assert.ok(Plugin.__test.getSyncLifecycleOutcomeError(result));
-  let limitedCalls = 0; requestMock = async () => { limitedCalls++; return { status: 429 }; };
+  let primaryRateLimitedCalls = 0, fallbackCalls = 0;
+  plugin.settings = { ...plugin.settings, xTranslationEnabled: false, xSummaryEnabled: false };
+  requestMock = async options => {
+    if (options.url.startsWith('https://api.fxtwitter.com/')) { fallbackCalls++; return { status: 200, json: { code: 200, status: { id: '123456', text: 'Recovered through FxEmbed.' } } }; }
+    primaryRateLimitedCalls++; return { status: 429 };
+  };
   await plugin.hydrateWebpageMarkdown(record, 'Inbox', 'date', 'title');
   await plugin.hydrateWebpageMarkdown(record, 'Inbox', 'date', 'title');
-  assert.equal(limitedCalls, 1, '429 must pause further X access in this plugin session');
+  assert.equal(primaryRateLimitedCalls, 1, 'a syndication 429 must cool that provider down');
+  assert.equal(fallbackCalls, 2, 'the healthy fallback remains available during provider cooldown');
   requestMock = async () => { throw Error('non-X should use cached markdown'); };
   const other = await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: 'https://example.com/page', metadata: { markdown: 'Existing article' } }, 'Inbox', 'date', 'title');
   assert.equal(other.metadata.markdown, 'Existing article');
@@ -83,6 +201,7 @@ async function main() {
   plugin.writeVoiceAttachment = async r => r;
   plugin.nextTitle = async (_, title) => title;
   let summaryCalls = 0;
+  plugin.settings = { ...plugin.settings, xTranslationEnabled: false, xSummaryEnabled: true, xAiApiKey: 'test-placeholder' };
   requestMock = async options => {
     summaryCalls++;
     const body = JSON.parse(options.body);
@@ -118,6 +237,11 @@ async function main() {
   plugin.settings.xSummaryEnabled = false; plugin.settings.xTranslationEnabled = true;
   const chineseOnly = await plugin.appendAdvancedAi('原文与图片', { type: 'text', content: '这是一段中文，不需要翻译。' });
   assert.equal(chineseOnly, '原文与图片'); assert.equal(summaryCalls, cases.length + 2);
+  const unsafeSummary = await plugin.appendAdvancedAi('原文正文', { type: 'text', content: '实际正文', metadata: {
+    xAdvancedAiResult: { summary: '![track](https://evil.example/x) <img src=x> [[secret]] ![[private-note]]' },
+  } });
+  assert.match(unsafeSummary, /&lt;img/); assert.ok(!unsafeSummary.includes('![track]('));
+  assert.ok(!unsafeSummary.includes('![[private-note]]')); assert.ok(!unsafeSummary.includes('[[secret]]'));
   plugin.settings.xSummaryEnabled = true; plugin.settings.xTranslationEnabled = false;
   requestMock = async () => ({ status: 500, json: { message: 'private-server-response' } });
   plugin.nextRecordTitle = async () => 'ai-failure-preserves-note';
