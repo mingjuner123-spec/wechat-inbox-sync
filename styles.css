@@ -10,49 +10,6 @@
   margin-bottom: 8px;
 }
 
-.wechat-inbox-sync-settings-nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 16px 0;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.wechat-inbox-sync-settings-nav button {
-  flex: 1 1 auto;
-  white-space: normal;
-  height: auto;
-  min-height: 32px;
-}
-
-.wechat-inbox-sync-settings-page[hidden] {
-  display: none !important;
-}
-
-.wechat-inbox-sync-settings-page > .wechat-inbox-sync-advanced-panel {
-  margin-top: 12px;
-}
-
-.wechat-inbox-sync-settings-page .setting-item {
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.wechat-inbox-sync-settings-page .setting-item-info {
-  min-width: 120px;
-}
-
-.wechat-inbox-sync-settings-page .setting-item-control {
-  max-width: 100%;
-  flex-wrap: wrap;
-}
-
-.wechat-inbox-sync-settings-page input[type="text"],
-.wechat-inbox-sync-settings-page input[type="password"] {
-  max-width: 100%;
-}
-
 .wechat-inbox-sync-section-spacer {
   height: 18px;
   border-top: 1px solid var(--background-modifier-border);

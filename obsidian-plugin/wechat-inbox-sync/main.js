@@ -51033,6 +51033,12 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       text: feishuOAuthStatus.connected ? `已连接飞书官方 API；token 有效期至 ${feishuOAuthStatus.expiresAt || "未知"}。同步飞书链接时会优先走官方授权通道。` : "未连接飞书官方 API 时仍会使用旧解析方式转存飞书链接，但可能出现内容不全、图片缺失或结构不稳定；建议按教程连接官方 API。",
       cls: "wechat-inbox-sync-muted"
     });
+    new Setting(feishuPanel).setName("飞书官方 API 连接教程").setDesc(`按教程创建飞书自建应用、配置权限和回调地址：${FEISHU_OFFICIAL_API_TUTORIAL_URL}`).addButton((button) => button.setButtonText("打开教程").onClick(async () => {
+      const opened = await openExternalUrl(FEISHU_OFFICIAL_API_TUTORIAL_URL);
+      if (!opened) {
+        new Notice(`请复制链接到浏览器打开：${FEISHU_OFFICIAL_API_TUTORIAL_URL}`);
+      }
+    }));
     const feishuCallbackUrl = `${trimTrailingSlash(FEISHU_OAUTH_SYNC_API_BASE)}/feishu/oauth/callback`;
     new Setting(feishuPanel).setName("飞书回调地址").setDesc(`在飞书自建应用后台配置这个重定向 URL：${feishuCallbackUrl}`).addButton((button) => button.setButtonText("复制").onClick(async () => {
       const copied = await this.plugin.copyTextToClipboard(feishuCallbackUrl);
@@ -51072,61 +51078,27 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
       }
     }));
   }
-  createSettingsNavigation(rootEl) {
-    const sections = [["binding", "绑定与保存"], ["services", "服务与高级功能"], ["ai", "AI 功能"]];
-    const nav = rootEl.createDiv({ cls: "wechat-inbox-sync-settings-nav", attr: { role: "tablist", "aria-label": "设置分类" } });
-    const pages = {}, buttons = {};
-    const activate = /* @__PURE__ */ __name((id, focus = false) => {
-      this.activeSettingsSection = id;
-      for (const [key] of sections) {
-        const selected = key === id;
-        pages[key].hidden = !selected;
-        buttons[key].setAttribute("aria-selected", String(selected));
-        buttons[key].tabIndex = selected ? 0 : -1;
-        buttons[key].classList.toggle("mod-cta", selected);
-      }
-      if (focus) buttons[id].focus();
-    }, "activate");
-    for (const [id, label] of sections) {
-      const tabId = "wechat-inbox-settings-tab-" + id;
-      const panelId = "wechat-inbox-settings-panel-" + id;
-      const button = nav.createEl("button", { text: label, attr: { type: "button", role: "tab", id: tabId, "aria-controls": panelId } });
-      buttons[id] = button;
-      pages[id] = rootEl.createDiv({ cls: "wechat-inbox-sync-settings-page", attr: { role: "tabpanel", id: panelId, "aria-labelledby": tabId, tabindex: "0" } });
-      button.addEventListener("click", () => activate(id));
-      button.addEventListener("keydown", (event) => {
-        const index = sections.findIndex(([key]) => key === id);
-        const next = event.key === "ArrowRight" ? (index + 1) % sections.length : event.key === "ArrowLeft" ? (index + sections.length - 1) % sections.length : event.key === "Home" ? 0 : event.key === "End" ? sections.length - 1 : -1;
-        if (next < 0) return;
-        event.preventDefault();
-        activate(sections[next][0], true);
-      });
-    }
-    activate(pages[this.activeSettingsSection] ? this.activeSettingsSection : "binding");
-    return pages;
-  }
-  renderTutorials(containerEl) {
-    const tutorials = containerEl.createEl("details", { cls: "wechat-inbox-sync-advanced-panel" });
-    tutorials.createEl("summary", { text: "使用教程" });
-    new Setting(tutorials).setName("小程序名字：Obsidian 内容同步助手").setDesc("在微信搜索，进入「绑定 Obsidian」获取绑定码。");
-    const links = [["微信小程序绑定教程", FEISHU_TUTORIAL_URL], ["飞书官方 API 连接教程", FEISHU_OFFICIAL_API_TUTORIAL_URL]];
-    for (const [name, url] of links) new Setting(tutorials).setName(name).addButton((button) => button.setButtonText("打开教程").onClick(async () => {
-      if (!await openExternalUrl(url)) new Notice("请复制链接到浏览器打开：" + url);
-    }));
-    new Setting(tutorials).setName("AI 功能教程").addButton((button) => button.setButtonText("打开教程").onClick(() => this.openXArticleTutorial()));
-  }
   display() {
-    const rootEl = this.containerEl;
-    rootEl.empty();
-    rootEl.createEl("h2", { text: "Obsidian 内容同步助手" });
-    const pages = this.createSettingsNavigation(rootEl);
-    let containerEl = pages.binding;
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "Obsidian 内容同步助手" });
     const setupView = setupSummary(
       this.plugin.getActiveBindings().length > 0,
       this.plugin.settings.localTranscriptionEntitlementStatus,
       this.plugin.getLocalTranscriptionComponentReadiness(),
       !!this.plugin.localComponentInstallPromise
     );
+    containerEl.createEl("h3", {
+      text: "使用教程",
+      cls: "wechat-inbox-sync-section-heading"
+    });
+    new Setting(containerEl).setName("小程序名字：Obsidian 内容同步助手").setDesc("打开微信后搜索这个小程序，进入「绑定 Obsidian」页面复制绑定码。");
+    new Setting(containerEl).setName("微信小程序绑定教程").setDesc(`插件安装、绑定码填写和常见问题。小程序名字：Obsidian 内容同步助手。教程链接：${FEISHU_TUTORIAL_URL}`).addButton((button) => button.setButtonText("打开教程").onClick(async () => {
+      const opened = await openExternalUrl(FEISHU_TUTORIAL_URL);
+      if (!opened) {
+        new Notice(`请复制链接到浏览器打开：${FEISHU_TUTORIAL_URL}`);
+      }
+    }));
     containerEl.createEl("h3", {
       text: "绑定小程序",
       cls: "wechat-inbox-sync-section-heading"
@@ -51162,7 +51134,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         }
       });
     }, "renderBindingSetting");
-    new Setting(containerEl).setName("输入绑定码").setDesc(primaryBinding ? "绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到「服务与高级功能」里增加设备。" : "基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。").addText((text) => text.setPlaceholder("例如 ABC-123").setValue(primaryBinding ? primaryBinding.token : this.plugin.settings.pendingBindCode || "").setDisabled(Boolean(primaryBinding)).onChange(async (value) => {
+    new Setting(containerEl).setName("输入绑定码").setDesc(primaryBinding ? "绑定成功。基础绑定区只保留 1 个小程序绑定码；更多绑定请到下方 Pro 高级功能里增加设备。" : "基础绑定区只保留 1 个小程序绑定码。打开微信小程序【Obsidian 内容同步助手】的「绑定 Obsidian」页面，复制小程序绑定码后粘贴到这里。").addText((text) => text.setPlaceholder("例如 ABC-123").setValue(primaryBinding ? primaryBinding.token : this.plugin.settings.pendingBindCode || "").setDisabled(Boolean(primaryBinding)).onChange(async (value) => {
       await this.plugin.saveSettings({ ...this.plugin.settings, pendingBindCode: value });
     })).addButton((button) => {
       button.setButtonText(primaryBinding ? "绑定成功" : "立即绑定").setCta().onClick(async () => {
@@ -51208,8 +51180,6 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         });
       });
     });
-    this.renderTutorials(containerEl);
-    containerEl = pages.services;
     new Setting(containerEl).setName("本地转写语言").addDropdown((dropdown) => dropdown.addOption("zh", "简体中文").addOption("en", "English").setValue(this.plugin.settings.transcriptionLanguage || DEFAULT_SETTINGS.transcriptionLanguage).onChange(async (value) => {
       await this.plugin.saveSettings({
         ...this.plugin.settings,
@@ -51218,7 +51188,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
     }));
     new Setting(containerEl).setName("立即同步").addButton((button) => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
     this.renderDiagnosticSetting(containerEl);
-    this.renderXArticleSettings(pages.ai);
+    this.renderXArticleSettings(containerEl);
     containerEl.createEl("h3", {
       text: "登录设置",
       cls: "wechat-inbox-sync-section-heading"
@@ -51407,7 +51377,7 @@ var _WechatInboxSettingTab = class _WechatInboxSettingTab extends PluginSettingT
         xiaohongshuLoginBtn.setDesc("已保存小红书登录状态；同步小红书图文时会复用该状态提取评论区。");
       }
     });
-    const status = pages.binding.createDiv({ cls: "wechat-inbox-sync-status" });
+    const status = containerEl.createDiv({ cls: "wechat-inbox-sync-status" });
     status.setText(this.plugin.settings.noteSaveMode === "root" ? "同步后会生成：临时收集/文本-示例.md、临时收集/公众号-示例.md。语音附件仍会放入临时收集/语音附件/YYYY-MM-DD/。" : "同步后会生成：临时收集/YYYY-MM-DD/文本-示例.md、公众号-示例.md。语音附件会放入临时收集/语音附件/YYYY-MM-DD/。");
     this.plugin.refreshProAndMaybePromptLocalComponentInstall({ reason: "settings-open" }).then(() => {
       const currentProStatusFingerprint = getProEntitlementStatusFingerprint(

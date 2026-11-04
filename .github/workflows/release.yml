@@ -124,6 +124,7 @@ jobs:
           node tests/x-article-local.test.js
           node tests/x-article-fallback.test.js
           node tests/x-article-integration.test.js
+          node tests/plugin-settings-ai-release219.test.js
           node tests/plugin-sync-failure-reconcile.test.js
           node tests/plugin-douyin-browser-safety.test.js
           node tests/plugin-douyin-diagnostics.test.js
