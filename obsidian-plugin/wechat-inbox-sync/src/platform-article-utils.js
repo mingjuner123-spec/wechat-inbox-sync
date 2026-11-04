@@ -409,10 +409,35 @@ function sanitizePlatformArticleDiagnostic(value) {
   for (const key of ['platform', 'stage', 'conversionStatus', 'transcriptionStatus', 'finalKind', 'finalState']) {
     if (value[key]) result[key] = String(value[key]).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
   }
-  for (const key of ['httpStatus', 'markdownChars']) if (Number.isFinite(value[key])) result[key] = value[key];
-  if (value.http) result.http = { status: Number(value.http.status) || 0,
-    previousStatus: Number(value.http.previousStatus) || 0,
-    transport: String(value.http.transport || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) };
+  for (const key of ['httpStatus', 'markdownChars']) {
+    if (!Number.isSafeInteger(value[key])) continue;
+    if (key === 'httpStatus' && (value[key] < 100 || value[key] > 599)) continue;
+    if (key === 'markdownChars' && value[key] < 0) continue;
+    result[key] = value[key];
+  }
+  if (value.source === 'webpage-extraction') {
+    if (['none', 'syndication', 'fxembed', 'both'].includes(value.xArticleProvider)) result.xArticleProvider = value.xArticleProvider;
+    const safeCodes = new Set([
+      'X_RATE_LIMITED', 'X_FETCH_FAILED', 'X_IDENTITY_UNCONFIRMED', 'X_LONG_POST_UNSUPPORTED',
+      'X_CONTENT_EMPTY', 'X_IMAGE_INCOMPLETE', 'X_REQUEST_TIMEOUT', 'X_POST_URL_REQUIRED',
+      'X_FXEMBED_UNAVAILABLE', 'X_FXEMBED_IDENTITY_MISMATCH', 'X_FXEMBED_CONTENT_EMPTY',
+      'X_FXEMBED_INVALID_PAYLOAD', 'X_FXEMBED_IMAGE_INVALID', 'X_FXEMBED_TIMEOUT',
+      'X_FXEMBED_RATE_LIMITED', 'X_FXEMBED_HTTP_ERROR', 'X_FXEMBED_FETCH_FAILED',
+    ]);
+    for (const key of ['xArticleErrorCode', 'xSyndicationErrorCode']) {
+      if (safeCodes.has(String(value[key] || ''))) result[key] = String(value[key]);
+    }
+  }
+  if (value.http) {
+    const status = Number(value.http.status);
+    const previousStatus = Number(value.http.previousStatus);
+    result.http = {
+      ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {}),
+      ...(Number.isInteger(previousStatus) && previousStatus >= 100 && previousStatus <= 599 ? { previousStatus } : {}),
+      transport: String(value.http.transport || '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40),
+    };
+    if (!Object.keys(result.http).length) delete result.http;
+  }
   if (value.hiddenBrowser) {
     result.hiddenBrowser = {};
     for (const key of ['ok', 'needsLogin', 'blocked', 'appWall', 'identityMatched']) result.hiddenBrowser[key] = value.hiddenBrowser[key] === true;

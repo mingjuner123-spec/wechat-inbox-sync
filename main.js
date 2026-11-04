@@ -1234,10 +1234,18 @@ var require_x_article = __commonJS({
       return Object.assign(new Error(message), { code });
     }
     __name(fail, "fail");
+    function abortError() {
+      return Object.assign(new Error("操作已取消"), { name: "AbortError", code: "ABORT_ERR" });
+    }
+    __name(abortError, "abortError");
     function abort(signal) {
-      if (signal && signal.aborted) throw Object.assign(new Error("操作已取消"), { name: "AbortError", code: "ABORT_ERR" });
+      if (signal && signal.aborted) throw abortError();
     }
     __name(abort, "abort");
+    function isAbortError2(error, signal) {
+      return Boolean(signal && signal.aborted) || Boolean(error && error.name === "AbortError");
+    }
+    __name(isAbortError2, "isAbortError");
     function isXUrl(value) {
       try {
         const u = new URL(value);
@@ -1272,29 +1280,170 @@ var require_x_article = __commonJS({
       }
     }
     __name(photoUrl, "photoUrl");
+    function videoUrl(value) {
+      try {
+        const u = new URL(value);
+        if (u.protocol !== "https:" || u.hostname !== "video.twimg.com" || !u.pathname.toLowerCase().endsWith(".mp4") || u.username || u.password || u.port || u.hash) return "";
+        return u.href;
+      } catch (_) {
+        return "";
+      }
+    }
+    __name(videoUrl, "videoUrl");
+    function syndicationVideos(items) {
+      const videos = [];
+      for (const item of Array.isArray(items) ? items : []) {
+        const variants = item && item.video_info && Array.isArray(item.video_info.variants) ? item.video_info.variants : [];
+        const candidates = variants.filter((variant) => variant && (!variant.content_type || variant.content_type === "video/mp4")).map((variant) => ({ url: videoUrl(variant.url), bitrate: Number(variant.bitrate) || 0 })).filter((variant) => variant.url).sort((a, b) => b.bitrate - a.bitrate);
+        if (candidates.length && !videos.includes(candidates[0].url)) videos.push(candidates[0].url);
+      }
+      return videos.slice(0, 4);
+    }
+    __name(syndicationVideos, "syndicationVideos");
+    function collectText(value, output = [], depth = 0) {
+      if (depth > 8 || value == null) return output;
+      if (typeof value === "string") {
+        const text = plain(value);
+        if (text) output.push(text);
+        return output;
+      }
+      if (Array.isArray(value)) {
+        for (const item of value.slice(0, 500)) collectText(item, output, depth + 1);
+        return output;
+      }
+      if (typeof value === "object") {
+        for (const key of ["text", "content", "blocks"]) {
+          if (Object.prototype.hasOwnProperty.call(value, key)) collectText(value[key], output, depth + 1);
+        }
+      }
+      return output;
+    }
+    __name(collectText, "collectText");
+    function articleTitle(...values) {
+      for (const value of values) {
+        if (!value || typeof value !== "object") continue;
+        const direct = plain(value.title);
+        if (direct) return direct;
+        const nested = plain(value.article && value.article.title);
+        if (nested) return nested;
+        const result = value.note_tweet_results && value.note_tweet_results.result;
+        if (result && result !== value) {
+          const title = articleTitle(result);
+          if (title) return title;
+        }
+      }
+      return "";
+    }
+    __name(articleTitle, "articleTitle");
+    function collectMedia(payload) {
+      const media = [];
+      for (const rows of [
+        payload.mediaDetails,
+        payload.extended_entities && payload.extended_entities.media,
+        payload.media && payload.media.all,
+        payload.media
+      ]) {
+        if (Array.isArray(rows)) media.push(...rows.slice(0, 30));
+      }
+      return media;
+    }
+    __name(collectMedia, "collectMedia");
+    function readableText(value) {
+      const text = plain(value).replace(/https?:\/\/\S+/gi, "").trim();
+      if (!text || /^(?:read more|continue reading|view more|view on x|show more|see more|more\.\.\.|阅读全文|继续阅读|查看更多|显示更多)[.!…\s→➜➔›»]*$/i.test(text)) return "";
+      return text;
+    }
+    __name(readableText, "readableText");
+    function comparableText(value) {
+      return plain(value).replace(/https?:\/\/\S+/gi, "").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+    }
+    __name(comparableText, "comparableText");
     function normalizeTweet(payload, expectedId, allowQuote = true) {
       if (!payload || payload.__typename !== "Tweet" || String(payload.id_str || "") !== expectedId) throw fail("X_IDENTITY_UNCONFIRMED", "X 未返回目标推文，可能需要登录、已删除或暂时不可访问。");
-      if (payload.truncated === true || payload.article || payload.note_tweet) throw fail("X_LONG_POST_UNSUPPORTED", "这条 X 长文需要完整正文通道，当前返回内容不足，已保留链接等待重试。");
-      const text = plain(payload.text);
-      const media = Array.isArray(payload.mediaDetails) ? payload.mediaDetails : [];
+      const notePayload = payload.note_tweet && payload.note_tweet.note_tweet_results ? payload.note_tweet.note_tweet_results.result : payload.note_tweet;
+      const noteText = collectText(notePayload).join("\n\n");
+      const articleText = collectText(payload.article).join("\n\n");
+      if (payload.truncated === true && !noteText && !articleText) throw fail("X_LONG_POST_UNSUPPORTED", "这条 X 长文需要完整正文通道，当前返回内容不足，已保留链接等待重试。");
+      const title = articleTitle(payload.article, notePayload);
+      const candidateText = readableText(noteText || articleText || payload.text);
+      const text = comparableText(candidateText) && comparableText(candidateText) === comparableText(title) ? "" : candidateText.slice(0, 5e4);
+      const media = collectMedia(payload);
       const photos = Array.isArray(payload.photos) ? payload.photos : [];
-      const images = [...new Set([...photos.map((p) => photoUrl(p.url)), ...media.filter((p) => p.type === "photo").map((p) => photoUrl(p.media_url_https))].filter(Boolean))];
-      if (!text && !images.length) throw fail("X_CONTENT_EMPTY", "X 未返回可保存的图文内容。");
-      if (photos.some((p) => !photoUrl(p.url)) || media.some((p) => p.type === "photo" && !photoUrl(p.media_url_https))) throw fail("X_IMAGE_INCOMPLETE", "X 返回了无法读取的图片地址，请稍后重试。");
+      const photoItems = [...photos, ...media.filter((p) => p && p.type === "photo")];
+      const images = [...new Set(photoItems.map((p) => photoUrl(p && (p.url || p.media_url_https))).filter(Boolean))];
+      const videoItems = media.filter((p) => p && (["video", "animated_gif"].includes(p.type) || p.video_info));
+      const videos = syndicationVideos(videoItems);
+      if (!text && !images.length && !videos.length) throw fail("X_CONTENT_EMPTY", "X 未返回可保存的图文或视频内容。");
+      if (photoItems.some((p) => !photoUrl(p && (p.url || p.media_url_https)))) throw fail("X_IMAGE_INCOMPLETE", "X 返回了无法读取的图片地址，请稍后重试。");
       let quote = null;
       if (allowQuote && payload.quoted_tweet && /^\d+$/.test(String(payload.quoted_tweet.id_str || ""))) quote = normalizeTweet(payload.quoted_tweet, String(payload.quoted_tweet.id_str), false);
       return {
         id: expectedId,
         url: `https://x.com/i/web/status/${expectedId}`,
+        title,
         text,
         images,
-        author: plain(payload.user && (payload.user.name || payload.user.screen_name)),
+        author: plain(payload.user && (payload.user.name || payload.user.screen_name)) || plain(payload.author && (payload.author.name || payload.author.screen_name)),
         createdAt: plain(payload.created_at),
-        hasVideo: media.some((p) => ["video", "animated_gif"].includes(p.type)),
+        hasVideo: videoItems.length > 0,
+        videos,
         quote
       };
     }
     __name(normalizeTweet, "normalizeTweet");
+    function normalizeFxTweet(payload, expectedId) {
+      if (payload && typeof payload === "object" && Number(payload.code) === 429) {
+        throw fail("X_FXEMBED_RATE_LIMITED", "备用 X 内容源暂时限制访问频率。");
+      }
+      if (!payload || typeof payload !== "object" || Number(payload.code) !== 200) {
+        throw fail("X_FXEMBED_UNAVAILABLE", "备用 X 内容源暂时无法读取这条推文。");
+      }
+      const status = payload.status;
+      if (!status || typeof status !== "object" || String(status.id || "") !== expectedId) {
+        throw fail("X_FXEMBED_IDENTITY_MISMATCH", "备用 X 内容源返回的推文与原链接不一致。");
+      }
+      if (status.text !== void 0 && typeof status.text !== "string") {
+        throw fail("X_FXEMBED_INVALID_PAYLOAD", "备用 X 内容源返回的数据格式不完整。");
+      }
+      const statusArticleText = collectText(status.note_tweet || status.article).join("\n\n");
+      const title = articleTitle(status.article, status.note_tweet);
+      const candidateText = readableText(statusArticleText || (typeof status.text === "string" ? status.text : ""));
+      const text = comparableText(candidateText) && comparableText(candidateText) === comparableText(title) ? "" : candidateText.slice(0, 5e4);
+      const media = status.media && typeof status.media === "object" ? status.media : {};
+      if (media.photos !== void 0 && !Array.isArray(media.photos)) {
+        throw fail("X_FXEMBED_INVALID_PAYLOAD", "备用 X 内容源返回的数据格式不完整。");
+      }
+      if (media.videos !== void 0 && !Array.isArray(media.videos)) {
+        throw fail("X_FXEMBED_INVALID_PAYLOAD", "备用 X 内容源返回的数据格式不完整。");
+      }
+      const photos = Array.isArray(media.photos) ? media.photos : [];
+      const images = [];
+      for (const item of photos) {
+        const url = photoUrl(item && (item.url || item.media_url_https));
+        if (!url) throw fail("X_FXEMBED_IMAGE_INVALID", "备用 X 内容源返回了无效图片地址。");
+        if (!images.includes(url)) images.push(url);
+      }
+      const author = status.author && typeof status.author === "object" ? status.author : payload.author && typeof payload.author === "object" ? payload.author : {};
+      const createdAt = plain(status.created_at) || (Number.isFinite(status.created_timestamp) ? new Date(status.created_timestamp * 1e3).toISOString() : "");
+      const videos = [];
+      for (const item of Array.isArray(media.videos) ? media.videos : []) {
+        const url = videoUrl(item && (item.url || item.video_url));
+        for (const candidate of [url, ...syndicationVideos([item])]) if (candidate && !videos.includes(candidate)) videos.push(candidate);
+      }
+      if (!text && !images.length && !videos.length) throw fail("X_FXEMBED_CONTENT_EMPTY", "备用 X 内容源没有返回可保存的正文、图片或视频。");
+      return {
+        id: expectedId,
+        url: `https://x.com/i/web/status/${expectedId}`,
+        title,
+        text,
+        images,
+        author: plain(author.name || author.screen_name || author.username),
+        createdAt,
+        hasVideo: Array.isArray(media.videos) && media.videos.length > 0,
+        videos: videos.slice(0, 4)
+      };
+    }
+    __name(normalizeFxTweet, "normalizeFxTweet");
     async function boundedRequest(request, url, options = {}, signal = null, timeoutMs = 3e4) {
       abort(signal);
       let timer, onAbort;
@@ -1317,20 +1466,60 @@ var require_x_article = __commonJS({
       }
     }
     __name(boundedRequest, "boundedRequest");
-    async function fetchPost(url, request, signal) {
+    async function fetchPost(url, request, signal, options = {}) {
       const id = postId(url);
       if (!id) throw fail("X_POST_URL_REQUIRED", "请提供具体的 X 推文链接，暂不支持主页、书签或长文章链接。");
       const token = (Number(id) / 1e15 * Math.PI).toString(36).replace(/(0+|\.)/g, "");
+      let syndicationError = null;
+      if (!options.skipSyndication) {
+        try {
+          const payload = await boundedRequest(request, `https://cdn.syndication.twimg.com/tweet-result?id=${id}&lang=en&token=${encodeURIComponent(token)}`, {
+            method: "GET",
+            headers: { "User-Agent": "Mozilla/5.0", Referer: "https://platform.twitter.com/" }
+          }, signal);
+          return normalizeTweet(payload, id);
+        } catch (error) {
+          if (isAbortError2(error, signal)) throw abortError();
+          syndicationError = error;
+        }
+      }
+      abort(signal);
+      if (options.skipFxEmbed) {
+        const syndicationCode = Number(syndicationError && syndicationError.status) === 429 ? "X_RATE_LIMITED" : /^X_[A-Z0-9_]+$/.test(String(syndicationError && syndicationError.code || "")) ? syndicationError.code : "X_FETCH_FAILED";
+        const failure = fail(
+          syndicationError ? syndicationCode : "X_FXEMBED_RATE_LIMITED",
+          "X 暂时限制访问频率，请稍后重试。"
+        );
+        failure.xArticleProvider = syndicationError ? "syndication" : "none";
+        if (syndicationError && /^X_[A-Z0-9_]+$/.test(String(syndicationError.code || ""))) failure.xSyndicationErrorCode = syndicationError.code;
+        const status = Number(syndicationError && syndicationError.status);
+        if (Number.isInteger(status) && status >= 100 && status <= 599) failure.status = status;
+        throw failure;
+      }
       try {
-        const payload = await boundedRequest(request, `https://cdn.syndication.twimg.com/tweet-result?id=${id}&lang=en&token=${encodeURIComponent(token)}`, {
+        const payload = await boundedRequest(request, `https://api.fxtwitter.com/2/thread/${id}`, {
           method: "GET",
-          headers: { "User-Agent": "Mozilla/5.0", Referer: "https://platform.twitter.com/" }
+          headers: { Accept: "application/json", "User-Agent": "Mozilla/5.0" }
         }, signal);
-        return normalizeTweet(payload, id);
+        const post = normalizeFxTweet(payload, id);
+        if (Number(syndicationError && syndicationError.status) === 429) post.xSyndicationRateLimited = true;
+        return post;
       } catch (error) {
-        if (error.name === "AbortError" || String(error.code || "").startsWith("X_")) throw error;
-        if (Number(error.status) === 429) throw fail("X_RATE_LIMITED", "X 暂时限制访问频率，请稍后重试。");
-        throw fail("X_FETCH_FAILED", "X 图文暂时无法读取，请检查网络或稍后重试；原始链接已保留。");
+        if (isAbortError2(error, signal)) throw abortError();
+        const status = Number(error && error.status);
+        let code = String(error && error.code || "");
+        if (code === "X_REQUEST_TIMEOUT") code = "X_FXEMBED_TIMEOUT";
+        else if (status === 429) code = "X_FXEMBED_RATE_LIMITED";
+        else if (Number.isInteger(status) && status >= 100 && status <= 599) code = "X_FXEMBED_HTTP_ERROR";
+        else if (!/^X_FXEMBED_[A-Z0-9_]+$/.test(code)) code = "X_FXEMBED_FETCH_FAILED";
+        const failure = fail(code, "X 图文暂时无法读取，原始链接已保留。");
+        failure.xArticleProvider = syndicationError ? "both" : "fxembed";
+        if (syndicationError) {
+          const syndicationCode = Number(syndicationError.status) === 429 ? "X_RATE_LIMITED" : /^X_[A-Z0-9_]+$/.test(String(syndicationError.code || "")) ? syndicationError.code : "X_FETCH_FAILED";
+          failure.xSyndicationErrorCode = syndicationCode;
+        }
+        if (Number.isInteger(status) && status >= 100 && status <= 599) failure.status = status;
+        throw failure;
       }
     }
     __name(fetchPost, "fetchPost");
@@ -1429,13 +1618,16 @@ var require_x_article = __commonJS({
     }
     __name(summarizeText, "summarizeText");
     async function processAi(post, settings, request, signal) {
-      const result = { pairs: [], summary: "", warnings: [] };
+      const result = { titleTranslation: "", pairs: [], summary: "", warnings: [] };
       const translate = settings.xTranslationEnabled === true;
       const summarize = settings.xSummaryEnabled === true;
       if (!translate && !summarize) return result;
-      const text = [post.text, post.quote && post.quote.text].filter(Boolean).join("\n\n");
-      if (!text) return result;
-      const items = translate ? sentences(text).map((original, id) => ({ id, original })).filter((item) => needsTranslation(item.original)) : [];
+      const text = plain(post.aiText || [post.text, post.quote && post.quote.text, post.videoTranscript].filter(Boolean).join("\n\n"));
+      const title = plain(post.title || "");
+      if (!text && !title) return result;
+      const bodyItems = translate && text ? sentences(text).map((original, id) => ({ id, original })).filter((item) => needsTranslation(item.original)) : [];
+      const titleItem = translate && title && needsTranslation(title) ? { id: -1, original: title } : null;
+      const items = [...titleItem ? [titleItem] : [], ...bodyItems];
       if (!items.length && !summarize) return result;
       try {
         aiConfig(settings);
@@ -1457,7 +1649,7 @@ var require_x_article = __commonJS({
             const response = await aiCall(settings, request, '将每项 original 翻译成简体中文；已是中文的项将原文原样填入text。保留 id 与数量，返回 {"translations":[{"id":0,"text":"译文"}]}，不得合并或遗漏。', batch, signal);
             const rows = response.translations;
             if (!Array.isArray(rows) || rows.length !== batch.length || rows.some((r, i) => !r || r.id !== batch[i].id || typeof r.text !== "string" || !r.text.trim() || r.text.length > 16e3)) throw fail("X_AI_ALIGNMENT_FAILED", "AI 译句未能逐句对应原文。");
-            translated.push(...rows.map((r, i) => ({ original: batch[i].original, translation: r.text.trim() })).filter((row) => row.translation !== row.original));
+            translated.push(...rows.map((r, i) => ({ id: batch[i].id, original: batch[i].original, translation: r.text.trim() })));
             batch = [];
             size = 0;
           }, "flush");
@@ -1468,7 +1660,9 @@ var require_x_article = __commonJS({
             size += item.original.length;
           }
           await flush();
-          result.pairs = translated;
+          const titlePair = translated.find((row) => row.id === -1);
+          result.titleTranslation = titlePair ? titlePair.translation : "";
+          result.pairs = translated.filter((row) => row.id !== -1 && row.translation !== row.original);
         } catch (e) {
           if (e.name === "AbortError") throw e;
           result.warnings.push(errorCode(e));
@@ -1486,19 +1680,35 @@ var require_x_article = __commonJS({
     }
     __name(processAi, "processAi");
     function renderPost(post, ai = {}) {
-      const sections = ["## 原文", markdownText(post.text), ...post.images.map((url, i) => `![X 图片 ${i + 1}](${url})`)];
-      if (post.quote) sections.push("### 引用推文", markdownText(post.quote.author), markdownText(post.quote.text), ...post.quote.images.map((url, i) => `![引用图片 ${i + 1}](${url})`), `来源：${post.quote.url}`);
-      if (post.hasVideo) sections.push("> 本条包含视频，此次保存图文；视频未转写。");
-      sections.push(renderAi(ai));
+      const title = plain(post.title || "X");
+      const displayedTitle = ai.titleTranslation && ai.titleTranslation !== title ? `${markdownText(ai.titleTranslation)}（${markdownText(title)}）` : markdownText(title);
+      const sections = [`# ${displayedTitle}`];
+      if (ai.summary) sections.push("## AI 总结", markdownText(ai.summary));
+      if (post.text) sections.push("## 正文", renderSentencePairs(post.text, ai.pairs));
+      if (post.videoTranscript) sections.push("## 视频转写", renderSentencePairs(post.videoTranscript, ai.pairs));
+      sections.push(...post.images.map((url, i) => `![X 图片 ${i + 1}](${url})`));
+      if (post.quote) sections.push("### 引用推文", markdownText(post.quote.author), renderSentencePairs(post.quote.text, ai.pairs), ...post.quote.images.map((url, i) => `![引用图片 ${i + 1}](${url})`), `来源：${post.quote.url}`);
+      if (ai.warnings && ai.warnings.length) sections.push(`> AI 处理未完成，原文与图片已保留。请检查 AI 高级功能设置。诊断：${[...new Set(ai.warnings)].join("、")}`);
       return sections.filter(Boolean).join("\n\n");
     }
     __name(renderPost, "renderPost");
+    function renderSentencePairs(text, pairs = []) {
+      const translations = new Map((Array.isArray(pairs) ? pairs : []).map((pair) => [pair.original, pair.translation]));
+      return sentences(plain(text)).map((original) => {
+        const translation = translations.get(original);
+        return translation && translation !== original ? `${markdownText(translation)}
+
+> ${markdownText(original).replace(/\n/g, "\n> ")}` : markdownText(original);
+      }).join("\n\n");
+    }
+    __name(renderSentencePairs, "renderSentencePairs");
     function renderAi(ai = {}) {
       const sections = [];
-      if (ai.pairs && ai.pairs.length) sections.push("## 多语言翻译", ...ai.pairs.map((p) => `${markdownText(p.original)}
-
-> ${markdownText(p.translation).replace(/\n/g, "\n> ")}`));
       if (ai.summary) sections.push("## AI 总结", markdownText(ai.summary));
+      if (ai.titleTranslation) sections.push(`标题翻译：${markdownText(ai.titleTranslation)}`);
+      if (ai.pairs && ai.pairs.length) sections.push("## 多语言翻译", ...ai.pairs.map((p) => `${markdownText(p.translation)}
+
+> ${markdownText(p.original).replace(/\n/g, "\n> ")}`));
       if (ai.warnings && ai.warnings.length) sections.push(`> 翻译或总结未完成，原文与图片已保留。请检查 AI 高级功能设置。诊断：${[...new Set(ai.warnings)].join("、")}`);
       return sections.join("\n\n");
     }
@@ -1509,7 +1719,7 @@ var require_x_article = __commonJS({
       return true;
     }
     __name(testConnection, "testConnection");
-    module2.exports = { DEFAULTS, MODEL_PRESETS, DEMO_PRESET, demoSettings, isXUrl, postId, photoUrl, normalizeTweet, fetchPost, aiConfig, sentences, needsTranslation, recordText, processAi, renderAi, renderPost, testConnection, errorCode, boundedRequest };
+    module2.exports = { DEFAULTS, MODEL_PRESETS, DEMO_PRESET, demoSettings, isXUrl, postId, photoUrl, videoUrl, normalizeTweet, normalizeFxTweet, fetchPost, aiConfig, sentences, needsTranslation, recordText, processAi, renderAi, renderPost, testConnection, errorCode, boundedRequest };
   }
 });
 
@@ -17733,12 +17943,47 @@ var require_platform_article_utils = __commonJS({
       for (const key of ["platform", "stage", "conversionStatus", "transcriptionStatus", "finalKind", "finalState"]) {
         if (value[key]) result[key] = String(value[key]).replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
       }
-      for (const key of ["httpStatus", "markdownChars"]) if (Number.isFinite(value[key])) result[key] = value[key];
-      if (value.http) result.http = {
-        status: Number(value.http.status) || 0,
-        previousStatus: Number(value.http.previousStatus) || 0,
-        transport: String(value.http.transport || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40)
-      };
+      for (const key of ["httpStatus", "markdownChars"]) {
+        if (!Number.isSafeInteger(value[key])) continue;
+        if (key === "httpStatus" && (value[key] < 100 || value[key] > 599)) continue;
+        if (key === "markdownChars" && value[key] < 0) continue;
+        result[key] = value[key];
+      }
+      if (value.source === "webpage-extraction") {
+        if (["none", "syndication", "fxembed", "both"].includes(value.xArticleProvider)) result.xArticleProvider = value.xArticleProvider;
+        const safeCodes = /* @__PURE__ */ new Set([
+          "X_RATE_LIMITED",
+          "X_FETCH_FAILED",
+          "X_IDENTITY_UNCONFIRMED",
+          "X_LONG_POST_UNSUPPORTED",
+          "X_CONTENT_EMPTY",
+          "X_IMAGE_INCOMPLETE",
+          "X_REQUEST_TIMEOUT",
+          "X_POST_URL_REQUIRED",
+          "X_FXEMBED_UNAVAILABLE",
+          "X_FXEMBED_IDENTITY_MISMATCH",
+          "X_FXEMBED_CONTENT_EMPTY",
+          "X_FXEMBED_INVALID_PAYLOAD",
+          "X_FXEMBED_IMAGE_INVALID",
+          "X_FXEMBED_TIMEOUT",
+          "X_FXEMBED_RATE_LIMITED",
+          "X_FXEMBED_HTTP_ERROR",
+          "X_FXEMBED_FETCH_FAILED"
+        ]);
+        for (const key of ["xArticleErrorCode", "xSyndicationErrorCode"]) {
+          if (safeCodes.has(String(value[key] || ""))) result[key] = String(value[key]);
+        }
+      }
+      if (value.http) {
+        const status = Number(value.http.status);
+        const previousStatus = Number(value.http.previousStatus);
+        result.http = {
+          ...Number.isInteger(status) && status >= 100 && status <= 599 ? { status } : {},
+          ...Number.isInteger(previousStatus) && previousStatus >= 100 && previousStatus <= 599 ? { previousStatus } : {},
+          transport: String(value.http.transport || "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40)
+        };
+        if (!Object.keys(result.http).length) delete result.http;
+      }
       if (value.hiddenBrowser) {
         result.hiddenBrowser = {};
         for (const key of ["ok", "needsLogin", "blocked", "appWall", "identityMatched"]) result.hiddenBrowser[key] = value.hiddenBrowser[key] === true;
@@ -17775,6 +18020,7 @@ var require_sync_lifecycle_utils = __commonJS({
     var { isWechatArticleFailurePlaceholder } = require_wechat_placeholder_utils();
     var { isRecognizedNoSpeechMetadata: isRecognizedNoSpeechMetadata2 } = require_transcription_quality_utils();
     var { isPlatformArticleUrl: isPlatformArticleUrl2, hasPlatformArticleBody: hasPlatformArticleBody2, sanitizePlatformArticleDiagnostic: sanitizePlatformArticleDiagnostic2 } = require_platform_article_utils();
+    var { isXUrl } = require_x_article();
     var crypto2 = require("node:crypto");
     var channelsDiagnostic2 = require_wechat_channels_diagnostic_utils();
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
@@ -17901,13 +18147,20 @@ var require_sync_lifecycle_utils = __commonJS({
       } catch (_error) {
       }
       const conversionDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === "object" ? metadata.conversionDiagnostic : {};
+      const httpStatus = Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus);
+      const xArticleErrorCode = String(metadata.xArticleErrorCode || "").trim();
+      const xSyndicationErrorCode = String(metadata.xSyndicationErrorCode || "").trim();
+      const xProvider = String(metadata.xArticleProvider || "").trim();
       return {
         source: "webpage-extraction",
         host,
         conversionStatus: String(metadata.conversionStatus || "").trim().toLowerCase(),
         transcriptionStatus: String(metadata.transcriptionStatus || "").trim().toLowerCase(),
         markdownChars: String(markdown || "").length,
-        httpStatus: Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus) || 0,
+        ...Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {},
+        ...xArticleErrorCode ? { xArticleErrorCode } : {},
+        ...xSyndicationErrorCode ? { xSyndicationErrorCode } : {},
+        ...xProvider ? { xArticleProvider: xProvider } : {},
         finalKind: String(conversionDiagnostic.finalKind || "").slice(0, 40),
         finalState: String(conversionDiagnostic.finalState || "").slice(0, 40),
         note: String(metadata.conversionNote || metadata.conversionError || "").slice(0, 200),
@@ -17972,6 +18225,23 @@ var require_sync_lifecycle_utils = __commonJS({
       return String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/<!--\s*wechat-inbox-record-id\s*:[\s\S]*?-->/gi, "").trim();
     }
     __name(getMarkdownBody, "getMarkdownBody");
+    function hasXArticleBody2(markdown, metadata = {}) {
+      const body = getMarkdownBody(markdown);
+      const comparableText = /* @__PURE__ */ __name((value) => String(value || "").replace(/https?:\/\/\S+/gi, "").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ""), "comparableText");
+      const originalText = String(metadata && metadata.xOriginalText || "").replace(/https?:\/\/\S+/gi, "").trim();
+      const markdownTitle = (body.match(/^#\s+X[：:]\s*([^\r\n]+)/im) || [])[1] || "";
+      const metadataTitle = String(metadata && (metadata.xOriginalTitle || metadata.title) || markdownTitle).split("：").slice(-1)[0].trim();
+      const isShell = /* @__PURE__ */ __name((value) => /^(?:read more|continue reading|view more|view on x|show more|see more|more\.\.\.|阅读全文|继续阅读|查看更多|显示更多)[.!…\s→➜➔›»]*$/i.test(String(value || "").trim()), "isShell");
+      if (originalText && !isShell(originalText) && comparableText(originalText) !== comparableText(metadataTitle)) return true;
+      const hasImage = /!\[[^\]\n]*\]\(\s*https?:\/\/pbs\.twimg\.com\/media\//i.test(body);
+      if (hasImage) return true;
+      const sections = body.split(/(?=^#{1,6}\s)/m).filter((section) => /^## (?:正文|视频转写)\s*$/m.test(section));
+      return sections.some((section) => {
+        const content = section.replace(/^\s*#{1,6}\s+[^\n]*\r?\n/, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/^\s*(?:来源|原始链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, "").replace(/https?:\/\/\S+/gi, "").replace(/^\s*(?:read more|continue reading|view more|view on x|show more|see more|more\.\.\.|阅读全文|继续阅读|查看更多|显示更多)[.!…\s→➜➔›»]*$/gim, "").replace(/^\s*>\s?/gm, "").trim();
+        return content.length > 0 && comparableText(content) !== comparableText(metadataTitle);
+      });
+    }
+    __name(hasXArticleBody2, "hasXArticleBody");
     function getLocalFileAttachmentPaths2(markdown) {
       const paths = [];
       const pattern = /^\s*本地(?:图片|附件)\s*[：:]\s*!?\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]\s*$/gim;
@@ -18071,7 +18341,12 @@ var require_sync_lifecycle_utils = __commonJS({
         metadata.snapshot,
         metadata.contentSnapshot
       ].map((value) => String(value || "").trim()).filter(Boolean).join("\n");
+      const xRecord = isXUrl(url);
+      const xArticleBodySaved = xRecord && conversionStatus === "success" && hasXArticleBody2(markdown, metadata);
       const declaredError = `${metadata.conversionError || ""} ${metadata.transcriptionError || ""}`.trim();
+      if (xRecord && (["failed", "link_saved"].includes(conversionStatus) || conversionStatus === "success" && !hasXArticleBody2(markdown, metadata))) {
+        return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "X 正文提取失败，未将标题或链接标记为同步成功", buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
+      }
       if (isPlatformArticleUrl2(url) && (["failed", "link_saved"].includes(conversionStatus) || !hasPlatformArticleBody2(markdown))) {
         return createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "文章正文提取失败，未将标题或链接标记为同步成功", buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
       }
@@ -18085,7 +18360,7 @@ var require_sync_lifecycle_utils = __commonJS({
       const hasDeclaredFailureState = ["failed", "link_saved", "wechat_captcha"].includes(conversionStatus) || transcriptionStatus === "failed";
       const channelsOutcome = channelsDiagnostic2.outcome(metadata.mediaResolutionDiagnostic);
       if (channelsOutcome && transcriptionStatus === "failed") return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
-      if (transcriptionStatus === "failed" && !transcription) {
+      if (transcriptionStatus === "failed" && !transcription && !xArticleBodySaved) {
         return isXiaohongshuRecordSource(url) ? createSyncLifecycleOutcomeError("EXTRACTION_FAILED", "小红书内容提取失败，请重新同步") : createSyncLifecycleOutcomeError("TRANSCRIPTION_FAILED", metadata.transcriptionError || metadata.conversionError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED);
       }
       if (/UNSUPPORTED (?:PLATFORM|RECORD TYPE|SITE)|暂不支持(?:此|该)?平台|不支持(?:此|该)?平台/i.test(declaredError) && (hasDeclaredFailureState || !hasUsableOutput)) {
@@ -18115,7 +18390,7 @@ var require_sync_lifecycle_utils = __commonJS({
           buildPdfExtractionFailureDiagnostic(metadata)
         );
       }
-      if (transcriptionStatus === "failed" && !transcription) {
+      if (transcriptionStatus === "failed" && !transcription && !xArticleBodySaved) {
         return createSyncLifecycleOutcomeError(
           "TRANSCRIPTION_FAILED",
           declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED
@@ -18146,6 +18421,7 @@ var require_sync_lifecycle_utils = __commonJS({
       SYNC_LIFECYCLE_FAILURE_MESSAGES,
       categorizeSyncFailure: categorizeSyncFailure2,
       getLocalFileAttachmentPaths: getLocalFileAttachmentPaths2,
+      hasXArticleBody: hasXArticleBody2,
       getSyncLifecycleOutcomeError: getSyncLifecycleOutcomeError2,
       getSyncLifecycleBindingFingerprint: getSyncLifecycleBindingFingerprint2,
       getSyncNoteTitleFromPath: getSyncNoteTitleFromPath2,
@@ -22751,6 +23027,7 @@ var {
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
+  hasXArticleBody,
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
@@ -22894,7 +23171,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.3.220";
+var PLUGIN_RUNTIME_VERSION = "1.4.0";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -44215,6 +44492,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           sourceUrl: options.sourceUrl || options.url || "",
           decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || "",
           signal: abortController.signal,
+          ...Number(options.maxBytes) > 0 ? { maxBytes: Math.min(MAX_CLOUD_FALLBACK_MEDIA_BYTES, Number(options.maxBytes)) } : {},
           onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
           onProgress: /* @__PURE__ */ __name((progress = {}) => {
             if (typeof progress.percent === "number") {
@@ -45631,6 +45909,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     mediaResolutionDiagnostic = null,
     refreshMediaUrls = null,
     preparedMedia = false,
+    maxBytes = 0,
     forceLocal = false,
     signal = null
   }) {
@@ -45816,6 +46095,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
             sourceUrl: url,
             workId,
             durationSeconds: Number(candidate.durationSeconds || metadata.durationSeconds || metadata.duration || 0) || null,
+            maxBytes,
             binding,
             recordId: getRecordId(record),
             diagnosticAttemptId: (mediaDiagnosticTrace == null ? void 0 : mediaDiagnosticTrace.source) === "xiaohongshu-browser" ? mediaDiagnosticTrace.attemptId : "",
@@ -46497,18 +46777,22 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     return response.json || (response.text ? tryParseJson(response.text) : null) || {};
   }
-  async hydrateXArticle(record, rootDir, dateFolder, title, options = {}) {
+  async hydrateXArticle(record, rootDir, dateFolder, title, binding = null, options = {}) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
     const signal = options.signal;
     const request = /* @__PURE__ */ __name((endpoint, config) => this.requestXArticleJson(endpoint, config), "request");
     let post;
     try {
-      if (this.xArticleBlockedUntil > Date.now()) throw Object.assign(new Error("X 暂时限制访问频率，请稍后重试。"), { code: "X_RATE_LIMITED" });
-      post = await xArticle.fetchPost(url, request, signal);
+      const skipSyndication = this.xArticleSyndicationBlockedUntil > Date.now();
+      const skipFxEmbed = this.xArticleFxEmbedBlockedUntil > Date.now();
+      if (skipSyndication && skipFxEmbed) throw Object.assign(new Error("X 暂时限制访问频率，请稍后重试。"), { code: "X_RATE_LIMITED" });
+      post = await xArticle.fetchPost(url, request, signal, { skipSyndication, skipFxEmbed });
+      if (post.xSyndicationRateLimited) this.xArticleSyndicationBlockedUntil = Date.now() + 15 * 60 * 1e3;
     } catch (error) {
       if (isAbortError(error)) throw error;
-      if (error.code === "X_RATE_LIMITED" && !(this.xArticleBlockedUntil > Date.now())) this.xArticleBlockedUntil = Date.now() + 15 * 60 * 1e3;
+      if ((error.code === "X_RATE_LIMITED" || error.xSyndicationErrorCode === "X_RATE_LIMITED") && !(this.xArticleSyndicationBlockedUntil > Date.now())) this.xArticleSyndicationBlockedUntil = Date.now() + 15 * 60 * 1e3;
+      if ((error.code === "X_FXEMBED_RATE_LIMITED" || Number(error.status) === 429) && !(this.xArticleFxEmbedBlockedUntil > Date.now())) this.xArticleFxEmbedBlockedUntil = Date.now() + 15 * 60 * 1e3;
       return { ...record, metadata: {
         ...metadata,
         platform: "X",
@@ -46519,14 +46803,106 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         conversionStatus: "link_saved",
         conversionError: error.message,
         xArticleErrorCode: error.code,
+        xArticleProvider: error.xArticleProvider || "none",
+        ...error.xSyndicationErrorCode ? { xSyndicationErrorCode: error.xSyndicationErrorCode } : {},
+        ...Number.isInteger(Number(error.status)) && Number(error.status) >= 100 && Number(error.status) <= 599 ? { httpStatus: Number(error.status) } : {},
         markdown: `> ${error.message}
 
 原始链接：${url}`
       } };
     }
     throwIfAborted(signal);
-    const pageTitle = `${post.author || "X"}：${post.text.slice(0, 80) || "图片"}`;
-    let markdown = xArticle.renderPost(post);
+    const pageTitle = `${post.author || "X"}：${post.title || post.text.slice(0, 80) || (post.hasVideo ? "X 视频" : "图片")}`;
+    const cleanMetadata = { ...metadata };
+    for (const key of ["transcription", "transcriptionStatus", "transcriptionError", "conversionError", "xArticleErrorCode", "aiMetadataError"]) delete cleanMetadata[key];
+    const articleMetadata = {
+      ...cleanMetadata,
+      url: post.url,
+      title: pageTitle,
+      xOriginalTitle: post.title || "",
+      author: post.author,
+      publishedAt: post.createdAt,
+      platform: "X",
+      contentCategory: "图文",
+      sourceMetadataComplete: true,
+      transcriptOnly: false,
+      webpageMediaType: "article",
+      conversionStatus: "success",
+      xOriginalText: [post.text, post.quote && post.quote.text].filter(Boolean).join("\n\n"),
+      xImageCount: post.images.length + (post.quote ? post.quote.images.length : 0)
+    };
+    const articleRecord = { ...record, metadata: articleMetadata };
+    const sourceMarkdown = xArticle.renderPost({ ...post, title: pageTitle });
+    let videoTranscript = "";
+    let transcriptionStatus = "";
+    let transcriptionError = "";
+    let mediaUrls = [];
+    const videoUrls = Array.isArray(post.videos) ? [...new Set(post.videos.map(xArticle.videoUrl).filter(Boolean))].slice(0, 4) : [];
+    if (post.hasVideo) {
+      mediaUrls = videoUrls;
+      if (!videoUrls.length) {
+        transcriptionStatus = "failed";
+        transcriptionError = "X 帖子包含视频，但暂未获取到可转写的视频地址。";
+      } else {
+        const successful = [];
+        const failures = [];
+        for (const [index, videoUrl] of videoUrls.entries()) {
+          throwIfAborted(signal);
+          try {
+            const result = await this.buildTranscriptRecordFromMedia(articleRecord, {
+              url: post.url,
+              platform: "X",
+              mediaUrl: videoUrl,
+              mediaUrls: [videoUrl],
+              source: "x-video",
+              noMediaError: "未能读取 X 视频地址",
+              markdown: sourceMarkdown,
+              binding,
+              title: title || pageTitle,
+              sourceTitle: pageTitle,
+              signal,
+              maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES
+            });
+            const resultMetadata = result && result.metadata || {};
+            if (resultMetadata.transcriptionStatus === "success" && String(resultMetadata.transcription || "").trim()) {
+              successful.push({ index: index + 1, text: String(resultMetadata.transcription).trim() });
+            } else {
+              failures.push(String(resultMetadata.transcriptionError || "视频转写未完成"));
+            }
+          } catch (error) {
+            if (isAbortError(error) || (signal == null ? void 0 : signal.aborted)) throw error;
+            failures.push(String(error && error.message || "视频转写未完成"));
+          }
+        }
+        if (successful.length) {
+          videoTranscript = successful.map((item) => videoUrls.length > 1 ? `视频 ${item.index}
+${item.text}` : item.text).join("\n\n");
+          transcriptionStatus = "success";
+          if (failures.length) transcriptionError = "部分视频未能完成转写。";
+        } else {
+          transcriptionStatus = "failed";
+          transcriptionError = failures[0] || "X 视频转写未完成。";
+        }
+      }
+    }
+    throwIfAborted(signal);
+    const aiSettings = xArticle.demoSettings(this.settings);
+    let ai = { titleTranslation: "", pairs: [], summary: "", warnings: [] };
+    if (aiSettings.xTranslationEnabled || aiSettings.xSummaryEnabled) {
+      ai = await xArticle.processAi(
+        {
+          ...post,
+          title: pageTitle,
+          videoTranscript,
+          aiText: [post.text, post.quote && post.quote.text, videoTranscript].filter(Boolean).join("\n\n")
+        },
+        aiSettings,
+        request,
+        signal
+      );
+    }
+    const markdownSource = xArticle.renderPost({ ...post, title: pageTitle, videoTranscript }, ai);
+    let markdown = markdownSource;
     let imageFailures = 0;
     try {
       markdown = await this.saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title || pageTitle, {
@@ -46541,23 +46917,19 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     throwIfAborted(signal);
     if (imageFailures) markdown += "\n\n> 部分图片未能保存到本地，已保留原始图片链接。";
-    const cleanMetadata = { ...metadata };
-    for (const key of ["transcription", "transcriptionStatus", "transcriptionError", "conversionError", "xArticleErrorCode", "aiMetadataError"]) delete cleanMetadata[key];
+    if (transcriptionError) markdown += `
+
+> ${post.hasVideo ? "X 视频转写未完成，原帖文字和图片已保留。" : transcriptionError}`;
+    const translatedTitle = ai.titleTranslation && ai.titleTranslation !== pageTitle ? `${ai.titleTranslation}（${pageTitle}）` : pageTitle;
     return { ...record, metadata: {
-      ...cleanMetadata,
-      url: post.url,
-      title: pageTitle,
-      author: post.author,
-      publishedAt: post.createdAt,
-      platform: "X",
-      contentCategory: "图文",
-      sourceMetadataComplete: true,
-      transcriptOnly: false,
-      webpageMediaType: "article",
-      conversionStatus: "success",
+      ...articleMetadata,
+      title: translatedTitle,
       markdown,
-      xOriginalText: [post.text, post.quote && post.quote.text].filter(Boolean).join("\n\n"),
-      xImageCount: post.images.length + (post.quote ? post.quote.images.length : 0)
+      transcription: videoTranscript,
+      ...post.hasVideo ? { transcriptionStatus } : {},
+      ...transcriptionError ? { transcriptionError } : {},
+      mediaUrls,
+      xAdvancedAiProcessed: true
     } };
   }
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null, options = {}) {
@@ -46566,7 +46938,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
-    if (xArticle.isXUrl(url)) return this.hydrateXArticle(record, rootDir, dateFolder, title, options);
+    if (xArticle.isXUrl(url)) return this.hydrateXArticle(record, rootDir, dateFolder, title, binding, options);
     if (isXiaohongshuUrl(url) && getActiveXiaohongshuRestriction()) {
       const queued = await this.maybeSubmitXiaohongshuCloudFallback(record, {
         url,
@@ -46641,7 +47013,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     const isFeishuLink = isFeishuUrl(url);
     const feishuCloudOAuthStatus = isFeishuLink ? await this.getFeishuCloudOAuthStatus(binding) : null;
-    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && (!isPlatformArticleUrl(url) || !["failed", "link_saved"].includes(metadata.conversionStatus) && hasPlatformArticleBody(metadata.markdown || metadata.snapshot || metadata.contentSnapshot)) && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === "audio_video" || metadata.contentCategory === "视频" || metadata.videoUrl) && !String(metadata.transcription || "").trim()) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && (!isWechatArticleUrl(url) || !getSyncLifecycleOutcomeError(record) && (!(metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim())) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
+    if (!(feishuCloudOAuthStatus == null ? void 0 : feishuCloudOAuthStatus.connected) && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot) && (!isPlatformArticleUrl(url) || !["failed", "link_saved"].includes(metadata.conversionStatus) && hasPlatformArticleBody(metadata.markdown || metadata.snapshot || metadata.contentSnapshot)) && (!xArticle.isXUrl(url) || !["failed", "link_saved"].includes(metadata.conversionStatus) && hasXArticleBody(metadata.markdown || metadata.snapshot || metadata.contentSnapshot, metadata)) && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === "audio_video" || metadata.contentCategory === "视频" || metadata.videoUrl) && !String(metadata.transcription || "").trim()) && (!isWechatChannelsUrl(url) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim()) && (!isWechatArticleUrl(url) || !getSyncLifecycleOutcomeError(record) && (!(metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly) || metadata.transcriptionStatus === "success" && String(metadata.transcription || "").trim())) && !shouldRefreshFeishuMarkdownFromSource(url, metadata)) {
       if (xiaohongshuBrowserDiagnostic) {
         const prior = metadata.xiaohongshuCommentResult;
         let savedMarkdown = String(metadata.markdown || metadata.snapshot || metadata.contentSnapshot || "");
@@ -49303,21 +49675,39 @@ ${finalized.markdown}
     });
   }
   async appendAdvancedAi(markdown, record, options = {}) {
+    if (record && record.metadata && record.metadata.xAdvancedAiProcessed === true) return markdown;
     const settings = xArticle.demoSettings(this.settings);
     if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return markdown;
     const text = xArticle.recordText(record);
     if (!text) return markdown;
-    const result = await xArticle.processAi(
-      { text },
+    const result = record.metadata && record.metadata.xAdvancedAiResult || await xArticle.processAi(
+      { text, title: record.metadata && record.metadata.title || "" },
       settings,
       (url, config) => this.requestXArticleJson(url, config),
       options.signal
     );
-    const addition = xArticle.renderAi(result);
-    return addition ? `${markdown}
-
-${addition}
-` : markdown;
+    const summary = result.summary ? xArticle.renderAi({ summary: result.summary }) : "";
+    const translation = xArticle.renderAi({ ...result, summary: "" });
+    if (!summary && !translation) return markdown;
+    const match = /^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/.exec(markdown);
+    if (!match) return [summary, markdown, translation].filter(Boolean).join("\n\n") + "\n";
+    return [match[1].trimEnd(), summary, match[2].trim(), translation].filter(Boolean).join("\n\n") + "\n";
+  }
+  async prepareAdvancedAiRecord(record, fallbackTitle, signal = null) {
+    if (!record || !record.metadata || record.metadata.xAdvancedAiProcessed === true) return record;
+    const settings = xArticle.demoSettings(this.settings);
+    if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return record;
+    const text = xArticle.recordText(record);
+    if (!text) return record;
+    const title = String(record.metadata.title || fallbackTitle || "").trim();
+    const result = await xArticle.processAi(
+      { text, title },
+      settings,
+      (url, config) => this.requestXArticleJson(url, config),
+      signal
+    );
+    const translatedTitle = result.titleTranslation && result.titleTranslation !== title ? `${result.titleTranslation}（${title}）` : title;
+    return { ...record, metadata: { ...record.metadata, ...translatedTitle ? { title: translatedTitle } : {}, xAdvancedAiResult: result } };
   }
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     var _a;
@@ -49333,7 +49723,7 @@ ${addition}
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
     let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
-    const localizedImageFolderTitle = title;
+    let localizedImageFolderTitle = title;
     let recordForMarkdown = record;
     const recordType = String(record.type || "").toLowerCase();
     const linkAsWebpage = recordType === "link" && shouldHydrateLinkAsWebpage(record.metadata && record.metadata.url || record.content || "");
@@ -49431,7 +49821,8 @@ ${addition}
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
     }
-    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial) {
+    const xArticleBodySaved = xArticle.isXUrl(getRecordUrl(recordForMarkdown)) && String(recordForMarkdown.metadata && recordForMarkdown.metadata.platform || "").toLowerCase() === "x" && String(recordForMarkdown.metadata && recordForMarkdown.metadata.conversionStatus || "").toLowerCase() === "success" && hasXArticleBody(String(recordForMarkdown.metadata && recordForMarkdown.metadata.markdown || ""), recordForMarkdown.metadata || {});
+    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial && !xArticleBodySaved) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || "pending";
       if (isXiaohongshuUrl(getRecordUrl(recordForMarkdown))) {
@@ -49469,6 +49860,11 @@ ${addition}
       recordForMarkdown = { ...recordForMarkdown, metadata: { ...recordForMarkdown.metadata, transcription: cleanTranscriptionTail(recordForMarkdown.metadata.transcription) } };
     }
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
+    if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.prepareAdvancedAiRecord(recordForMarkdown, title, signal);
+    if (recordForMarkdown.metadata && recordForMarkdown.metadata.xAdvancedAiResult && recordForMarkdown.metadata.title) {
+      title = recordForMarkdown.metadata.title;
+      localizedImageFolderTitle = title;
+    }
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
       fallbackTitle: title,

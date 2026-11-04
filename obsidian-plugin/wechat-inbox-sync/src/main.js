@@ -226,6 +226,7 @@ const {
   getSyncLifecycleBindingFingerprint,
   getSyncLifecycleOutcomeError,
   getSyncNoteTitleFromPath,
+  hasXArticleBody,
   isExistingLocalNoteDeliverable,
   isLegacySyncLifecycleError,
   isSyncRecordBusyError,
@@ -383,7 +384,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.3.220';
+const PLUGIN_RUNTIME_VERSION = '1.4.0';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -24414,6 +24415,9 @@ class WechatObsidianInboxPlugin extends Plugin {
           sourceUrl: options.sourceUrl || options.url || '',
           decryptKey: options.decryptKey || options.wechatChannelsDecodeKey || '',
           signal: abortController.signal,
+          ...(Number(options.maxBytes) > 0
+            ? { maxBytes: Math.min(MAX_CLOUD_FALLBACK_MEDIA_BYTES, Number(options.maxBytes)) }
+            : {}),
           onMediaDownloadDiagnostic: options.onMediaDownloadDiagnostic,
           onProgress: (progress = {}) => {
             if (typeof progress.percent === 'number') {
@@ -25936,6 +25940,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     mediaResolutionDiagnostic = null,
     refreshMediaUrls = null,
     preparedMedia = false,
+    maxBytes = 0,
     forceLocal = false,
     signal = null,
   }) {
@@ -26166,6 +26171,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               sourceUrl: url,
               workId,
               durationSeconds: Number(candidate.durationSeconds || metadata.durationSeconds || metadata.duration || 0) || null,
+              maxBytes,
               binding,
               recordId: getRecordId(record),
               diagnosticAttemptId: mediaDiagnosticTrace?.source === 'xiaohongshu-browser' ? mediaDiagnosticTrace.attemptId : '',
@@ -26928,27 +26934,99 @@ class WechatObsidianInboxPlugin extends Plugin {
     return response.json || (response.text ? tryParseJson(response.text) : null) || {};
   }
 
-  async hydrateXArticle(record, rootDir, dateFolder, title, options = {}) {
+  async hydrateXArticle(record, rootDir, dateFolder, title, binding = null, options = {}) {
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
     const signal = options.signal;
     const request = (endpoint, config) => this.requestXArticleJson(endpoint, config);
     let post;
     try {
-      if (this.xArticleBlockedUntil > Date.now()) throw Object.assign(new Error('X 暂时限制访问频率，请稍后重试。'), { code: 'X_RATE_LIMITED' });
-      post = await xArticle.fetchPost(url, request, signal);
+      const skipSyndication = this.xArticleSyndicationBlockedUntil > Date.now();
+      const skipFxEmbed = this.xArticleFxEmbedBlockedUntil > Date.now();
+      if (skipSyndication && skipFxEmbed) throw Object.assign(new Error('X 暂时限制访问频率，请稍后重试。'), { code: 'X_RATE_LIMITED' });
+      post = await xArticle.fetchPost(url, request, signal, { skipSyndication, skipFxEmbed });
+      if (post.xSyndicationRateLimited) this.xArticleSyndicationBlockedUntil = Date.now() + 15 * 60 * 1000;
     }
     catch (error) {
       if (isAbortError(error)) throw error;
-      if (error.code === 'X_RATE_LIMITED' && !(this.xArticleBlockedUntil > Date.now())) this.xArticleBlockedUntil = Date.now() + 15 * 60 * 1000;
+      if ((error.code === 'X_RATE_LIMITED' || error.xSyndicationErrorCode === 'X_RATE_LIMITED')
+        && !(this.xArticleSyndicationBlockedUntil > Date.now())) this.xArticleSyndicationBlockedUntil = Date.now() + 15 * 60 * 1000;
+      if ((error.code === 'X_FXEMBED_RATE_LIMITED' || Number(error.status) === 429)
+        && !(this.xArticleFxEmbedBlockedUntil > Date.now())) this.xArticleFxEmbedBlockedUntil = Date.now() + 15 * 60 * 1000;
       return { ...record, metadata: { ...metadata, platform: 'X', contentCategory: '图文',
         sourceMetadataComplete: true, transcriptOnly: false, webpageMediaType: 'article',
         conversionStatus: 'link_saved', conversionError: error.message, xArticleErrorCode: error.code,
+        xArticleProvider: error.xArticleProvider || 'none',
+        ...(error.xSyndicationErrorCode ? { xSyndicationErrorCode: error.xSyndicationErrorCode } : {}),
+        ...(Number.isInteger(Number(error.status)) && Number(error.status) >= 100 && Number(error.status) <= 599
+          ? { httpStatus: Number(error.status) } : {}),
         markdown: `> ${error.message}\n\n原始链接：${url}` } };
     }
     throwIfAborted(signal);
-    const pageTitle = `${post.author || 'X'}：${post.text.slice(0, 80) || '图片'}`;
-    let markdown = xArticle.renderPost(post);
+    const pageTitle = `${post.author || 'X'}：${post.title || post.text.slice(0, 80) || (post.hasVideo ? 'X 视频' : '图片')}`;
+    const cleanMetadata = { ...metadata };
+    for (const key of ['transcription', 'transcriptionStatus', 'transcriptionError', 'conversionError', 'xArticleErrorCode', 'aiMetadataError']) delete cleanMetadata[key];
+    const articleMetadata = { ...cleanMetadata, url: post.url, title: pageTitle, xOriginalTitle: post.title || '',
+      author: post.author, publishedAt: post.createdAt, platform: 'X', contentCategory: '图文',
+      sourceMetadataComplete: true, transcriptOnly: false, webpageMediaType: 'article',
+      conversionStatus: 'success', xOriginalText: [post.text, post.quote && post.quote.text].filter(Boolean).join('\n\n'),
+      xImageCount: post.images.length + (post.quote ? post.quote.images.length : 0),
+    };
+    const articleRecord = { ...record, metadata: articleMetadata };
+    const sourceMarkdown = xArticle.renderPost({ ...post, title: pageTitle });
+    let videoTranscript = '';
+    let transcriptionStatus = '';
+    let transcriptionError = '';
+    let mediaUrls = [];
+    const videoUrls = Array.isArray(post.videos) ? [...new Set(post.videos.map(xArticle.videoUrl).filter(Boolean))].slice(0, 4) : [];
+    if (post.hasVideo) {
+      mediaUrls = videoUrls;
+      if (!videoUrls.length) {
+        transcriptionStatus = 'failed';
+        transcriptionError = 'X 帖子包含视频，但暂未获取到可转写的视频地址。';
+      } else {
+        const successful = [];
+        const failures = [];
+        for (const [index, videoUrl] of videoUrls.entries()) {
+          throwIfAborted(signal);
+          try {
+            const result = await this.buildTranscriptRecordFromMedia(articleRecord, {
+              url: post.url, platform: 'X', mediaUrl: videoUrl, mediaUrls: [videoUrl],
+              source: 'x-video', noMediaError: '未能读取 X 视频地址', markdown: sourceMarkdown,
+              binding, title: title || pageTitle, sourceTitle: pageTitle, signal,
+              maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+            });
+            const resultMetadata = result && result.metadata || {};
+            if (resultMetadata.transcriptionStatus === 'success' && String(resultMetadata.transcription || '').trim()) {
+              successful.push({ index: index + 1, text: String(resultMetadata.transcription).trim() });
+            } else {
+              failures.push(String(resultMetadata.transcriptionError || '视频转写未完成'));
+            }
+          } catch (error) {
+            if (isAbortError(error) || signal?.aborted) throw error;
+            failures.push(String(error && error.message || '视频转写未完成'));
+          }
+        }
+        if (successful.length) {
+          videoTranscript = successful.map(item => videoUrls.length > 1 ? `视频 ${item.index}\n${item.text}` : item.text).join('\n\n');
+          transcriptionStatus = 'success';
+          if (failures.length) transcriptionError = '部分视频未能完成转写。';
+        } else {
+          transcriptionStatus = 'failed';
+          transcriptionError = failures[0] || 'X 视频转写未完成。';
+        }
+      }
+    }
+    throwIfAborted(signal);
+    const aiSettings = xArticle.demoSettings(this.settings);
+    let ai = { titleTranslation: '', pairs: [], summary: '', warnings: [] };
+    if (aiSettings.xTranslationEnabled || aiSettings.xSummaryEnabled) {
+      ai = await xArticle.processAi({ ...post, title: pageTitle, videoTranscript,
+        aiText: [post.text, post.quote && post.quote.text, videoTranscript].filter(Boolean).join('\n\n') },
+      aiSettings, request, signal);
+    }
+    const markdownSource = xArticle.renderPost({ ...post, title: pageTitle, videoTranscript }, ai);
+    let markdown = markdownSource;
     let imageFailures = 0;
     try {
       markdown = await this.saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title || pageTitle, {
@@ -26957,13 +27035,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) { if (isAbortError(error)) throw error; imageFailures += 1; }
     throwIfAborted(signal);
     if (imageFailures) markdown += '\n\n> 部分图片未能保存到本地，已保留原始图片链接。';
-    const cleanMetadata = { ...metadata };
-    for (const key of ['transcription', 'transcriptionStatus', 'transcriptionError', 'conversionError', 'xArticleErrorCode', 'aiMetadataError']) delete cleanMetadata[key];
-    return { ...record, metadata: { ...cleanMetadata, url: post.url, title: pageTitle,
-      author: post.author, publishedAt: post.createdAt, platform: 'X', contentCategory: '图文',
-      sourceMetadataComplete: true, transcriptOnly: false, webpageMediaType: 'article',
-      conversionStatus: 'success', markdown, xOriginalText: [post.text, post.quote && post.quote.text].filter(Boolean).join('\n\n'),
-      xImageCount: post.images.length + (post.quote ? post.quote.images.length : 0),
+    if (transcriptionError) markdown += `\n\n> ${post.hasVideo ? 'X 视频转写未完成，原帖文字和图片已保留。' : transcriptionError}`;
+    const translatedTitle = ai.titleTranslation && ai.titleTranslation !== pageTitle
+      ? `${ai.titleTranslation}（${pageTitle}）` : pageTitle;
+    return { ...record, metadata: { ...articleMetadata, title: translatedTitle, markdown,
+      transcription: videoTranscript, ...(post.hasVideo ? { transcriptionStatus } : {}),
+      ...(transcriptionError ? { transcriptionError } : {}), mediaUrls,
+      xAdvancedAiProcessed: true,
     } };
   }
 
@@ -26972,7 +27050,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     throwIfAborted(signal);
     const metadata = record.metadata || {};
     const url = metadata.url || record.content;
-    if (xArticle.isXUrl(url)) return this.hydrateXArticle(record, rootDir, dateFolder, title, options);
+    if (xArticle.isXUrl(url)) return this.hydrateXArticle(record, rootDir, dateFolder, title, binding, options);
     // Once this batch has seen a Xiaohongshu wall, later Xiaohongshu records
     // must not touch the platform again. Non-Xiaohongshu records are untouched.
     if (isXiaohongshuUrl(url) && getActiveXiaohongshuRestriction()) {
@@ -27056,6 +27134,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       && (metadata.markdown || metadata.snapshot || metadata.contentSnapshot)
       && (!isPlatformArticleUrl(url) || (!['failed', 'link_saved'].includes(metadata.conversionStatus)
         && hasPlatformArticleBody(metadata.markdown || metadata.snapshot || metadata.contentSnapshot)))
+      && (!xArticle.isXUrl(url) || (!['failed', 'link_saved'].includes(metadata.conversionStatus)
+        && hasXArticleBody(metadata.markdown || metadata.snapshot || metadata.contentSnapshot, metadata)))
       && !(isXiaohongshuUrl(url) && (metadata.webpageMediaType === 'audio_video' || metadata.contentCategory === '视频' || metadata.videoUrl)
         && !String(metadata.transcription || '').trim())
       && (!isWechatChannelsUrl(url) || (metadata.transcriptionStatus === 'success' && String(metadata.transcription || '').trim()))
@@ -30052,14 +30132,34 @@ class WechatObsidianInboxPlugin extends Plugin {
     });
   }
   async appendAdvancedAi(markdown, record, options = {}) {
+    if (record && record.metadata && record.metadata.xAdvancedAiProcessed === true) return markdown;
     const settings = xArticle.demoSettings(this.settings);
     if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return markdown;
     const text = xArticle.recordText(record);
     if (!text) return markdown;
-    const result = await xArticle.processAi({ text }, settings,
-      (url, config) => this.requestXArticleJson(url, config), options.signal);
-    const addition = xArticle.renderAi(result);
-    return addition ? `${markdown}\n\n${addition}\n` : markdown;
+    const result = record.metadata && record.metadata.xAdvancedAiResult
+      || await xArticle.processAi({ text, title: record.metadata && record.metadata.title || '' }, settings,
+        (url, config) => this.requestXArticleJson(url, config), options.signal);
+    const summary = result.summary ? xArticle.renderAi({ summary: result.summary }) : '';
+    const translation = xArticle.renderAi({ ...result, summary: '' });
+    if (!summary && !translation) return markdown;
+    const match = /^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/.exec(markdown);
+    if (!match) return [summary, markdown, translation].filter(Boolean).join('\n\n') + '\n';
+    return [match[1].trimEnd(), summary, match[2].trim(), translation].filter(Boolean).join('\n\n') + '\n';
+  }
+
+  async prepareAdvancedAiRecord(record, fallbackTitle, signal = null) {
+    if (!record || !record.metadata || record.metadata.xAdvancedAiProcessed === true) return record;
+    const settings = xArticle.demoSettings(this.settings);
+    if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return record;
+    const text = xArticle.recordText(record);
+    if (!text) return record;
+    const title = String(record.metadata.title || fallbackTitle || '').trim();
+    const result = await xArticle.processAi({ text, title }, settings,
+      (url, config) => this.requestXArticleJson(url, config), signal);
+    const translatedTitle = result.titleTranslation && result.titleTranslation !== title
+      ? `${result.titleTranslation}（${title}）` : title;
+    return { ...record, metadata: { ...record.metadata, ...(translatedTitle ? { title: translatedTitle } : {}), xAdvancedAiResult: result } };
   }
 
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
@@ -30077,7 +30177,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     await this.ensureFolder(noteDir);
 
     let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
-    const localizedImageFolderTitle = title;
+    let localizedImageFolderTitle = title;
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
     const linkAsWebpage = recordType === 'link' && shouldHydrateLinkAsWebpage((record.metadata && record.metadata.url) || record.content || '');
@@ -30185,7 +30285,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNoteNoSpeech(current, retriedMetadata.transcriptionError || '', true));
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
-    }    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial) {
+    }
+    const xArticleBodySaved = xArticle.isXUrl(getRecordUrl(recordForMarkdown))
+      && String(recordForMarkdown.metadata && recordForMarkdown.metadata.platform || '').toLowerCase() === 'x'
+      && String(recordForMarkdown.metadata && recordForMarkdown.metadata.conversionStatus || '').toLowerCase() === 'success'
+      && hasXArticleBody(String(recordForMarkdown.metadata && recordForMarkdown.metadata.markdown || ''), recordForMarkdown.metadata || {});
+    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial && !xArticleBodySaved) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
       // A Xiaohongshu record reaches this point only when the mini program
@@ -30238,6 +30343,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       recordForMarkdown = { ...recordForMarkdown, metadata: { ...recordForMarkdown.metadata, transcription: cleanTranscriptionTail(recordForMarkdown.metadata.transcription) } };
     }
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
+    if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.prepareAdvancedAiRecord(recordForMarkdown, title, signal);
+    if (recordForMarkdown.metadata && recordForMarkdown.metadata.xAdvancedAiResult && recordForMarkdown.metadata.title) {
+      title = recordForMarkdown.metadata.title;
+      localizedImageFolderTitle = title;
+    }
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
       fallbackTitle: title,

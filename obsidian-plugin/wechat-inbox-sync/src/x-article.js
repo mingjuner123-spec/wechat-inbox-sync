@@ -20,7 +20,9 @@ function demoSettings(settings = {}) {
     xAiApiKey: knownDeepSeek ? settings.xAiApiKey : '' };
 }
 function fail(code, message) { return Object.assign(new Error(message), { code }); }
-function abort(signal) { if (signal && signal.aborted) throw Object.assign(new Error('操作已取消'), { name: 'AbortError', code: 'ABORT_ERR' }); }
+function abortError() { return Object.assign(new Error('操作已取消'), { name: 'AbortError', code: 'ABORT_ERR' }); }
+function abort(signal) { if (signal && signal.aborted) throw abortError(); }
+function isAbortError(error, signal) { return Boolean(signal && signal.aborted) || Boolean(error && error.name === 'AbortError'); }
 function isXUrl(value) {
   try { const u = new URL(value); return ['https:', 'http:'].includes(u.protocol) && !u.username && !u.password && !u.port && /^(?:(?:www|mobile)\.)?(?:x|twitter)\.com$/.test(u.hostname); } catch (_) { return false; }
 }
@@ -34,20 +36,142 @@ function markdownText(value) { return plain(value).replace(/&/g, '&amp;').replac
 function photoUrl(value) {
   try { const u = new URL(value); if (u.protocol !== 'https:' || u.hostname !== 'pbs.twimg.com' || !u.pathname.startsWith('/media/') || u.username || u.password || u.port) return ''; u.hash = ''; return u.href; } catch (_) { return ''; }
 }
+function videoUrl(value) {
+  try {
+    const u = new URL(value);
+    if (u.protocol !== 'https:' || u.hostname !== 'video.twimg.com' || !u.pathname.toLowerCase().endsWith('.mp4') || u.username || u.password || u.port || u.hash) return '';
+    return u.href;
+  } catch (_) { return ''; }
+}
+function syndicationVideos(items) {
+  const videos = [];
+  for (const item of Array.isArray(items) ? items : []) {
+    const variants = item && item.video_info && Array.isArray(item.video_info.variants) ? item.video_info.variants : [];
+    const candidates = variants
+      .filter(variant => variant && (!variant.content_type || variant.content_type === 'video/mp4'))
+      .map(variant => ({ url: videoUrl(variant.url), bitrate: Number(variant.bitrate) || 0 }))
+      .filter(variant => variant.url)
+      .sort((a, b) => b.bitrate - a.bitrate);
+    if (candidates.length && !videos.includes(candidates[0].url)) videos.push(candidates[0].url);
+  }
+  return videos.slice(0, 4);
+}
+function collectText(value, output = [], depth = 0) {
+  if (depth > 8 || value == null) return output;
+  if (typeof value === 'string') {
+    const text = plain(value);
+    if (text) output.push(text);
+    return output;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 500)) collectText(item, output, depth + 1);
+    return output;
+  }
+  if (typeof value === 'object') {
+    for (const key of ['text', 'content', 'blocks']) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) collectText(value[key], output, depth + 1);
+    }
+  }
+  return output;
+}
+function articleTitle(...values) {
+  for (const value of values) {
+    if (!value || typeof value !== 'object') continue;
+    const direct = plain(value.title);
+    if (direct) return direct;
+    const nested = plain(value.article && value.article.title);
+    if (nested) return nested;
+    const result = value.note_tweet_results && value.note_tweet_results.result;
+    if (result && result !== value) {
+      const title = articleTitle(result);
+      if (title) return title;
+    }
+  }
+  return '';
+}
+function collectMedia(payload) {
+  const media = [];
+  for (const rows of [payload.mediaDetails, payload.extended_entities && payload.extended_entities.media,
+    payload.media && payload.media.all, payload.media]) {
+    if (Array.isArray(rows)) media.push(...rows.slice(0, 30));
+  }
+  return media;
+}
+function readableText(value) {
+  const text = plain(value).replace(/https?:\/\/\S+/gi, '').trim();
+  if (!text || /^(?:read more|continue reading|view more|view on x|show more|see more|more\.\.\.|阅读全文|继续阅读|查看更多|显示更多)[.!…\s→➜➔›»]*$/i.test(text)) return '';
+  return text;
+}
+function comparableText(value) { return plain(value).replace(/https?:\/\/\S+/gi, '').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''); }
 function normalizeTweet(payload, expectedId, allowQuote = true) {
   if (!payload || payload.__typename !== 'Tweet' || String(payload.id_str || '') !== expectedId) throw fail('X_IDENTITY_UNCONFIRMED', 'X 未返回目标推文，可能需要登录、已删除或暂时不可访问。');
-  if (payload.truncated === true || payload.article || payload.note_tweet) throw fail('X_LONG_POST_UNSUPPORTED', '这条 X 长文需要完整正文通道，当前返回内容不足，已保留链接等待重试。');
-  const text = plain(payload.text);
-  const media = Array.isArray(payload.mediaDetails) ? payload.mediaDetails : [];
+  const notePayload = payload.note_tweet && payload.note_tweet.note_tweet_results
+    ? payload.note_tweet.note_tweet_results.result : payload.note_tweet;
+  const noteText = collectText(notePayload).join('\n\n');
+  const articleText = collectText(payload.article).join('\n\n');
+  if (payload.truncated === true && !noteText && !articleText) throw fail('X_LONG_POST_UNSUPPORTED', '这条 X 长文需要完整正文通道，当前返回内容不足，已保留链接等待重试。');
+  const title = articleTitle(payload.article, notePayload);
+  const candidateText = readableText(noteText || articleText || payload.text);
+  const text = comparableText(candidateText) && comparableText(candidateText) === comparableText(title) ? '' : candidateText.slice(0, 50000);
+  const media = collectMedia(payload);
   const photos = Array.isArray(payload.photos) ? payload.photos : [];
-  const images = [...new Set([...photos.map(p => photoUrl(p.url)), ...media.filter(p => p.type === 'photo').map(p => photoUrl(p.media_url_https))].filter(Boolean))];
-  if (!text && !images.length) throw fail('X_CONTENT_EMPTY', 'X 未返回可保存的图文内容。');
-  if (photos.some(p => !photoUrl(p.url)) || media.some(p => p.type === 'photo' && !photoUrl(p.media_url_https))) throw fail('X_IMAGE_INCOMPLETE', 'X 返回了无法读取的图片地址，请稍后重试。');
+  const photoItems = [...photos, ...media.filter(p => p && p.type === 'photo')];
+  const images = [...new Set(photoItems.map(p => photoUrl(p && (p.url || p.media_url_https))).filter(Boolean))];
+  const videoItems = media.filter(p => p && (['video', 'animated_gif'].includes(p.type) || p.video_info));
+  const videos = syndicationVideos(videoItems);
+  if (!text && !images.length && !videos.length) throw fail('X_CONTENT_EMPTY', 'X 未返回可保存的图文或视频内容。');
+  if (photoItems.some(p => !photoUrl(p && (p.url || p.media_url_https)))) throw fail('X_IMAGE_INCOMPLETE', 'X 返回了无法读取的图片地址，请稍后重试。');
   let quote = null;
   if (allowQuote && payload.quoted_tweet && /^\d+$/.test(String(payload.quoted_tweet.id_str || ''))) quote = normalizeTweet(payload.quoted_tweet, String(payload.quoted_tweet.id_str), false);
-  return { id: expectedId, url: `https://x.com/i/web/status/${expectedId}`, text, images,
-    author: plain(payload.user && (payload.user.name || payload.user.screen_name)),
-    createdAt: plain(payload.created_at), hasVideo: media.some(p => ['video', 'animated_gif'].includes(p.type)), quote };
+  return { id: expectedId, url: `https://x.com/i/web/status/${expectedId}`, title, text, images,
+    author: plain(payload.user && (payload.user.name || payload.user.screen_name)) || plain(payload.author && (payload.author.name || payload.author.screen_name)),
+    createdAt: plain(payload.created_at), hasVideo: videoItems.length > 0, videos, quote };
+}
+function normalizeFxTweet(payload, expectedId) {
+  if (payload && typeof payload === 'object' && Number(payload.code) === 429) {
+    throw fail('X_FXEMBED_RATE_LIMITED', '备用 X 内容源暂时限制访问频率。');
+  }
+  if (!payload || typeof payload !== 'object' || Number(payload.code) !== 200) {
+    throw fail('X_FXEMBED_UNAVAILABLE', '备用 X 内容源暂时无法读取这条推文。');
+  }
+  const status = payload.status;
+  if (!status || typeof status !== 'object' || String(status.id || '') !== expectedId) {
+    throw fail('X_FXEMBED_IDENTITY_MISMATCH', '备用 X 内容源返回的推文与原链接不一致。');
+  }
+  if (status.text !== undefined && typeof status.text !== 'string') {
+    throw fail('X_FXEMBED_INVALID_PAYLOAD', '备用 X 内容源返回的数据格式不完整。');
+  }
+  const statusArticleText = collectText(status.note_tweet || status.article).join('\n\n');
+  const title = articleTitle(status.article, status.note_tweet);
+  const candidateText = readableText(statusArticleText || (typeof status.text === 'string' ? status.text : ''));
+  const text = comparableText(candidateText) && comparableText(candidateText) === comparableText(title) ? '' : candidateText.slice(0, 50000);
+  const media = status.media && typeof status.media === 'object' ? status.media : {};
+  if (media.photos !== undefined && !Array.isArray(media.photos)) {
+    throw fail('X_FXEMBED_INVALID_PAYLOAD', '备用 X 内容源返回的数据格式不完整。');
+  }
+  if (media.videos !== undefined && !Array.isArray(media.videos)) {
+    throw fail('X_FXEMBED_INVALID_PAYLOAD', '备用 X 内容源返回的数据格式不完整。');
+  }
+  const photos = Array.isArray(media.photos) ? media.photos : [];
+  const images = [];
+  for (const item of photos) {
+    const url = photoUrl(item && (item.url || item.media_url_https));
+    if (!url) throw fail('X_FXEMBED_IMAGE_INVALID', '备用 X 内容源返回了无效图片地址。');
+    if (!images.includes(url)) images.push(url);
+  }
+  const author = status.author && typeof status.author === 'object' ? status.author
+    : payload.author && typeof payload.author === 'object' ? payload.author : {};
+  const createdAt = plain(status.created_at)
+    || (Number.isFinite(status.created_timestamp) ? new Date(status.created_timestamp * 1000).toISOString() : '');
+  const videos = [];
+  for (const item of Array.isArray(media.videos) ? media.videos : []) {
+    const url = videoUrl(item && (item.url || item.video_url));
+    for (const candidate of [url, ...syndicationVideos([item])]) if (candidate && !videos.includes(candidate)) videos.push(candidate);
+  }
+  if (!text && !images.length && !videos.length) throw fail('X_FXEMBED_CONTENT_EMPTY', '备用 X 内容源没有返回可保存的正文、图片或视频。');
+  return { id: expectedId, url: `https://x.com/i/web/status/${expectedId}`, title, text, images,
+    author: plain(author.name || author.screen_name || author.username), createdAt,
+    hasVideo: Array.isArray(media.videos) && media.videos.length > 0, videos: videos.slice(0, 4) };
 }
 async function boundedRequest(request, url, options = {}, signal = null, timeoutMs = 30000) {
   abort(signal);
@@ -61,20 +185,62 @@ async function boundedRequest(request, url, options = {}, signal = null, timeout
   try { const result = await Promise.race([pending, deadline]); abort(signal); return result; }
   finally { clearTimeout(timer); if (signal) signal.removeEventListener('abort', onAbort); }
 }
-async function fetchPost(url, request, signal) {
+async function fetchPost(url, request, signal, options = {}) {
   const id = postId(url);
   if (!id) throw fail('X_POST_URL_REQUIRED', '请提供具体的 X 推文链接，暂不支持主页、书签或长文章链接。');
-  // Public embed endpoint. This is not a logged-in API and may be unavailable.
   const token = ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g, '');
+  let syndicationError = null;
+  if (!options.skipSyndication) {
+    try {
+      const payload = await boundedRequest(request, `https://cdn.syndication.twimg.com/tweet-result?id=${id}&lang=en&token=${encodeURIComponent(token)}`, {
+        method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://platform.twitter.com/' },
+      }, signal);
+      return normalizeTweet(payload, id);
+    } catch (error) {
+      if (isAbortError(error, signal)) throw abortError();
+      syndicationError = error;
+    }
+  }
+  abort(signal);
+  if (options.skipFxEmbed) {
+    const syndicationCode = Number(syndicationError && syndicationError.status) === 429
+      ? 'X_RATE_LIMITED'
+      : /^X_[A-Z0-9_]+$/.test(String(syndicationError && syndicationError.code || ''))
+        ? syndicationError.code : 'X_FETCH_FAILED';
+    const failure = fail(syndicationError ? syndicationCode : 'X_FXEMBED_RATE_LIMITED',
+      'X 暂时限制访问频率，请稍后重试。');
+    failure.xArticleProvider = syndicationError ? 'syndication' : 'none';
+    if (syndicationError && /^X_[A-Z0-9_]+$/.test(String(syndicationError.code || ''))) failure.xSyndicationErrorCode = syndicationError.code;
+    const status = Number(syndicationError && syndicationError.status);
+    if (Number.isInteger(status) && status >= 100 && status <= 599) failure.status = status;
+    throw failure;
+  }
   try {
-    const payload = await boundedRequest(request, `https://cdn.syndication.twimg.com/tweet-result?id=${id}&lang=en&token=${encodeURIComponent(token)}`, {
-      method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0', Referer: 'https://platform.twitter.com/' },
+    const payload = await boundedRequest(request, `https://api.fxtwitter.com/2/thread/${id}`, {
+      method: 'GET', headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' },
     }, signal);
-    return normalizeTweet(payload, id);
+    const post = normalizeFxTweet(payload, id);
+    if (Number(syndicationError && syndicationError.status) === 429) post.xSyndicationRateLimited = true;
+    return post;
   } catch (error) {
-    if (error.name === 'AbortError' || String(error.code || '').startsWith('X_')) throw error;
-    if (Number(error.status) === 429) throw fail('X_RATE_LIMITED', 'X 暂时限制访问频率，请稍后重试。');
-    throw fail('X_FETCH_FAILED', 'X 图文暂时无法读取，请检查网络或稍后重试；原始链接已保留。');
+    if (isAbortError(error, signal)) throw abortError();
+    const status = Number(error && error.status);
+    let code = String(error && error.code || '');
+    if (code === 'X_REQUEST_TIMEOUT') code = 'X_FXEMBED_TIMEOUT';
+    else if (status === 429) code = 'X_FXEMBED_RATE_LIMITED';
+    else if (Number.isInteger(status) && status >= 100 && status <= 599) code = 'X_FXEMBED_HTTP_ERROR';
+    else if (!/^X_FXEMBED_[A-Z0-9_]+$/.test(code)) code = 'X_FXEMBED_FETCH_FAILED';
+    const failure = fail(code, 'X 图文暂时无法读取，原始链接已保留。');
+    failure.xArticleProvider = syndicationError ? 'both' : 'fxembed';
+    if (syndicationError) {
+      const syndicationCode = Number(syndicationError.status) === 429
+        ? 'X_RATE_LIMITED'
+        : /^X_[A-Z0-9_]+$/.test(String(syndicationError.code || ''))
+          ? syndicationError.code : 'X_FETCH_FAILED';
+      failure.xSyndicationErrorCode = syndicationCode;
+    }
+    if (Number.isInteger(status) && status >= 100 && status <= 599) failure.status = status;
+    throw failure;
   }
 }
 function aiConfig(settings) {
@@ -171,13 +337,16 @@ async function summarizeText(text, settings, request, signal) {
   return summarize(summaries.join('\n\n'), false);
 }
 async function processAi(post, settings, request, signal) {
-  const result = { pairs: [], summary: '', warnings: [] };
+  const result = { titleTranslation: '', pairs: [], summary: '', warnings: [] };
   const translate = settings.xTranslationEnabled === true;
   const summarize = settings.xSummaryEnabled === true;
   if (!translate && !summarize) return result;
-  const text = [post.text, post.quote && post.quote.text].filter(Boolean).join('\n\n');
-  if (!text) return result;
-  const items = translate ? sentences(text).map((original, id) => ({ id, original })).filter(item => needsTranslation(item.original)) : [];
+  const text = plain(post.aiText || [post.text, post.quote && post.quote.text, post.videoTranscript].filter(Boolean).join('\n\n'));
+  const title = plain(post.title || '');
+  if (!text && !title) return result;
+  const bodyItems = translate && text ? sentences(text).map((original, id) => ({ id, original })).filter(item => needsTranslation(item.original)) : [];
+  const titleItem = translate && title && needsTranslation(title) ? { id: -1, original: title } : null;
+  const items = [...(titleItem ? [titleItem] : []), ...bodyItems];
   if (!items.length && !summarize) return result;
   try { aiConfig(settings); } catch (e) { result.warnings.push(errorCode(e)); return result; }
   if (text.length > 120000) { result.warnings.push('X_AI_INPUT_TOO_LARGE'); return result; }
@@ -191,11 +360,14 @@ async function processAi(post, settings, request, signal) {
         const response = await aiCall(settings, request, '将每项 original 翻译成简体中文；已是中文的项将原文原样填入text。保留 id 与数量，返回 {"translations":[{"id":0,"text":"译文"}]}，不得合并或遗漏。', batch, signal);
         const rows = response.translations;
         if (!Array.isArray(rows) || rows.length !== batch.length || rows.some((r, i) => !r || r.id !== batch[i].id || typeof r.text !== 'string' || !r.text.trim() || r.text.length > 16000)) throw fail('X_AI_ALIGNMENT_FAILED', 'AI 译句未能逐句对应原文。');
-        translated.push(...rows.map((r, i) => ({ original: batch[i].original, translation: r.text.trim() })).filter(row => row.translation !== row.original));
+        translated.push(...rows.map((r, i) => ({ id: batch[i].id, original: batch[i].original, translation: r.text.trim() })));
         batch = []; size = 0;
       };
       for (const item of items) { if (item.original.length > 5000) throw fail('X_AI_INPUT_TOO_LARGE', '单句过长。'); if (batch.length >= 20 || size + item.original.length > 5000) await flush(); batch.push(item); size += item.original.length; }
-      await flush(); result.pairs = translated;
+      await flush();
+      const titlePair = translated.find(row => row.id === -1);
+      result.titleTranslation = titlePair ? titlePair.translation : '';
+      result.pairs = translated.filter(row => row.id !== -1 && row.translation !== row.original);
     } catch (e) { if (e.name === 'AbortError') throw e; result.warnings.push(errorCode(e)); }
   }
   if (summarize && !result.warnings.some(code => ['X_AI_AUTH_FAILED', 'X_AI_RATE_LIMITED', 'X_REQUEST_TIMEOUT'].includes(code))) {
@@ -206,16 +378,32 @@ async function processAi(post, settings, request, signal) {
   return result;
 }
 function renderPost(post, ai = {}) {
-  const sections = ['## 原文', markdownText(post.text), ...post.images.map((url, i) => `![X 图片 ${i + 1}](${url})`)];
-  if (post.quote) sections.push('### 引用推文', markdownText(post.quote.author), markdownText(post.quote.text), ...post.quote.images.map((url, i) => `![引用图片 ${i + 1}](${url})`), `来源：${post.quote.url}`);
-  if (post.hasVideo) sections.push('> 本条包含视频，此次保存图文；视频未转写。');
-  sections.push(renderAi(ai));
+  const title = plain(post.title || 'X');
+  const displayedTitle = ai.titleTranslation && ai.titleTranslation !== title
+    ? `${markdownText(ai.titleTranslation)}（${markdownText(title)}）` : markdownText(title);
+  const sections = [`# ${displayedTitle}`];
+  if (ai.summary) sections.push('## AI 总结', markdownText(ai.summary));
+  if (post.text) sections.push('## 正文', renderSentencePairs(post.text, ai.pairs));
+  if (post.videoTranscript) sections.push('## 视频转写', renderSentencePairs(post.videoTranscript, ai.pairs));
+  sections.push(...post.images.map((url, i) => `![X 图片 ${i + 1}](${url})`));
+  if (post.quote) sections.push('### 引用推文', markdownText(post.quote.author), renderSentencePairs(post.quote.text, ai.pairs), ...post.quote.images.map((url, i) => `![引用图片 ${i + 1}](${url})`), `来源：${post.quote.url}`);
+  if (ai.warnings && ai.warnings.length) sections.push(`> AI 处理未完成，原文与图片已保留。请检查 AI 高级功能设置。诊断：${[...new Set(ai.warnings)].join('、')}`);
   return sections.filter(Boolean).join('\n\n');
+}
+function renderSentencePairs(text, pairs = []) {
+  const translations = new Map((Array.isArray(pairs) ? pairs : []).map(pair => [pair.original, pair.translation]));
+  return sentences(plain(text)).map(original => {
+    const translation = translations.get(original);
+    return translation && translation !== original
+      ? `${markdownText(translation)}\n\n> ${markdownText(original).replace(/\n/g, '\n> ')}`
+      : markdownText(original);
+  }).join('\n\n');
 }
 function renderAi(ai = {}) {
   const sections = [];
-  if (ai.pairs && ai.pairs.length) sections.push('## 多语言翻译', ...ai.pairs.map(p => `${markdownText(p.original)}\n\n> ${markdownText(p.translation).replace(/\n/g, '\n> ')}`));
   if (ai.summary) sections.push('## AI 总结', markdownText(ai.summary));
+  if (ai.titleTranslation) sections.push(`标题翻译：${markdownText(ai.titleTranslation)}`);
+  if (ai.pairs && ai.pairs.length) sections.push('## 多语言翻译', ...ai.pairs.map(p => `${markdownText(p.translation)}\n\n> ${markdownText(p.original).replace(/\n/g, '\n> ')}`));
   if (ai.warnings && ai.warnings.length) sections.push(`> 翻译或总结未完成，原文与图片已保留。请检查 AI 高级功能设置。诊断：${[...new Set(ai.warnings)].join('、')}`);
   return sections.join('\n\n');
 }
@@ -224,4 +412,4 @@ async function testConnection(settings, request, signal) {
   if (reply.ok !== true) throw fail('X_AI_INVALID_RESPONSE', '连接成功但模型未返回预期格式。');
   return true;
 }
-module.exports = { DEFAULTS, MODEL_PRESETS, DEMO_PRESET, demoSettings, isXUrl, postId, photoUrl, normalizeTweet, fetchPost, aiConfig, sentences, needsTranslation, recordText, processAi, renderAi, renderPost, testConnection, errorCode, boundedRequest };
+module.exports = { DEFAULTS, MODEL_PRESETS, DEMO_PRESET, demoSettings, isXUrl, postId, photoUrl, videoUrl, normalizeTweet, normalizeFxTweet, fetchPost, aiConfig, sentences, needsTranslation, recordText, processAi, renderAi, renderPost, testConnection, errorCode, boundedRequest };

@@ -2,6 +2,7 @@
 const { isWechatArticleFailurePlaceholder } = require('./wechat-placeholder-utils');
 const { isRecognizedNoSpeechMetadata } = require('./transcription-quality-utils');
 const { isPlatformArticleUrl, hasPlatformArticleBody, sanitizePlatformArticleDiagnostic } = require('./platform-article-utils');
+const { isXUrl } = require('./x-article');
 
 const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
@@ -147,13 +148,20 @@ function buildWebpageExtractionFailureDiagnostic(source, metadata, markdown) {
   const conversionDiagnostic = metadata.conversionDiagnostic && typeof metadata.conversionDiagnostic === 'object'
     ? metadata.conversionDiagnostic
     : {};
+  const httpStatus = Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus);
+  const xArticleErrorCode = String(metadata.xArticleErrorCode || '').trim();
+  const xSyndicationErrorCode = String(metadata.xSyndicationErrorCode || '').trim();
+  const xProvider = String(metadata.xArticleProvider || '').trim();
   return {
     source: 'webpage-extraction',
     host,
     conversionStatus: String(metadata.conversionStatus || '').trim().toLowerCase(),
     transcriptionStatus: String(metadata.transcriptionStatus || '').trim().toLowerCase(),
     markdownChars: String(markdown || '').length,
-    httpStatus: Number(metadata.httpStatus || conversionDiagnostic.status || conversionDiagnostic.httpStatus) || 0,
+    ...(Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? { httpStatus } : {}),
+    ...(xArticleErrorCode ? { xArticleErrorCode } : {}),
+    ...(xSyndicationErrorCode ? { xSyndicationErrorCode } : {}),
+    ...(xProvider ? { xArticleProvider: xProvider } : {}),
     finalKind: String(conversionDiagnostic.finalKind || '').slice(0, 40),
     finalState: String(conversionDiagnostic.finalState || '').slice(0, 40),
     note: String(metadata.conversionNote || metadata.conversionError || '').slice(0, 200),
@@ -231,6 +239,32 @@ function getMarkdownBody(markdown) {
     .replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, '')
     .replace(/<!--\s*wechat-inbox-record-id\s*:[\s\S]*?-->/gi, '')
     .trim();
+}
+
+function hasXArticleBody(markdown, metadata = {}) {
+  const body = getMarkdownBody(markdown);
+  const comparableText = value => String(value || '').replace(/https?:\/\/\S+/gi, '').toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  const originalText = String(metadata && metadata.xOriginalText || '')
+    .replace(/https?:\/\/\S+/gi, '')
+    .trim();
+  const markdownTitle = (body.match(/^#\s+X[：:]\s*([^\r\n]+)/im) || [])[1] || '';
+  const metadataTitle = String(metadata && (metadata.xOriginalTitle || metadata.title) || markdownTitle).split('：').slice(-1)[0].trim();
+  const isShell = value => /^(?:read more|continue reading|view more|view on x|show more|see more|more\.\.\.|阅读全文|继续阅读|查看更多|显示更多)[.!…\s→➜➔›»]*$/i.test(String(value || '').trim());
+  if (originalText && !isShell(originalText) && comparableText(originalText) !== comparableText(metadataTitle)) return true;
+  const hasImage = /!\[[^\]\n]*\]\(\s*https?:\/\/pbs\.twimg\.com\/media\//i.test(body);
+  if (hasImage) return true;
+  const sections = body.split(/(?=^#{1,6}\s)/m).filter((section) => /^## (?:正文|视频转写)\s*$/m.test(section));
+  return sections.some((section) => {
+    const content = section
+      .replace(/^\s*#{1,6}\s+[^\n]*\r?\n/, '')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/^\s*(?:来源|原始链接|source\s*url)\s*[：:]\s*https?:\/\/\S+\s*$/gim, '')
+      .replace(/https?:\/\/\S+/gi, '')
+      .replace(/^\s*(?:read more|continue reading|view more|view on x|show more|see more|more\.\.\.|阅读全文|继续阅读|查看更多|显示更多)[.!…\s→➜➔›»]*$/gim, '')
+      .replace(/^\s*>\s?/gm, '')
+      .trim();
+    return content.length > 0 && comparableText(content) !== comparableText(metadataTitle);
+  });
 }
 
 function getLocalFileAttachmentPaths(markdown) {
@@ -342,7 +376,15 @@ function getSyncLifecycleOutcomeError(record) {
     metadata.snapshot,
     metadata.contentSnapshot,
   ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+  const xRecord = isXUrl(url);
+  const xArticleBodySaved = xRecord
+    && conversionStatus === 'success'
+    && hasXArticleBody(markdown, metadata);
   const declaredError = `${metadata.conversionError || ''} ${metadata.transcriptionError || ''}`.trim();
+  if (xRecord && (['failed', 'link_saved'].includes(conversionStatus)
+    || (conversionStatus === 'success' && !hasXArticleBody(markdown, metadata)))) {
+    return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', 'X 正文提取失败，未将标题或链接标记为同步成功', buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
+  }
   if (isPlatformArticleUrl(url) && (['failed', 'link_saved'].includes(conversionStatus) || !hasPlatformArticleBody(markdown))) {
     return createSyncLifecycleOutcomeError('EXTRACTION_FAILED', '文章正文提取失败，未将标题或链接标记为同步成功', buildWebpageExtractionFailureDiagnostic(source, metadata, markdown));
   }
@@ -361,7 +403,7 @@ function getSyncLifecycleOutcomeError(record) {
 
   const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
   if (channelsOutcome && transcriptionStatus === 'failed') return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
-  if (transcriptionStatus === 'failed' && !transcription) {
+  if (transcriptionStatus === 'failed' && !transcription && !xArticleBodySaved) {
     // Xiaohongshu shares are webpages first; the mini program tags every
     // xhslink.com/a/ link as audio_video, so a persisted transcript failure on
     // those records would surface as "音视频转写失败" for a note that was only
@@ -410,7 +452,7 @@ function getSyncLifecycleOutcomeError(record) {
     );
   }
 
-  if (transcriptionStatus === 'failed' && !transcription) {
+  if (transcriptionStatus === 'failed' && !transcription && !xArticleBodySaved) {
     return createSyncLifecycleOutcomeError(
       'TRANSCRIPTION_FAILED',
       declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED,
@@ -443,6 +485,7 @@ module.exports = {
   SYNC_LIFECYCLE_FAILURE_MESSAGES,
   categorizeSyncFailure,
   getLocalFileAttachmentPaths,
+  hasXArticleBody,
   getSyncLifecycleOutcomeError,
   getSyncLifecycleBindingFingerprint,
   getSyncNoteTitleFromPath,
