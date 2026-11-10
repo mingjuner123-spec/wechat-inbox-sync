@@ -1242,7 +1242,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
       assert.strictEqual(sourceUrl, operatorJob.sourceUrl);
       return operatorMediaPath;
     },
-    getLocalAsrInstallStatus: () => ({ ready: true }),
+    getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'fixture-ffmpeg' }),
     isOperatorLocalAsrAvailable: () => true,
     transcodeCloudFallbackMediaToMp3: async inputPath => ({ path: inputPath, owned: false }),
     runOperatorLocalTranscription: async (inputPath, options) => {
