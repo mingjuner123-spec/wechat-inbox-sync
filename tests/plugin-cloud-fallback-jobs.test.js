@@ -228,6 +228,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   assert.strictEqual(detectedTicket, 'CNT-ABCD-EFGH-JKLM');
 
   const submitPlugin = makePlugin();
+  submitPlugin.currentProcessingContext = { recordId: 'record-file-1', attemptId: 'attempt-12345678' };
   let postBody = null;
   submitPlugin.requestJson = async (requestPath, method, body) => {
     assert.strictEqual(requestPath, '/transcriptions/fallback/jobs');
@@ -253,6 +254,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   });
   assert.strictEqual(submitted.jobId, 'job-file-1');
   assert.strictEqual(postBody.fileID, 'cloud://bucket/audio-1');
+  assert.strictEqual(postBody.sourceAttemptId, 'attempt-12345678', 'fallback submission must retain its exact source sync attempt');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(postBody, 'audioUrl'), false);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(postBody, 'cookies'), false);
   assert.strictEqual(submitPlugin.settings.cloudFallbackJobs[0].bindingFingerprint.length, 32);
