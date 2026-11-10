@@ -459,19 +459,34 @@ function createOperatorMediaNode({
     return capabilities;
   };
   const withCapabilityNegotiation = async (send) => {
-    for (;;) {
+    const offered = getCapabilities();
+    try {
+      return await send(offered);
+    } catch (error) {
+      if (!error || error.code !== 'WORKER_CAPABILITY_FORBIDDEN') throw error;
+    }
+    // Probe only the idempotent capacity endpoint, never the claim endpoint.
+    // Do not remove earlier supported capabilities just because a later one
+    // is forbidden. Publish the negotiated set only after the final heartbeat.
+    const accepted = ['media_acquire'];
+    const rejected = [];
+    await send(accepted);
+    for (const candidate of offered.filter(c => c !== 'media_acquire')) {
       try {
-        return await send();
+        await send([...accepted, candidate]);
+        accepted.push(candidate);
       } catch (error) {
         if (!error || error.code !== 'WORKER_CAPABILITY_FORBIDDEN') throw error;
-        const candidate = [XIAOHONGSHU_CAPABILITY, WECHAT_ARTICLE_CAPABILITY, WECHAT_CHANNELS_CAPABILITY, BILIBILI_CAPABILITY, XIAOYUZHOU_CAPABILITY, 'local_asr']
-          .find((capability) => getCapabilities().includes(capability));
-        if (!candidate) throw error;
-        rejectedCapabilities.add(candidate);
-        lastErrorCode = 'WORKER_CAPABILITY_DOWNGRADED';
-        try { logger({ type: 'capability-downgraded', capability: candidate }); } catch (_) { /* Diagnostics are advisory. */ }
+        rejected.push(candidate);
       }
     }
+    const result = await send(accepted);
+    for (const candidate of rejected) {
+      rejectedCapabilities.add(candidate);
+      lastErrorCode = 'WORKER_CAPABILITY_DOWNGRADED';
+      try { logger({ type: 'capability-downgraded', capability: candidate }); } catch (_) { /* advisory */ }
+    }
+    return result;
   };
   const stopCapacityHeartbeat = () => {
     if (capacityHeartbeatTimer) clearInterval(capacityHeartbeatTimer);
@@ -487,8 +502,7 @@ function createOperatorMediaNode({
     capacityController = controller;
     capacityHeartbeatInFlight = (async () => {
       try {
-        await withCapabilityNegotiation(() => {
-          const capabilities = getCapabilities();
+        await withCapabilityNegotiation((capabilities) => {
           return callApi('/transcriptions/fallback/worker/capacity', {
             workerId: config.workerId,
             protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -736,14 +750,14 @@ function createOperatorMediaNode({
       let claimed = false;
       try {
         if (!capacityReady && !(await sendCapacityHeartbeat())) return;
-        const response = await withCapabilityNegotiation(() => callApi('/transcriptions/fallback/worker/claim', {
+        const response = await callApi('/transcriptions/fallback/worker/claim', {
           workerId: config.workerId,
           protocolVersion: WORKER_PROTOCOL_VERSION,
           capabilities: getCapabilities(),
           capacitySlots: 1,
           activeSlots: 0,
           limit: 1,
-        }, { signal: null }));
+        }, { signal: null });
         const jobs = normalizeJobs(response).slice(0, 1);
         if (jobs.length) {
           claimed = true;
