@@ -47,6 +47,7 @@ const expectedModules = [
   'media-file-utils',
   'note-output-plan-utils',
   'operator-media-node',
+  'operator-doubao-task',
   'platform-article-utils',
   'progress-notice-utils',
   'readable-content-utils',

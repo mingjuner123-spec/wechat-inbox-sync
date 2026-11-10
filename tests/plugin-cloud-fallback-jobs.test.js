@@ -1265,7 +1265,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
         capacityBodies.push(body);
         return { success: true, data: { workerId: body.workerId, availableCapabilities: body.runtimeCapabilities } };
       }
-      if (requestPath.endsWith('/claim')) return { jobs: [operatorJob] };
+      if (requestPath.endsWith('/claim')) return { jobs: body.phases?.[0] === 'media' ? [operatorJob] : [] };
       if (requestPath.endsWith('/heartbeat')) {
         heartbeatBodies.push(body);
         return { success: true, data: body };
@@ -1309,18 +1309,16 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   await operator.poll();
   await operator.stop();
   await new Promise((resolve) => operatorUploadServer.close(resolve));
-  assert.strictEqual(operatorUpload, null, 'URL fallback must never upload acquired media to CloudBase');
-  assert.strictEqual(mediaCompletions.length, 0, 'native plugin extraction and ASR complete the job in one worker lease');
-  assert.strictEqual(genericCompletions.length, 1);
-  assert.strictEqual(genericCompletions[0].phase, 'media');
-  assert.strictEqual(genericCompletions[0].outcome, 'succeeded');
-  assert.strictEqual(genericCompletions[0].transcription, 'operator transcript from original link');
+  assert.equal(operatorUpload.method, 'PUT');
+  assert.equal(operatorUpload.body.toString(), 'operator-media', 'the acquired audio is retained in controlled storage before ASR scheduling');
+  assert.equal(mediaCompletions.length, 1);
+  assert.equal(genericCompletions.length, 0, 'media upload hands off to ASR without claiming a finished transcript');
   assert.ok(heartbeatBodies.length >= 1);
   assert.ok(heartbeatBodies.every((item) => item.stage === 'acquiring'), 'media heartbeat must use the backend-supported acquiring stage');
   assert.ok(capacityBodies.length >= 1, 'operator must register capacity before claiming work');
-  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
-  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
-  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
   assert.strictEqual(fs.existsSync(operatorMediaPath), false, 'operator temp media must never remain after completion');
 
   const channelsOperatorJob = {
@@ -1331,6 +1329,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   };
   const channelsOperatorCompletions = [];
   const channelsOperatorPlugin = Object.create(PluginClass.prototype);
+  channelsOperatorPlugin.uploadWorkerMediaForJob = undefined; // Preserve the legacy direct-ASR runtime contract.
   Object.assign(channelsOperatorPlugin, {
     acquireOperatorWechatChannelsMediaToTempFile: async sourceUrl => {
       assert.equal(sourceUrl, channelsOperatorJob.sourceUrl);
@@ -1369,6 +1368,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     const platformJob = { ...channelsOperatorJob, jobId: `${platformCase.platform}-operator-job`, ...platformCase };
     const platformCompletions = [];
     const platformPlugin = Object.create(PluginClass.prototype);
+    platformPlugin.uploadWorkerMediaForJob = undefined; // Legacy runtime path.
     platformPlugin[platformCase.method] = async (_record, sourceUrl, _binding, _title, options) => {
       assert.equal(sourceUrl, platformCase.sourceUrl);
       assert.equal(options.forceLocal, true, 'operator extraction must use plugin-native local ASR');

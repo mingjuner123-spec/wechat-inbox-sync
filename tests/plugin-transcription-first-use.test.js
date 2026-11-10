@@ -13,6 +13,7 @@ Module._load = function(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 const Plugin = require(path.join(__dirname, '../obsidian-plugin/wechat-inbox-sync/main.js'));
+Plugin.prototype.writeSettingsGuard = () => {}; // First-use fixtures must not persist release settings.
 Module._load = originalLoad;
 function fixture({ access = 'active', ready = false, provider = 'off', platform = 'win32', accept = true } = {}) {
   const plugin = new Plugin();

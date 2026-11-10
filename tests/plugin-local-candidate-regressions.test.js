@@ -27,6 +27,7 @@ Module._load = function patchedLoad(request, parent, isMain) {
 
 const pluginMainPath = process.env.PLUGIN_MAIN_PATH || '../obsidian-plugin/wechat-inbox-sync/main.js';
 const PluginClass = require(pluginMainPath);
+PluginClass.prototype.writeSettingsGuard = () => {}; // Guard persistence has its own isolated test.
 Module._load = originalLoad;
 
 async function testDouyin403UsesSessionFallback() {

@@ -12,6 +12,7 @@ try {
     return originalLoad.call(this, name, ...args);
   };
   Plugin = require('../obsidian-plugin/wechat-inbox-sync/main.js');
+  Plugin.prototype.writeSettingsGuard = () => {};
 } finally {
   Module._load = originalLoad;
 }

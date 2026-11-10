@@ -25,6 +25,7 @@ Module._load = function mockObsidian(request, parent, isMain) {
 };
 
 const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
+PluginClass.prototype.writeSettingsGuard = () => {}; // Never write fixtures into release assets.
 Module._load = originalLoad;
 
 const helpers = PluginClass.__test;

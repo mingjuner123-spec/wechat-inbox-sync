@@ -1,4 +1,5 @@
 'use strict';
+const { reconcileOperatorDoubaoTasks } = require('./operator-doubao-task');
 
 const fs = require('fs');
 const http = require('http');
@@ -17,6 +18,7 @@ const WECHAT_ARTICLE_CAPABILITY = 'wechat_article';
 const WECHAT_CHANNELS_CAPABILITY = 'wechat_channels';
 const BILIBILI_CAPABILITY = 'bilibili';
 const XIAOYUZHOU_CAPABILITY = 'xiaoyuzhou';
+const DOUBAO_CAPABILITY = 'doubao';
 const MEDIA_TRANSCODE_CAPABILITY = 'media_transcode';
 const DEFAULT_POLL_INTERVAL_MS = 15000;
 // An idle node backs off to one claim per two minutes. This stays well under
@@ -279,7 +281,8 @@ function resolveMediaSourcePlatform(job) {
   return '';
 }
 
-function createOperatorMediaNode({
+function createSingleOperatorMediaNode({
+  lane = '',
   plugin = null,
   env = process.env,
   apiBase = '',
@@ -347,7 +350,7 @@ function createOperatorMediaNode({
     if (pollTimer && typeof pollTimer.unref === 'function') pollTimer.unref();
   };
   const heartbeat = async (job, stage, progress) => {
-    const body = { ...baseForJob(job), stage: String(stage || '').slice(0, 64), progress: Math.max(0, Math.min(100, Number(progress) || 0)) };
+    const body = { ...baseForJob(job), ...(activeJob && activeJob.providerRequestId ? { providerRequestId: activeJob.providerRequestId } : {}), stage: String(stage || '').slice(0, 64), progress: Math.max(0, Math.min(100, Number(progress) || 0)) };
     return await callApi('/transcriptions/fallback/worker/heartbeat', body, { signal: activeController && activeController.signal });
   };
   const stopHeartbeat = () => {
@@ -374,6 +377,16 @@ function createOperatorMediaNode({
     return await callApi('/transcriptions/fallback/worker/complete', { ...baseForJob(job), ...body }, { signal: null });
   };
   const transcribeCapturedMedia = async (job, inputPath) => {
+    if (getCapabilities().includes('media_handoff')) {
+      activeJob.stage = 'acquiring';
+      activeJob.progress = 55;
+      const uploaded = await plugin.uploadWorkerMediaForJob(inputPath, job, {
+        signal: activeController.signal, workerConfig: config, request: callApi,
+        beforeComplete: async () => { await heartbeat(job, 'acquiring', 90); },
+      });
+      stopHeartbeat();
+      return uploaded.completion;
+    }
     if (!plugin || typeof plugin.transcodeCloudFallbackMediaToMp3 !== 'function'
       || (typeof plugin.runOperatorLocalTranscription !== 'function' && typeof plugin.runLocalTranscription !== 'function')) {
       throw nodeError('OPERATOR_ASR_HANDLER_UNAVAILABLE', '运营节点本地转写能力未就绪', { retryable: true });
@@ -424,6 +437,7 @@ function createOperatorMediaNode({
   const rejectedCapabilities = new Set();
   const getCapabilities = () => {
     const capabilities = ['media_acquire'];
+    if (!rejectedCapabilities.has('media_handoff') && plugin && typeof plugin.uploadWorkerMediaForJob === 'function') capabilities.push('media_handoff');
     if (!rejectedCapabilities.has(XIAOHONGSHU_CAPABILITY)
       && plugin && typeof plugin.acquireOperatorXiaohongshuContent === 'function') {
       capabilities.push(XIAOHONGSHU_CAPABILITY);
@@ -450,6 +464,13 @@ function createOperatorMediaNode({
       && plugin && typeof plugin.hydrateBilibiliTranscript === 'function') capabilities.push(BILIBILI_CAPABILITY);
     if (!rejectedCapabilities.has(XIAOYUZHOU_CAPABILITY)
       && plugin && typeof plugin.hydrateXiaoyuzhouTranscript === 'function') capabilities.push(XIAOYUZHOU_CAPABILITY);
+    // Doubao is available only when this node has a configured API key and the
+    // plugin exposes the ASR handler. Never claim overflow work it cannot run.
+    if (!rejectedCapabilities.has(DOUBAO_CAPABILITY)
+      && plugin && typeof plugin.runOperatorDoubaoTranscription === 'function'
+      && (typeof plugin.isOperatorDoubaoAvailable === 'function' ? plugin.isOperatorDoubaoAvailable() : plugin.settings && String(plugin.settings.doubaoAsrApiKey || '').trim())) {
+      capabilities.push(DOUBAO_CAPABILITY);
+    }
     try {
       if (!rejectedCapabilities.has('local_asr')
         && plugin && typeof plugin.getLocalAsrInstallStatus === 'function'
@@ -510,7 +531,7 @@ function createOperatorMediaNode({
             runtimeCapabilities: capabilities,
             availableCapabilities: capabilities,
             phases: ['media', 'asr'],
-            capacitySlots: 1,
+            capacitySlots: getCapabilities().includes('media_handoff') ? 3 : 1,
             activeSlots: activeJob ? 1 : 0,
           }, { signal: controller.signal });
         });
@@ -540,7 +561,8 @@ function createOperatorMediaNode({
   const failBody = (error, stage, { shutdown = false } = {}) => ({
     // Closing an operator node must release the lease for another node. It is
     // retryable work, never a user cancellation terminal state.
-    outcome: shutdown ? 'failed' : error && error.noSpeech === true ? 'no_speech' : 'failed',
+    outcome: activeJob && activeJob.submissionStarted && error?.providerDefinitive !== true ? 'submission_unknown' : shutdown ? 'failed' : error && error.noSpeech === true ? 'no_speech' : 'failed',
+    ...(activeJob && activeJob.providerRequestId ? { providerRequestId: activeJob.providerRequestId } : {}),
     phase: String(activeJob && activeJob.phase || '').trim() || 'asr',
     backend: String(activeJob && activeJob.backend || '').trim() || undefined,
     error: {
@@ -551,7 +573,7 @@ function createOperatorMediaNode({
           : `运营节点任务处理失败（${String(stage || 'unknown').slice(0, 32)}：${classifyFailureReason(error)}）`,
       // A retired share link is answered by asking the user for a new one; every
       // other failure may succeed on another node or a later attempt.
-      retryable: error && error.linkExpired === true ? false : true,
+      retryable: error && (error.linkExpired === true || error.retryable === false) ? false : true,
       stage: String(stage || '').slice(0, 64),
     },
   });
@@ -578,6 +600,11 @@ function createOperatorMediaNode({
     }
     if (phase === 'asr' && !/^https?:\/\//i.test(String(job.controlledMediaUrl || '').trim())) {
       throw nodeError('OPERATOR_CONTROLLED_MEDIA_REQUIRED', '运营节点 ASR 缺少受控媒体地址', { retryable: false });
+    }
+    if (phase === 'asr' && String(job.backend || '').trim() === DOUBAO_CAPABILITY
+      && (!plugin || typeof plugin.runOperatorDoubaoTranscription !== 'function'
+        || !(typeof plugin.isOperatorDoubaoAvailable === 'function' ? plugin.isOperatorDoubaoAvailable() : plugin.settings && String(plugin.settings.doubaoAsrApiKey || '').trim()))) {
+      throw nodeError('OPERATOR_DOUBAO_ASR_UNAVAILABLE', '运营节点未配置可用的豆包转写能力', { retryable: true });
     }
     activeController = new AbortController();
     activeJob = { phase, backend: String(job.backend || '').trim(), stage: 'acquiring', progress: 5 };
@@ -632,6 +659,17 @@ function createOperatorMediaNode({
         activeJob.progress = 45;
         return await transcribeCapturedMedia(job, tempPath);
       }
+      if (phase === 'media' && ['bilibili', 'xiaoyuzhou'].includes(mediaPlatform)
+        && getCapabilities().includes('media_handoff') && typeof plugin.acquireOperatorNativePlatformContent === 'function') {
+        const captured = await plugin.acquireOperatorNativePlatformContent(mediaPlatform, job.sourceUrl, { signal: activeController.signal });
+        if (captured.transcription) {
+          stopHeartbeat();
+          return await complete(job, { phase: 'media', outcome: 'succeeded', transcription: captured.transcription });
+        }
+        tempPath = captured.tempPath;
+        if (!tempPath) throw nodeError('OPERATOR_MEDIA_ACQUIRE_EMPTY', '运营节点未取得音频', { retryable: true });
+        return await transcribeCapturedMedia(job, tempPath);
+      }
       if (phase === 'media' && ['bilibili', 'xiaoyuzhou'].includes(mediaPlatform)) {
         const methodName = mediaPlatform === 'bilibili' ? 'hydrateBilibiliTranscript' : 'hydrateXiaoyuzhouTranscript';
         if (!plugin || typeof plugin[methodName] !== 'function') {
@@ -681,6 +719,40 @@ function createOperatorMediaNode({
         tempPath = await plugin.acquireOperatorDouyinMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
         activeJob.progress = 45;
         return await transcribeCapturedMedia(job, tempPath);
+      }
+      if (String(job.backend || '').trim() === DOUBAO_CAPABILITY) {
+        activeJob.stage = 'acquiring';
+        activeJob.progress = 45;
+        const result = await plugin.runOperatorDoubaoTranscription(String(job.controlledMediaUrl || '').trim(), {
+          jobId: base.jobId,
+          workerId: config.workerId, attemptId: base.attemptId, fencingVersion: base.fencingVersion,
+          signal: activeController.signal,
+          beforeSubmit: async providerRequestId => {
+            activeJob.providerRequestId = providerRequestId;
+            activeJob.stage = 'submitting';
+            await heartbeat(job, 'submitting', 45);
+            if (activeController.signal.aborted) throw Object.assign(new Error('Operator stopped'), { name: 'AbortError' });
+          },
+          beforePost: () => { activeJob.submissionStarted = true; },
+        });
+        if (result?.status === 'no_speech') {
+          stopHeartbeat();
+          const completed = await complete(job, { phase: 'asr', backend: DOUBAO_CAPABILITY, outcome: 'no_speech', providerRequestId: result.providerRequestId });
+          if (typeof plugin.clearOperatorDoubaoTask === 'function') await plugin.clearOperatorDoubaoTask(base);
+          return completed;
+        }
+        const transcription = String(result && typeof result === 'object' ? result.transcription : result || '').trim();
+        if (!transcription) throw nodeError('OPERATOR_ASR_EMPTY', '运营节点豆包转写结果为空', { retryable: true });
+        activeJob.progress = 100;
+        stopHeartbeat();
+        const completed = await complete(job, {
+          phase: 'asr', backend: DOUBAO_CAPABILITY, outcome: 'succeeded', transcription,
+          providerRequestId: result.providerRequestId,
+        });
+        if (typeof plugin.clearOperatorDoubaoTask === 'function') {
+          try { await plugin.clearOperatorDoubaoTask(base); } catch (_) { /* Server completion is durable. */ }
+        }
+        return completed;
       }
       if (!plugin || typeof plugin.downloadMediaToTempFile !== 'function'
         || (typeof plugin.runOperatorLocalTranscription !== 'function' && typeof plugin.runLocalTranscription !== 'function')) {
@@ -738,6 +810,24 @@ function createOperatorMediaNode({
       completedCount += 1;
     }
   };
+  let recoveryCursor = 0;
+  let recoveryController = null;
+  const recoverProviderResults = async () => {
+    if (!plugin || typeof plugin.getOperatorDoubaoPendingTasks !== 'function'
+      || typeof plugin.queryOperatorDoubaoTranscription !== 'function' || typeof plugin.clearOperatorDoubaoTask !== 'function') return;
+    const all = plugin.getOperatorDoubaoPendingTasks(config.workerId);
+    if (!all.length) return;
+    recoveryCursor %= all.length;
+    const batch = [...all.slice(recoveryCursor), ...all.slice(0, recoveryCursor)].slice(0, 5);
+    recoveryCursor = (recoveryCursor + batch.length) % all.length;
+    recoveryController = new AbortController();
+    await reconcileOperatorDoubaoTasks({ tasks: batch, workerId: config.workerId, signal: recoveryController.signal,
+      onStatus: code => { lastErrorCode = code; try { logger({ type: "provider-reconciliation", code }); } catch (_) {} },
+      query: id => plugin.queryOperatorDoubaoTranscription(id),
+      reconcile: body => callApi('/transcriptions/fallback/worker/complete', body, { signal: null }),
+      clear: task => plugin.clearOperatorDoubaoTask(task),
+    });
+  };
   const poll = async () => {
     if (!running) return;
     // Callers that poll while a poll is already in flight (for example a
@@ -749,12 +839,17 @@ function createOperatorMediaNode({
       lastPollAt = clock();
       let claimed = false;
       try {
+        if (!lane || lane === 'doubao') await recoverProviderResults();
+        if (!running || stopRequested) return;
         if (!capacityReady && !(await sendCapacityHeartbeat())) return;
+        const offered = getCapabilities();
+        if ((lane === 'local_asr' && !offered.includes('local_asr')) || (lane === 'doubao' && !offered.includes('doubao'))) return;
         const response = await callApi('/transcriptions/fallback/worker/claim', {
+          ...(lane ? { phases: [lane === 'media' ? 'media' : 'asr'], backend: lane === 'media' ? '' : lane === 'local_asr' ? 'local_whisper_cpp' : 'doubao' } : {}),
           workerId: config.workerId,
           protocolVersion: WORKER_PROTOCOL_VERSION,
           capabilities: getCapabilities(),
-          capacitySlots: 1,
+          capacitySlots: getCapabilities().includes('media_handoff') ? 3 : 1,
           activeSlots: 0,
           limit: 1,
         }, { signal: null });
@@ -822,6 +917,7 @@ function createOperatorMediaNode({
       pollTimer = null;
       stopCapacityHeartbeat();
       stopHeartbeat();
+      if (recoveryController && !recoveryController.signal.aborted) recoveryController.abort();
       if (activeController && !activeController.signal.aborted) activeController.abort();
       if (activePromise) await activePromise.catch(() => {});
       activePromise = null;
@@ -830,6 +926,21 @@ function createOperatorMediaNode({
       return snapshot();
     },
     poll,
+  };
+}
+
+// Each lane owns its own lease, abort controller and heartbeat. A long ASR
+// request must never stop media acquisition or provider polling.
+function createOperatorMediaNode(options = {}) {
+  if (!options.plugin || typeof options.plugin.uploadWorkerMediaForJob !== 'function') return createSingleOperatorMediaNode(options);
+  const lanes = ['media', 'local_asr', 'doubao'].map(lane => createSingleOperatorMediaNode({ ...options, lane }));
+  return {
+    config: lanes[0].config,
+    isEnabled: () => lanes[0].isEnabled(),
+    start: () => lanes.map(node => node.start()).some(Boolean),
+    poll: () => Promise.all(lanes.map(node => node.poll())),
+    stop: async () => { await Promise.all(lanes.map(node => node.stop())); return lanes[0].getSnapshot(); },
+    getSnapshot: () => { const snapshots = lanes.map(node => node.getSnapshot()); return { ...snapshots[0], active: snapshots.some(s => s.active), queuedCount: snapshots.reduce((n,s)=>n+s.queuedCount,0), completedCount: snapshots.reduce((n,s)=>n+s.completedCount,0), lanes: snapshots }; },
   };
 }
 
@@ -845,6 +956,7 @@ module.exports = {
   isXiaohongshuSourceUrl,
   isWechatArticleSourceUrl,
   WECHAT_ARTICLE_CAPABILITY,
+  DOUBAO_CAPABILITY,
   MEDIA_TRANSCODE_CAPABILITY,
   resolveMediaSourcePlatform,
   isOperatorNodeEnabled,
