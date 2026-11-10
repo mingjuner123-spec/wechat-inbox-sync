@@ -346,6 +346,7 @@ async function testSpecificFailureAndPersistentHistory() {
     p.findExistingRecordNotePath = async () => '';
     p.findRecoveredWechatArticleNotePath = async () => '';
     p.saveData = async data => { p.savedSettings = structuredClone(data); };
+    p.writeSettingsGuard = () => {}; // Failure-report fixtures must not write release settings.
   };
   configure(plugin);
   plugin.requestJson = async route => route === '/records?status=pending'

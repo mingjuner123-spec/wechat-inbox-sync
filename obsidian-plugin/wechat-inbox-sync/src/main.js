@@ -1,3 +1,4 @@
+const { runOperatorDoubaoTask, parseOperatorDoubaoState } = require('./operator-doubao-task');
 const { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require('./readable-content-utils');
 const { membershipGuidance, setupError, isSetupRequired, setupSummary } = require('./transcription-setup-utils');
 const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runtime-snapshot');
@@ -384,7 +385,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.2';
+const PLUGIN_RUNTIME_VERSION = '1.4.3';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -23543,6 +23544,22 @@ class WechatObsidianInboxPlugin extends Plugin {
     return digest;
   }
 
+  async acquireOperatorNativePlatformContent(platform, sourceUrl, { signal } = {}) {
+    const method = platform === 'bilibili' ? 'hydrateBilibiliTranscript' : 'hydrateXiaoyuzhouTranscript';
+    // Reuse the normal extractor with a per-call capture context. Never change
+    // this plugin instance while a different lane is transcribing.
+    const extractor = Object.create(this);
+    extractor.buildTranscriptRecordFromMedia = async (_record, media) => media;
+    const media = await extractor[method]({ _id: '', type: 'webpage', content: sourceUrl, metadata: { url: sourceUrl } }, sourceUrl, null, '', { signal });
+    if (String(media.subtitleText || '').trim()) return { transcription: media.subtitleText };
+    const urls = [...new Set([media.mediaUrl, ...(media.mediaUrls || [])].filter(Boolean))].slice(0, 5);
+    for (const url of urls) {
+      throwIfAborted(signal);
+      try { return { tempPath: await this.downloadMediaToTempFile(url, { signal, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES, referer: sourceUrl }) }; } catch (error) { if (error?.name === 'AbortError') throw error; }
+    }
+    const error = new Error('运营节点原生提取未取得可用音频'); error.code = 'OPERATOR_MEDIA_ACQUIRE_EMPTY'; throw error;
+  }
+
   async uploadWorkerMediaForJob(inputPath, job, {
     signal = null,
     workerConfig = null,
@@ -25089,6 +25106,57 @@ class WechatObsidianInboxPlugin extends Plugin {
       throw new Error('豆包语音识别返回空转写结果');
     }
     return transcription;
+  }
+
+  getOperatorDoubaoApiKey() {
+    return String(process.env.WECHAT_INBOX_OPERATOR_DOUBAO_API_KEY || this.settings?.doubaoAsrApiKey || '').trim();
+  }
+
+  isOperatorDoubaoAvailable() {
+    return this.operatorDoubaoAccessDenied !== true && Boolean(this.getOperatorDoubaoApiKey());
+  }
+
+  async queryOperatorDoubaoTranscription(requestId) {
+    const query = buildDoubaoAsrQueryRequest({ apiKey: this.getOperatorDoubaoApiKey(), requestId });
+    try {
+      return parseOperatorDoubaoState(await requestUrl({ url: query.url, method: 'POST', headers: query.headers, body: JSON.stringify(query.body), throw: query.throw }));
+    } catch (error) {
+      if (error.code === 'OPERATOR_DOUBAO_ACCESS_DENIED') this.operatorDoubaoAccessDenied = true;
+      throw error;
+    }
+  }
+
+  async runOperatorDoubaoTranscription(audioUrl, options = {}) {
+    if (!/^[A-Za-z0-9_-]{1,160}$/.test(options.jobId || '') || typeof options.beforeSubmit !== 'function') {
+      throw new Error('Operator job identity is required');
+    }
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(options.attemptId || '') || !(options.fencingVersion > 0) || !options.workerId) throw new Error('Operator submission identity is required');
+    const key = `operator:${options.jobId}:${options.attemptId}:${options.fencingVersion}`;
+    return await runOperatorDoubaoTask({
+      load: async () => (this.settings.pendingDoubaoTasks || {})[key],
+      save: task => this.savePendingDoubaoTask(key, { ...task, schema: 1, jobId: options.jobId,
+        workerId: options.workerId, attemptId: options.attemptId, fencingVersion: options.fencingVersion }),
+      createRequestId,
+      beforeSubmit: options.beforeSubmit,
+      beforePost: options.beforePost,
+      signal: options.signal,
+      query: id => this.queryOperatorDoubaoTranscription(id),
+      submit: async requestId => {
+        const request = buildDoubaoAsrRequest({ apiKey: this.getOperatorDoubaoApiKey(), audioUrl, requestId });
+        return parseOperatorDoubaoState(await requestUrl({
+          url: request.url, method: 'POST', headers: request.headers,
+          body: JSON.stringify(request.body), throw: request.throw,
+        }));
+      },
+    }).catch(error => { if (error.code === "OPERATOR_DOUBAO_ACCESS_DENIED") this.operatorDoubaoAccessDenied = true; throw error; });
+  }
+
+  getOperatorDoubaoPendingTasks(workerId) {
+    return Object.values(this.settings && this.settings.pendingDoubaoTasks || {}).filter(task => task && task.schema === 1 && task.workerId === workerId && task.submitted && task.phase !== "rejected");
+  }
+
+  async clearOperatorDoubaoTask(task) {
+    await this.clearPendingDoubaoTask(`operator:${task.jobId}:${task.attemptId}:${task.fencingVersion}`);
   }
 
   async runDoubaoTranscription(audioUrl, options = {}) {

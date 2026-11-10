@@ -415,6 +415,8 @@ for (const extension of sourceTextExtensions) {
   Module._extensions[extension] = (module, filename) => { module.exports = require('fs').readFileSync(filename, 'utf8'); };
 }
 const SourcePluginClass = require('../obsidian-plugin/wechat-inbox-sync/src/main');
+// Settings-guard persistence is covered separately in a temporary directory.
+PluginClass.prototype.writeSettingsGuard = SourcePluginClass.prototype.writeSettingsGuard = () => {};
 for (const [extension, loader] of priorSourceTextLoaders) {
   if (loader) Module._extensions[extension] = loader;
   else delete Module._extensions[extension];

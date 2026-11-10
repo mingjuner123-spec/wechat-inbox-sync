@@ -102,6 +102,7 @@ Module._load = function mockObsidian(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 const Plugin = require(pluginPath);
+Plugin.prototype.writeSettingsGuard = () => {}; // Cancellation fixtures must not persist release settings.
 Module._load = function keepElectronMock(request, parent, isMain) {
   if (request === 'electron') {
     return {

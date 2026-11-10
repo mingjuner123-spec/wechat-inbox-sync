@@ -340,6 +340,7 @@ async function runPluginHookTest() {
   // Obsidian loads. The source module embeds PowerShell files, which Node
   // cannot parse without a test-only text loader.
   const PluginClass = require('../obsidian-plugin/wechat-inbox-sync/main');
+  PluginClass.prototype.writeSettingsGuard = () => {}; // No repository-side settings writes in diagnostic fixtures.
   Module._load = originalLoad;
   function makePlugin(record, sent, writeError = null, writeResult = null, initialOutbox = []) {
     const plugin = new PluginClass();

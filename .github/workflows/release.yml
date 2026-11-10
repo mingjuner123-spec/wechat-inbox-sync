@@ -75,6 +75,8 @@ jobs:
         run: |
           node tests/plugin-cloud-fallback-jobs.test.js
           node tests/plugin-operator-capability-negotiation.test.js
+          node tests/plugin-operator-lanes.test.js
+          node tests/plugin-operator-doubao-task.test.js
           node tests/plugin-ai-metadata-error-utils.test.js
           node tests/plugin-component-cloudbase.test.js
           node tests/plugin-architecture-integration.test.js
@@ -209,14 +211,8 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # Regression fixtures exercise real saveSettings; only their two
-          # tracked guard files may change. All other drift must fail closed.
-          git diff --exit-code HEAD -- . \
-            ':(exclude)obsidian-plugin/wechat-inbox-sync/settings-guard.json' \
-            ':(exclude)obsidian-plugin/wechat-inbox-sync/src/settings-guard.json'
-          git restore --source=HEAD -- \
-            obsidian-plugin/wechat-inbox-sync/settings-guard.json \
-            obsidian-plugin/wechat-inbox-sync/src/settings-guard.json
+          # Tests must isolate settings writes. Do not silently repair fixture drift.
+          git diff --exit-code HEAD -- .
           node scripts/release-source-guard.js --tag "$TAG_NAME"
 
       - name: Package plugin release assets
