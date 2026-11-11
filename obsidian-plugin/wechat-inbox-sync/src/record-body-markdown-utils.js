@@ -264,7 +264,7 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
 
     if (snapshot) {
       if (/^https?:\/\/(?:(?:www|mobile)\.)?(?:x|twitter)\.com\//i.test(url)) {
-        return `${snapshot.trim()}\n`;
+        return [snapshot.trim(), buildSourceMediaAttachmentMarkdown(metadata)].filter(Boolean).join('\n\n') + '\n';
       }
       if (helpers.isFeishuUrl(url)) {
         return [snapshot, automaticShareTextMarkdown].filter(Boolean).join('\n\n').trim() + '\n';
