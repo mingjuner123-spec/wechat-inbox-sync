@@ -19732,8 +19732,7 @@ ${NO_SPEECH_SAVED_MESSAGE}
         }
         if (snapshot) {
           if (/^https?:\/\/(?:(?:www|mobile)\.)?(?:x|twitter)\.com\//i.test(url)) {
-            return `${snapshot.trim()}
-`;
+            return [snapshot.trim(), buildSourceMediaAttachmentMarkdown2(metadata)].filter(Boolean).join("\n\n") + "\n";
           }
           if (helpers.isFeishuUrl(url)) {
             return [snapshot, automaticShareTextMarkdown].filter(Boolean).join("\n\n").trim() + "\n";
@@ -23948,7 +23947,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.4";
+var PLUGIN_RUNTIME_VERSION = "1.4.5";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -27397,6 +27396,7 @@ function buildTencentRequest({
 }
 __name(buildTencentRequest, "buildTencentRequest");
 function isVideoPlatform(platform, url = "") {
+  if (xArticle.isXUrl(url)) return true;
   const source = `${String(platform || "")} ${String(url || "")}`.toLowerCase();
   return /抖音|小红书|视频号|b站|bilibili|douyin|xiaohongshu|wechat-channels|channels\.weixin\.qq\.com|weixin\.qq\.com\/sph\//.test(source);
 }
@@ -46894,10 +46894,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     return nextMarkdown;
   }
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
+    var _a;
     rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = record && record.metadata || {};
-    const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl || "").trim();
-    if (!this.settings.saveOriginalMediaEnabled || !metadata.transcriptOnly || !mediaUrl) {
+    const isXVideo = xArticle.isXUrl(metadata.url || record.content || "") && ((_a = metadata.xVideoDiagnostic) == null ? void 0 : _a.source) === "x-video";
+    const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl || (isXVideo && Array.isArray(metadata.mediaUrls) ? metadata.mediaUrls.find(xArticle.videoUrl) : "") || "").trim();
+    if (!this.settings.saveOriginalMediaEnabled || !metadata.transcriptOnly && !isXVideo || !mediaUrl && !isXVideo) {
       return record;
     }
     const videoPlatform = isVideoPlatform(metadata.platform, metadata.url || record.content || "");
@@ -46909,6 +46911,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         sourceMediaAttachmentError: message || (videoPlatform ? "未取得原视频，无法保存到本地。" : "原始音视频未能保存到本地。")
       }
     }), "attachmentFailure");
+    if (!mediaUrl) return attachmentFailure();
     try {
       await this.ensureProFeatureAccess("保存原始音视频到本地", { forceRefresh: true });
     } catch (error) {
@@ -46928,7 +46931,13 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       let selectedUrl = "";
       for (const candidateUrl of candidates) {
         const headers = isXiaohongshuUrl(sourceUrl) ? await getXiaohongshuRequestHeaders(candidateUrl) : getSocialRequestHeaders(sourceUrl || candidateUrl);
-        const buffer = Buffer.from(await this.downloadArrayBuffer(candidateUrl, headers));
+        let buffer;
+        try {
+          buffer = Buffer.from(await this.downloadArrayBuffer(candidateUrl, headers));
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          continue;
+        }
         if (getInvalidDownloadedMediaReason(buffer)) continue;
         if (videoPlatform && !hasVideoTrackInMediaBuffer(buffer)) continue;
         selectedBuffer = buffer;
@@ -48038,6 +48047,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       ...post.hasVideo ? { transcriptionStatus } : {},
       ...transcriptionError ? { transcriptionError } : {},
       mediaUrls,
+      mediaUrl: mediaUrls[0] || "",
       ...post.hasVideo ? { xVideoDiagnostic: videoDiagnostic } : {},
       xAdvancedAiProcessed: true
     } };

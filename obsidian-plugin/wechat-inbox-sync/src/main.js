@@ -392,7 +392,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.4';
+const PLUGIN_RUNTIME_VERSION = '1.4.5';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -4598,6 +4598,7 @@ function buildTencentRequest({
 }
 
 function isVideoPlatform(platform, url = '') {
+  if (xArticle.isXUrl(url)) return true;
   const source = `${String(platform || '')} ${String(url || '')}`.toLowerCase();
   return /抖音|小红书|视频号|b站|bilibili|douyin|xiaohongshu|wechat-channels|channels\.weixin\.qq\.com|weixin\.qq\.com\/sph\//.test(source);
 }
@@ -26139,8 +26140,12 @@ class WechatObsidianInboxPlugin extends Plugin {
   async saveSourceMediaAttachment(record, rootDir, dateFolder, title) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
     const metadata = (record && record.metadata) || {};
-    const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl || '').trim();
-    if (!this.settings.saveOriginalMediaEnabled || !metadata.transcriptOnly || !mediaUrl) {
+    const isXVideo = xArticle.isXUrl(metadata.url || record.content || '')
+      && metadata.xVideoDiagnostic?.source === 'x-video';
+    const mediaUrl = String(metadata.mediaUrl || metadata.audioUrl
+      || (isXVideo && Array.isArray(metadata.mediaUrls) ? metadata.mediaUrls.find(xArticle.videoUrl) : '') || '').trim();
+    if (!this.settings.saveOriginalMediaEnabled || (!metadata.transcriptOnly && !isXVideo)
+      || (!mediaUrl && !isXVideo)) {
       return record;
     }
 
@@ -26153,6 +26158,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         sourceMediaAttachmentError: message || (videoPlatform ? '未取得原视频，无法保存到本地。' : '原始音视频未能保存到本地。'),
       },
     });
+
+    if (!mediaUrl) return attachmentFailure();
 
     try {
       await this.ensureProFeatureAccess('保存原始音视频到本地', { forceRefresh: true });
@@ -26178,7 +26185,13 @@ class WechatObsidianInboxPlugin extends Plugin {
           ? await getXiaohongshuRequestHeaders(candidateUrl)
           : getSocialRequestHeaders(sourceUrl || candidateUrl);
         // eslint-disable-next-line no-await-in-loop
-        const buffer = Buffer.from(await this.downloadArrayBuffer(candidateUrl, headers));
+        let buffer;
+        try {
+          buffer = Buffer.from(await this.downloadArrayBuffer(candidateUrl, headers));
+        } catch (error) {
+          if (isAbortError(error)) throw error;
+          continue;
+        }
         if (getInvalidDownloadedMediaReason(buffer)) continue;
         if (videoPlatform && !hasVideoTrackInMediaBuffer(buffer)) continue;
         selectedBuffer = buffer;
@@ -27376,7 +27389,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     return { ...record, metadata: { ...articleMetadata, title: translatedTitle, markdown,
       transcription: videoTranscript, ...(videoTranscriptSegments.length ? { transcriptionSegments: videoTranscriptSegments } : {}),
       ...(post.hasVideo ? { transcriptionStatus } : {}),
-      ...(transcriptionError ? { transcriptionError } : {}), mediaUrls,
+      ...(transcriptionError ? { transcriptionError } : {}), mediaUrls, mediaUrl: mediaUrls[0] || '',
       ...(post.hasVideo ? { xVideoDiagnostic: videoDiagnostic } : {}),
       xAdvancedAiProcessed: true,
     } };

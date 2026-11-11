@@ -320,6 +320,7 @@ async function main() {
   const bundle = fs.readFileSync(require.resolve('../obsidian-plugin/wechat-inbox-sync/main'), 'utf8');
   for (const removed of ['分段转写时间戳', '播放器截图按钮', '复制本次失败', '复制完整诊断', 'wb-transcript-screenshot', 'wb-transcript-seek']) assert.ok(!bundle.includes(removed), `removed feature remains: ${removed}`);
   for (const removed of ['function aiConfig(settings)', 'async function processAi(post', 'function renderAi(ai', 'async function testConnection(settings', 'xAdvancedAiResult']) assert.ok(!bundle.includes(removed), `retired local X AI remains: ${removed}`);
+  await require('./x-video-attachment.test').main();
   console.log('x-article-integration: all behavior tests passed');
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });
