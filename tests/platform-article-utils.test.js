@@ -5,14 +5,33 @@ const {
   isToutiaoUrl,
   isPlatformArticleUrl,
   getPlatformArticleKind,
+  isToutiaoArticleIdentityUrl,
+  matchesPlatformArticleRenderIdentity,
   getPlatformArticleLabel,
   getPlatformArticleReferer,
   isAllowedPlatformArticleNavigation,
   normalizePlatformArticleUrl,
+  selectPlatformArticleBody,
   parseToutiaoRenderData,
+  parseToutiaoInfoV2,
   parseZhihuInitialData,
+  parseZhihuTardisPage,
+  getPlatformArticleFallbackRequests,
   extractPlatformArticleFromHtml,
 } = require('../obsidian-plugin/wechat-inbox-sync/src/platform-article-utils');
+
+function articleDocument({ singleAnswer = null, answerItems = null, answerBodies = [], selectors = {}, canonical = '' } = {}) {
+  const canonicalNode = canonical ? { getAttribute: name => name === 'href' ? canonical : '' } : null;
+  return {
+    querySelector(selector) { return selectors[selector] || null; },
+    querySelectorAll(selector) {
+      if (selector === '.AnswerItem') return answerItems || (singleAnswer ? [singleAnswer] : []);
+      if (selector === '.AnswerItem .RichText' || selector === '.QuestionAnswer-content .RichText' || selector === '.RichText.ztext') return answerBodies;
+      if (selector === 'link[rel="canonical"],meta[property="og:url"]') return canonicalNode ? [canonicalNode] : [];
+      return [];
+    },
+  };
+}
 
 assert.strictEqual(isZhihuUrl('https://zhuanlan.zhihu.com/p/123456'), true);
 assert.strictEqual(isZhihuUrl('https://www.zhihu.com/question/123/answer/456'), true);
@@ -25,6 +44,40 @@ assert.strictEqual(isToutiaoUrl('https://www.toutiao.com/article/712345678901234
 assert.strictEqual(isToutiaoUrl('https://m.toutiao.com/i7123456789012345678/'), true);
 assert.strictEqual(isToutiaoUrl('https://toutiao.com.evil.example/a123456'), false);
 assert.strictEqual(isToutiaoUrl('https://example.com/a123456'), false);
+assert.strictEqual(isToutiaoArticleIdentityUrl('https://www.toutiao.com/article/7123456789012345678/'), true);
+assert.strictEqual(isToutiaoArticleIdentityUrl('https://m.toutiao.com/channel/hot/'), false);
+assert.strictEqual(isToutiaoArticleIdentityUrl('https://m.toutiao.com/i7123456789012345678/'), true);
+assert.strictEqual(isToutiaoArticleIdentityUrl('http://www.toutiao.com/article/7123456789012345678/'), false);
+assert.strictEqual(isToutiaoArticleIdentityUrl('https://toutiao.com.evil.example/article/7123456789012345678/'), false);
+assert.strictEqual(matchesPlatformArticleRenderIdentity('https://m.toutiao.com/is/short123/', 'https://m.toutiao.com/channel/hot/'), false,
+  'a Toutiao short link resolving to a channel/feed is not the target article');
+assert.strictEqual(matchesPlatformArticleRenderIdentity('https://m.toutiao.com/is/short123/', 'https://www.toutiao.com/article/7123456789012345678/'), true,
+  'a Toutiao short link resolving to an HTTPS article identity is valid');
+
+const zhihuBody = { textContent: '正文' };
+const zhihuLegacyDom = articleDocument({ selectors: { '.RichText.ztext': zhihuBody }, answerBodies: [zhihuBody] });
+assert.strictEqual(selectPlatformArticleBody(zhihuLegacyDom, 'zhihu', { platform: 'zhihu', type: 'answer', id: '456' }), zhihuBody,
+  'restore the 1.3.196 narrow RichText fallback when the answer id is absent from the DOM');
+const zhihuSingleAnswer = {
+  getAttribute: () => '',
+  querySelector: selector => selector === '.RichText' ? zhihuBody : null,
+  querySelectorAll: () => [],
+};
+assert.strictEqual(selectPlatformArticleBody(articleDocument({ singleAnswer: zhihuSingleAnswer }), 'zhihu', { platform: 'zhihu', type: 'answer', id: '456' }), zhihuBody,
+  'a single answer container on the identity-checked answer URL is safe to use');
+const unrelatedAnswerBodies = [{}, {}];
+assert.strictEqual(selectPlatformArticleBody(articleDocument({ answerBodies: unrelatedAnswerBodies }), 'zhihu', { platform: 'zhihu', type: 'answer', id: '456' }), null,
+  'multiple unmarked answers must never be guessed');
+const onlyVisibleWrongAnswerBody = {};
+assert.strictEqual(selectPlatformArticleBody(articleDocument({
+  answerItems: [{ getAttribute: () => '', querySelector: () => null, querySelectorAll: () => [] },
+    { getAttribute: () => '', querySelector: () => null, querySelectorAll: () => [] }],
+  answerBodies: [onlyVisibleWrongAnswerBody],
+}), 'zhihu', { platform: 'zhihu', type: 'answer', id: '456' }), null,
+'multiple answer containers with only one visible unmarked body must still fail closed');
+const toutiaoArticleBody = { textContent: '头条正文' };
+assert.strictEqual(selectPlatformArticleBody(articleDocument({ selectors: { article: toutiaoArticleBody } }), 'toutiao', { platform: 'toutiao', type: 'article', id: '7123456789012345678' }), toutiaoArticleBody,
+  'restore the prior semantic article container fallback for Toutiao');
 
 assert.strictEqual(isPlatformArticleUrl('https://zhuanlan.zhihu.com/p/1'), true);
 assert.strictEqual(isPlatformArticleUrl('https://www.toutiao.com/a1234567/'), true);
@@ -118,6 +171,14 @@ assert.ok(toutiao.contentHtml.includes('第一段内容'));
 assert.strictEqual(toutiao.contentText, '');
 assert.strictEqual(toutiao.source, 'render-data');
 
+const toutiaoSemanticHeadings = parseToutiaoRenderData(`<script id="RENDER_DATA" type="application/json">${encodeURIComponent(JSON.stringify({
+  articleInfo: { title: '段落层级', content: '<p><strong>破解世界性难题的原创性成果</strong></p><p>这里是后续正文，包含正常句号。</p><p>这是一段<strong>正文强调</strong>，不能误判成标题。</p>' },
+}))}</script>`);
+assert.match(toutiaoSemanticHeadings.contentHtml, /<h2><strong>破解世界性难题的原创性成果<\/strong><\/h2>/,
+  'standalone bold section headings should be restored as h2');
+assert.match(toutiaoSemanticHeadings.contentHtml, /<p>这是一段<strong>正文强调<\/strong>，不能误判成标题。<\/p>/,
+  'inline bold emphasis must remain a paragraph');
+
 const toutiaoPlain = parseToutiaoRenderData(`<script id="RENDER_DATA" type="application/json">${encodeURIComponent(JSON.stringify({
   articleInfo: { title: '纯文本', content: 'A'.repeat(200) },
 }))}</script>`);
@@ -127,6 +188,71 @@ assert.strictEqual(toutiaoPlain.contentText.length, 200);
 
 assert.strictEqual(parseToutiaoRenderData('<html>no data</html>'), null);
 assert.strictEqual(parseToutiaoRenderData('<script id="RENDER_DATA">not json</script>'), null);
+
+const toutiaoInfoV2Payload = {
+  data: {
+    group_id: '7123456789012345678',
+    title: '移动端文章正文',
+    content: '<p>移动端接口返回的第一段正文，包含足够长的可读内容。</p><p>第二段保留在结果里。</p>',
+    media_user: { screen_name: '移动端作者' },
+    poster_url: 'https://p3.toutiaoimg.com/cover.jpg',
+  },
+};
+const toutiaoInfoV2 = parseToutiaoInfoV2(JSON.stringify(toutiaoInfoV2Payload), 'https://www.toutiao.com/article/7123456789012345678/');
+assert.ok(toutiaoInfoV2);
+assert.strictEqual(toutiaoInfoV2.title, '移动端文章正文');
+assert.strictEqual(toutiaoInfoV2.author, '移动端作者');
+assert.strictEqual(toutiaoInfoV2.source, 'toutiao-info-v2');
+assert.ok(toutiaoInfoV2.contentHtml.includes('第一段正文'));
+assert.strictEqual(parseToutiaoInfoV2({ data: { group_id: '999', title: '错文章', content: '<p>' + '正文'.repeat(100) + '</p>' } }, 'https://www.toutiao.com/article/7123456789012345678/'), null,
+  'reject a Toutiao API payload whose article ID differs from the requested identity');
+
+const zhihuTardisResponse = `<html><script>window.g_initialProps = ${JSON.stringify({
+  title: 'SSR 问题标题',
+  author: { name: 'SSR 作者' },
+  renderHtml: '<div class="AnswerItem"><div class="RichContent-inner"><div class="RichText">' + '知乎公开回答正文。'.repeat(25) + '</div></div></div>',
+})};</script></html>`;
+const zhihuTardis = parseZhihuTardisPage(zhihuTardisResponse, 'https://www.zhihu.com/question/123/answer/456');
+assert.ok(zhihuTardis);
+assert.strictEqual(zhihuTardis.source, 'zhihu-tardis-ssr');
+assert.strictEqual(zhihuTardis.targetId, '456');
+assert.strictEqual(zhihuTardis.title, 'SSR 问题标题');
+assert.ok(zhihuTardis.renderHtml.includes('知乎公开回答正文'));
+assert.strictEqual(parseZhihuTardisPage(zhihuTardisResponse, 'https://www.toutiao.com/article/7123456789012345678/'), null);
+assert.deepStrictEqual(getPlatformArticleFallbackRequests('https://www.zhihu.com/question/123/answer/456'), [{
+  platform: 'zhihu', type: 'tardis-ssr', targetId: '456', url: 'https://www.zhihu.com/tardis/zm/ans/456',
+}]);
+assert.deepStrictEqual(getPlatformArticleFallbackRequests('https://zhuanlan.zhihu.com/p/789'), [{
+  platform: 'zhihu', type: 'tardis-ssr', targetId: '789', url: 'https://www.zhihu.com/tardis/zm/art/789',
+}]);
+assert.deepStrictEqual(getPlatformArticleFallbackRequests('https://www.toutiao.com/article/7123456789012345678/'), [{
+  platform: 'toutiao', type: 'info-v2', targetId: '7123456789012345678', url: 'https://m.toutiao.com/i7123456789012345678/info/v2/',
+}]);
+
+const safeToutiaoDiagnostic = require('../obsidian-plugin/wechat-inbox-sync/src/platform-article-utils').sanitizePlatformArticleDiagnostic({
+  source: 'platform-article', platform: 'toutiao', failureCode: 'ARTICLE_DATA_MISSING',
+  htmlChars: 321, renderDataPresent: true, renderDataArticleFound: false,
+  bodySelectorFound: true, identityMatched: false,
+  fallback: { attempts: [
+    { type: 'info-v2', transport: 'obsidian-requestUrl', status: 200, ok: false, url: 'private-url' },
+    { type: 'tardis-ssr', transport: 'node-http', status: 200, ok: true },
+    { type: 'unknown', transport: 'obsidian-requestUrl', status: 200, ok: true },
+  ], succeeded: 'tardis-ssr', secret: 'private-text' },
+  reason: 'private text', sourceUrl: 'https://private.example/article',
+});
+assert.equal(safeToutiaoDiagnostic.failureCode, 'ARTICLE_DATA_MISSING');
+assert.equal(safeToutiaoDiagnostic.htmlChars, 321);
+assert.equal(safeToutiaoDiagnostic.renderDataPresent, true);
+assert.equal(safeToutiaoDiagnostic.bodySelectorFound, true);
+assert.deepStrictEqual(safeToutiaoDiagnostic.fallback, {
+  attempts: [
+    { type: 'info-v2', transport: 'obsidian-requestUrl', status: 200, ok: false },
+    { type: 'tardis-ssr', transport: 'node-http', status: 200, ok: true },
+  ],
+  succeeded: 'tardis-ssr',
+});
+assert.equal(safeToutiaoDiagnostic.identityMatched, false);
+assert.equal(JSON.stringify(safeToutiaoDiagnostic).includes('private'), false);
 
 const zhihuHtml = `<html><body><script id="js-initialData" type="text/json">${JSON.stringify({
   initialState: {

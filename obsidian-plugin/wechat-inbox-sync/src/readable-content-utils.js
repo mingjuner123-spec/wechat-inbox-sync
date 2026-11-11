@@ -38,7 +38,7 @@ function prepareBrowserArticleImages(root, baseUrl) {
   const assets = [];
   root.querySelectorAll('img').forEach(image => {
     let src = '';
-    const candidates = [image.currentSrc, image.getAttribute('data-src'), image.getAttribute('data-original'), image.getAttribute('data-lazy-src'), image.getAttribute('src')];
+    const candidates = [image.currentSrc, image.getAttribute('data-src'), image.getAttribute('data-original'), image.getAttribute('data-actualsrc'), image.getAttribute('data-lazy-src'), image.getAttribute('src')];
     for (const candidate of candidates) {
       if (!candidate || /^data:/i.test(candidate)) continue;
       try { const url = new URL(String(candidate).trim(), baseUrl); if (/^https?:$/.test(url.protocol)) { src = url.href; break; } } catch (_) { /* Try the next explicit image source. */ }
@@ -47,7 +47,7 @@ function prepareBrowserArticleImages(root, baseUrl) {
     const alt = String(image.getAttribute('alt') || image.getAttribute('data-alt') || '图片').replace(/\s+/g, ' ').trim();
     assets.push({ src, alt });
     image.setAttribute('src', src); image.setAttribute('alt', alt);
-    for (const attribute of ['srcset','data-src','data-original','data-lazy-src','data-fail']) image.removeAttribute(attribute);
+    for (const attribute of ['srcset','data-src','data-original','data-actualsrc','data-lazy-src','data-fail']) image.removeAttribute(attribute);
   });
   return assets;
 }

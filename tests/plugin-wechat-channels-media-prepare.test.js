@@ -152,46 +152,31 @@ async function run() {
     deepseekBaseUrl: 'https://api.example.test/chat/completions',
   });
   const directDeepSeekRequests = [];
-  directDeepSeekPlugin.requestExternalJson = async (url, options) => {
-    const requestBody = JSON.parse(options.body);
-    directDeepSeekRequests.push({ url, requestBody });
-    const content = directDeepSeekRequests.length === 1
-      ? JSON.stringify({
-        description: 'Summarizes local transcription into a reusable knowledge asset.',
-        keywords: ['local transcription', 'knowledge base', 'AI organization'],
-      })
-      : JSON.stringify({ title: 'Reusable Video Knowledge Assets' });
-    return { choices: [{ message: { content } }] };
+  directDeepSeekPlugin.requestExternalJson = async () => { throw new Error('legacy local API credentials must not be used'); };
+  directDeepSeekPlugin.requestJson = async (url, method, requestBody, requestBinding) => {
+    directDeepSeekRequests.push({ url, method, requestBody });
+    assert.strictEqual(requestBinding, binding);
+    return { data: {
+      title: 'Reusable Video Knowledge Assets',
+      description: 'Summarizes local transcription into a reusable knowledge asset.',
+      keywords: ['local transcription', 'knowledge base', 'AI organization'],
+    } };
   };
   const directDeepSeekMetadata = await directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding);
-  assert.strictEqual(directDeepSeekRequests.length, 2);
+  assert.strictEqual(directDeepSeekRequests.length, 1);
   assert.strictEqual(directDeepSeekMetadata.title, 'Reusable Video Knowledge Assets');
-  const directTitlePrompt = JSON.stringify(directDeepSeekRequests[1].requestBody.messages);
-  assert.ok(directTitlePrompt.includes(directDeepSeekMetadata.description));
-  assert.ok(directTitlePrompt.includes('local transcription'));
-  assert.ok(!directTitlePrompt.includes(hydrated.metadata.transcription));
+  assert.strictEqual(directDeepSeekRequests[0].url, '/metadata/generate');
+  assert.strictEqual(directDeepSeekRequests[0].method, 'POST');
+  assert.ok(directDeepSeekRequests[0].requestBody.content.includes(hydrated.metadata.transcription));
+  assert.ok(!JSON.stringify(directDeepSeekRequests[0].requestBody).includes('test-only-key'));
 
   let failedTitleRequestCount = 0;
-  directDeepSeekPlugin.requestExternalJson = async () => {
+  directDeepSeekPlugin.requestJson = async () => {
     failedTitleRequestCount += 1;
-    if (failedTitleRequestCount === 2) throw new Error('title provider unavailable');
-    return {
-      choices: [{
-        message: {
-          content: JSON.stringify({
-            description: 'Summarizes local transcription into a reusable knowledge asset.',
-            keywords: ['local transcription', 'knowledge base', 'AI organization'],
-          }),
-        },
-      }],
-    };
+    throw new Error('cloud metadata unavailable');
   };
-  const directDeepSeekFallback = await directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding);
-  assert.strictEqual(failedTitleRequestCount, 2);
-  assert.strictEqual(
-    directDeepSeekFallback.title,
-    'local\u4E0Etranscription',
-  );
+  await assert.rejects(directDeepSeekPlugin.generateMetadataWithDeepSeek(hydrated, binding), /cloud metadata unavailable/);
+  assert.strictEqual(failedTitleRequestCount, 1, 'cloud failure must not fall back to a legacy local API key');
   plugin.generateMetadataWithDeepSeek = async () => ({
     title: '这是通过云端解析媒体地址后在本地完成的视频号转写',
     description: '介绍视频号本地转写与知识库整理的完整流程。',

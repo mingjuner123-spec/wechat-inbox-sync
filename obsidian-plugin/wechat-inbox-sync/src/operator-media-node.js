@@ -15,6 +15,8 @@ const DEFAULT_CAPABILITIES = Object.freeze(['media_acquire', 'local_asr']);
 // and the deployment's node registry accepted the capability.
 const XIAOHONGSHU_CAPABILITY = 'xiaohongshu';
 const WECHAT_ARTICLE_CAPABILITY = 'wechat_article';
+const TOUTIAO_ARTICLE_CAPABILITY = 'toutiao_article';
+const ZHIHU_ARTICLE_CAPABILITY = 'zhihu_article';
 const WECHAT_CHANNELS_CAPABILITY = 'wechat_channels';
 const BILIBILI_CAPABILITY = 'bilibili';
 const XIAOYUZHOU_CAPABILITY = 'xiaoyuzhou';
@@ -232,6 +234,33 @@ function isWechatArticleSourceUrl(value) {
   }
 }
 
+function isToutiaoSourceUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && (host === 'toutiao.com' || host.endsWith('.toutiao.com'))
+      && (/\/(?:article|group|item)\/\d+\/?$/i.test(url.pathname)
+        || /\/[ai]\d{6,}\/?$/i.test(url.pathname)
+        || (url.protocol === 'https:' && !url.port && host === 'm.toutiao.com'
+          && /^\/is\/[A-Za-z0-9_-]{4,128}\/?$/.test(url.pathname)));
+  } catch (_) {
+    return false;
+  }
+}
+
+function isZhihuSourceUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    const host = url.hostname.toLowerCase().replace(/\.$/, '');
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && (host === 'zhihu.com' || host.endsWith('.zhihu.com'))
+      && /\/(?:answer|p)\/\d+\/?$/i.test(url.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
 function isWechatChannelsSourceUrl(value) {
   try {
     const url = new URL(String(value || '').trim());
@@ -275,6 +304,8 @@ function resolveMediaSourcePlatform(job) {
   if (sourceType === 'douyin_url' && isDouyinSourceUrl(sourceUrl)) return 'douyin';
   if (sourceType === 'xiaohongshu_url' && isXiaohongshuSourceUrl(sourceUrl)) return 'xiaohongshu';
   if (sourceType === 'wechat_article' && isWechatArticleSourceUrl(sourceUrl)) return 'wechat_article';
+  if (sourceType === 'toutiao_article' && isToutiaoSourceUrl(sourceUrl)) return 'toutiao_article';
+  if (sourceType === 'zhihu_article' && isZhihuSourceUrl(sourceUrl)) return 'zhihu_article';
   if (sourceType === 'wechat_channels_url' && isWechatChannelsSourceUrl(sourceUrl)) return 'wechat_channels';
   if (sourceType === 'bilibili_url' && isBilibiliSourceUrl(sourceUrl)) return 'bilibili';
   if (sourceType === 'xiaoyuzhou_url' && isXiaoyuzhouSourceUrl(sourceUrl)) return 'xiaoyuzhou';
@@ -455,6 +486,14 @@ function createSingleOperatorMediaNode({
     if (!rejectedCapabilities.has(WECHAT_ARTICLE_CAPABILITY)
       && plugin && typeof plugin.acquireOperatorWechatArticleContent === 'function') {
       capabilities.push(WECHAT_ARTICLE_CAPABILITY);
+    }
+    if (!rejectedCapabilities.has(TOUTIAO_ARTICLE_CAPABILITY)
+      && plugin && typeof plugin.acquireOperatorToutiaoArticleContent === 'function') {
+      capabilities.push(TOUTIAO_ARTICLE_CAPABILITY);
+    }
+    if (!rejectedCapabilities.has(ZHIHU_ARTICLE_CAPABILITY)
+      && plugin && typeof plugin.acquireOperatorZhihuArticleContent === 'function') {
+      capabilities.push(ZHIHU_ARTICLE_CAPABILITY);
     }
     if (!rejectedCapabilities.has(WECHAT_CHANNELS_CAPABILITY)
       && plugin && typeof plugin.acquireOperatorWechatChannelsMediaToTempFile === 'function') {
@@ -650,6 +689,32 @@ function createSingleOperatorMediaNode({
         stopHeartbeat();
         return await complete(job, { phase: 'media', outcome: 'succeeded', content: articleContent });
       }
+      if (phase === 'media' && mediaPlatform === 'toutiao_article') {
+        if (!plugin || typeof plugin.acquireOperatorToutiaoArticleContent !== 'function') {
+          throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点今日头条抓取能力未就绪', { retryable: true });
+        }
+        const article = await plugin.acquireOperatorToutiaoArticleContent(job.sourceUrl, { signal: activeController.signal });
+        const articleContent = article && article.content;
+        if (!articleContent || !String(articleContent.markdown || '').trim()) {
+          throw nodeError('OPERATOR_TOUTIAO_ARTICLE_EMPTY', '运营节点未提取到今日头条正文', { retryable: true });
+        }
+        activeJob.progress = 100;
+        stopHeartbeat();
+        return await complete(job, { phase: 'media', outcome: 'succeeded', content: articleContent });
+      }
+      if (phase === 'media' && mediaPlatform === 'zhihu_article') {
+        if (!plugin || typeof plugin.acquireOperatorZhihuArticleContent !== 'function') {
+          throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点知乎抓取能力未就绪', { retryable: true });
+        }
+        const article = await plugin.acquireOperatorZhihuArticleContent(job.sourceUrl, { signal: activeController.signal });
+        const articleContent = article && article.content;
+        if (!articleContent || !String(articleContent.markdown || '').trim()) {
+          throw nodeError('OPERATOR_ZHIHU_ARTICLE_EMPTY', '运营节点未提取到知乎正文', { retryable: true });
+        }
+        activeJob.progress = 100;
+        stopHeartbeat();
+        return await complete(job, { phase: 'media', outcome: 'succeeded', content: articleContent });
+      }
       if (phase === 'media' && mediaPlatform === 'wechat_channels') {
         if (!plugin || typeof plugin.acquireOperatorWechatChannelsMediaToTempFile !== 'function') {
           throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点视频号原生提取能力未就绪', { retryable: true });
@@ -748,6 +813,8 @@ function createSingleOperatorMediaNode({
         const completed = await complete(job, {
           phase: 'asr', backend: DOUBAO_CAPABILITY, outcome: 'succeeded', transcription,
           providerRequestId: result.providerRequestId,
+          ...(Array.isArray(result.transcriptionSegments) && result.transcriptionSegments.length
+            ? { transcriptionSegments: result.transcriptionSegments } : {}),
         });
         if (typeof plugin.clearOperatorDoubaoTask === 'function') {
           try { await plugin.clearOperatorDoubaoTask(base); } catch (_) { /* Server completion is durable. */ }
@@ -956,8 +1023,10 @@ module.exports = {
   isXiaohongshuSourceUrl,
   isWechatArticleSourceUrl,
   WECHAT_ARTICLE_CAPABILITY,
-  DOUBAO_CAPABILITY,
+  isToutiaoSourceUrl,
+  TOUTIAO_ARTICLE_CAPABILITY,
   MEDIA_TRANSCODE_CAPABILITY,
+  DOUBAO_CAPABILITY,
   resolveMediaSourcePlatform,
   isOperatorNodeEnabled,
   readOperatorNodeConfig,

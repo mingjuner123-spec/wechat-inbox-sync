@@ -223,7 +223,11 @@ function createNoteOutputPlanHelpers(dependencies = {}) {
       ? helpers.buildAiMetadataErrorComment(metadata.aiMetadataError)
       : '';
     const diagnosticMarkers = [recordIdMarker, aiMetadataErrorMarker].filter(Boolean).join('\n');
-    const titleHeading = helpers.isSuccessfulTranscriptionRecord(record) ? `# ${title}\n\n` : '';
+    const recordUrl = helpers.getRecordUrl(record, metadata);
+    const isXArticle = /^https?:\/\/(?:(?:www|mobile)\.)?(?:x|twitter)\.com\//i.test(String(recordUrl || ''));
+    // X article markdown already contains its translated/original title. Adding
+    // the generic transcription heading here duplicates that title on video posts.
+    const titleHeading = !isXArticle && helpers.isSuccessfulTranscriptionRecord(record) ? `# ${title}\n\n` : '';
     return `${frontmatter}\n${diagnosticMarkers ? `${diagnosticMarkers}\n\n` : ''}${titleHeading}${body}`;
   }
 

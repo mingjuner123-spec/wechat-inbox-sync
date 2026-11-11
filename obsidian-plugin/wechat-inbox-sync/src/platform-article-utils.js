@@ -186,6 +186,29 @@ function getPlatformArticleIdentity(url) {
     : { platform: kind, type: 'article', id: match[1] || match[2] };
 }
 
+function isToutiaoArticleIdentityUrl(url) {
+  let parsed;
+  try { parsed = new URL(String(url || '').trim()); } catch (_) { return false; }
+  const identity = getPlatformArticleIdentity(parsed.toString());
+  return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.port
+    && Boolean(identity && identity.platform === 'toutiao' && identity.type === 'article' && identity.id);
+}
+
+function matchesPlatformArticleRenderIdentity(sourceUrl, finalUrl) {
+  const sourceKind = getPlatformArticleKind(sourceUrl);
+  if (!sourceKind || getPlatformArticleKind(finalUrl) !== sourceKind) return false;
+  const expected = getPlatformArticleIdentity(sourceUrl);
+  const actual = getPlatformArticleIdentity(finalUrl);
+  if (expected) {
+    return Boolean(actual && actual.platform === expected.platform
+      && actual.type === expected.type && actual.id === expected.id);
+  }
+  // Toutiao share links gain an article identity only after redirect. An
+  // official homepage or channel is not sufficient evidence of the target.
+  if (sourceKind === 'toutiao') return isToutiaoArticleIdentityUrl(finalUrl);
+  return true;
+}
+
 // Judge the body, not its title, source URL, or site navigation.
 function hasPlatformArticleBody(markdown) {
   if (/^\s*>?\s*(?:知乎|今日头条)(?:正文未能自动提取|页面需要登录后才能读取正文|返回访问验证或登录提示)/m.test(String(markdown || ''))
@@ -255,7 +278,7 @@ function parseToutiaoRenderData(html, targetUrl = '') {
     mediaUser.name,
     node.user_info && node.user_info.name,
   );
-  const contentHtml = String(found.content || '');
+  const contentHtml = promoteToutiaoBoldHeadings(String(found.content || ''));
   return {
     title: pickString(node.title, node.article_title, node.headline),
     author,
@@ -264,6 +287,125 @@ function parseToutiaoRenderData(html, targetUrl = '') {
     publishTime: pickString(node.publish_time, node.create_time, node.datetime),
     source: 'render-data',
   };
+}
+
+// Some Toutiao article payloads encode section titles as a standalone bold
+// paragraph instead of an h2. Promote only short, punctuation-free paragraphs
+// made entirely of bold text; ordinary bold emphasis remains inline.
+function promoteToutiaoBoldHeadings(html) {
+  return String(html || '').replace(/<p\b([^>]*)>([\s\S]*?)<\/p>/gi, (whole, attributes, inner) => {
+    const visible = inner.replace(/<[^>]*>/g, '').replace(/&(?:nbsp|#160|#x0*a0);/gi, ' ').trim();
+    if (!visible || visible.length > 48 || /[。！？；;.!?]/.test(visible)) return whole;
+    const stripped = inner.replace(/<br\s*\/?>/gi, '').replace(/&(?:nbsp|#160|#x0*a0);/gi, ' ').trim();
+    const outsideBold = stripped.replace(/<(strong|b)\b[^>]*>[\s\S]*?<\/\1>/gi, '')
+      .replace(/<[^>]+>/g, '').trim();
+    if (outsideBold) return whole;
+    if (!/<(?:strong|b)\b/i.test(stripped)) return whole;
+    return `<h2${attributes}>${inner}</h2>`;
+  });
+}
+
+function parseToutiaoInfoV2(raw, targetUrl = '') {
+  const target = targetUrl ? getPlatformArticleIdentity(targetUrl) : null;
+  if (targetUrl && (!target || target.platform !== 'toutiao' || target.type !== 'article')) return null;
+  let payload = raw;
+  if (typeof raw === 'string') {
+    try { payload = JSON.parse(raw); } catch (_) { return null; }
+  }
+  if (!payload || typeof payload !== 'object') return null;
+
+  const queue = [payload];
+  const seen = new Set();
+  let visited = 0;
+  while (queue.length && visited < 10000) {
+    const node = queue.shift();
+    if (!node || typeof node !== 'object' || seen.has(node)) continue;
+    seen.add(node);
+    visited += 1;
+    const content = pickString(node.content, node.article_content, node.articleContent);
+    if (content.length >= 40) {
+      const ids = [node.group_id, node.groupId, node.item_id, node.itemId, node.article_id, node.articleId, node.id]
+        .filter(value => typeof value === 'string' || Number.isSafeInteger(value)).map(String);
+      // This endpoint is requested with the target ID in its path. If the
+      // response also carries an ID, require it to agree; a mismatched payload
+      // must never replace the linked article.
+      if (target && ids.length && !ids.includes(target.id)) {
+        continue;
+      }
+      const mediaUser = node.media_user && typeof node.media_user === 'object' ? node.media_user : {};
+      return {
+        title: pickString(node.title, node.article_title, node.headline, node.title_text),
+        author: pickString(node.author, node.source, mediaUser.screen_name, mediaUser.name, node.user_info && node.user_info.name),
+        contentHtml: /<[a-z][\s\S]*>/i.test(content) ? promoteToutiaoBoldHeadings(content) : '',
+        contentText: /<[a-z][\s\S]*>/i.test(content) ? '' : content,
+        publishTime: pickString(node.publish_time, node.create_time, node.datetime),
+        coverUrl: pickString(node.poster_url, node.cover, node.cover_url),
+        source: 'toutiao-info-v2',
+      };
+    }
+    for (const value of Object.values(node)) if (value && typeof value === 'object') queue.push(value);
+  }
+  return null;
+}
+
+function parseZhihuTardisPage(html, targetUrl = '') {
+  const target = targetUrl ? getPlatformArticleIdentity(targetUrl) : null;
+  if (targetUrl && (!target || target.platform !== 'zhihu')) return null;
+  if (html && typeof html === 'object') {
+    const renderHtml = pickString(html.renderHtml, html.data && html.data.renderHtml);
+    if (renderHtml.length < 40) return null;
+    return {
+      renderHtml,
+      title: pickString(html.title, html.question && html.question.title, html.data && html.data.title),
+      author: pickString(html.author && html.author.name, html.data && html.data.author && html.data.author.name),
+      source: 'zhihu-tardis-ssr',
+      targetId: target && target.id || '',
+    };
+  }
+  const source = String(html || '');
+  const assignment = /(?:window\s*\.\s*)?g_initialProps\s*=\s*/i.exec(source);
+  if (!assignment) return null;
+  const start = source.indexOf('{', assignment.index + assignment[0].length);
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let end = -1;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{') depth += 1;
+    else if (char === '}' && --depth === 0) { end = index + 1; break; }
+  }
+  if (end < 0) return null;
+  let props;
+  try { props = JSON.parse(source.slice(start, end)); } catch (_) { return null; }
+  const renderHtml = pickString(props && props.renderHtml, props && props.data && props.data.renderHtml);
+  if (!renderHtml || renderHtml.length < 40) return null;
+  const title = pickString(props.title, props.question && props.question.title, props.data && props.data.title);
+  const author = pickString(props.author && props.author.name, props.data && props.data.author && props.data.author.name);
+  return { renderHtml, title, author, source: 'zhihu-tardis-ssr', targetId: target && target.id || '' };
+}
+
+function getPlatformArticleFallbackRequests(url) {
+  const identity = getPlatformArticleIdentity(url);
+  if (!identity) return [];
+  if (identity.platform === 'zhihu') {
+    const kind = identity.type === 'answer' ? 'ans' : 'art';
+    return [{ platform: 'zhihu', type: 'tardis-ssr', targetId: identity.id,
+      url: `https://www.zhihu.com/tardis/zm/${kind}/${encodeURIComponent(identity.id)}` }];
+  }
+  if (identity.platform === 'toutiao' && identity.type === 'article') {
+    return [{ platform: 'toutiao', type: 'info-v2', targetId: identity.id,
+      url: `https://m.toutiao.com/i${encodeURIComponent(identity.id)}/info/v2/` }];
+  }
+  return [];
 }
 
 function getZhihuEntityContent(entity) {
@@ -331,6 +473,18 @@ function extractPlatformArticleFromHtml(html, platform, targetUrl = '') {
 // Self contained: also executed in the sandboxed extraction window.
 function selectPlatformArticleBody(doc, platform, target) {
   const pick = (root, selectors) => selectors.map(selector => root.querySelector(selector)).find(Boolean);
+  const pickCandidates = (root, selectors) => {
+    const found = [];
+    for (const selector of selectors) {
+      for (const node of Array.from(root.querySelectorAll(selector) || [])) {
+        if (!found.includes(node)) found.push(node);
+      }
+    }
+    return found;
+  };
+  const platformArticleSelectors = platform === 'zhihu'
+    ? ['.Post-RichText', '.RichText.ztext', '.RichContent-inner .RichText', '.QuestionAnswer-content .RichText']
+    : platform === 'toutiao' ? ['.article-content', '.syl-article-base', 'article', '.article'] : [];
   // Share URLs without a stable numeric identity can still use a narrowly
   // scoped article-body fallback. Never scan page-wide text or recommendation
   // cards; only use the platform's dedicated body container.
@@ -352,11 +506,13 @@ function selectPlatformArticleBody(doc, platform, target) {
     } catch (_) {
       return null;
     }
-    return (platform === 'zhihu' ? pick(doc, ['.QuestionRichText', '.Post-RichText'])
-      : platform === 'toutiao' ? pick(doc, ['.article-content', '.syl-article-base']) : null) || null;
+    return pick(doc, platform === 'zhihu'
+      ? ['.QuestionRichText', ...platformArticleSelectors]
+      : platformArticleSelectors) || null;
   }
   if (platform === 'zhihu' && target.type === 'answer') {
-    for (const answer of doc.querySelectorAll('.AnswerItem')) {
+    const answerItems = Array.from(doc.querySelectorAll('.AnswerItem') || []);
+    for (const answer of answerItems) {
       const raw = answer.getAttribute('data-zop') || '';
       let itemId = '';
       try { itemId = String(JSON.parse(raw).itemId || ''); } catch (_) {}
@@ -366,10 +522,23 @@ function selectPlatformArticleBody(doc, platform, target) {
         return pick(answer, ['.RichContent-inner .RichText', '.RichText']);
       }
     }
+    // Zhihu has rolled out answer-page DOMs without a stable data-zop/itemprop
+    // marker. If exactly one answer container is present, the final URL check
+    // in renderPlatformArticleWithElectron still binds it to the requested ID.
+    if (answerItems.length === 1) {
+      const onlyAnswerBody = pick(answerItems[0], ['.RichContent-inner .RichText', '.RichText', '.RichText.ztext']);
+      if (onlyAnswerBody) return onlyAnswerBody;
+    }
+    // Keep the pre-identity-matcher selectors as a last resort only when they
+    // resolve to one unique body; never choose the first of several answers.
+    const uniqueAnswerBodies = pickCandidates(doc, ['.AnswerItem .RichText', '.QuestionAnswer-content .RichText', '.RichText.ztext']);
+    if (answerItems.length <= 1 && uniqueAnswerBodies.length === 1) return uniqueAnswerBodies[0];
     return null;
   }
-  return platform === 'zhihu' ? pick(doc, ['.Post-RichText'])
-    : pick(doc, ['.article-content', '.syl-article-base']);
+  // A direct article ID in the final URL is validated again by the caller.
+  // Selectors from the earlier working release remain useful when a platform
+  // changes its internal answer/article wrappers without changing the URL.
+  return pick(doc, platformArticleSelectors);
 }
 
 function hasMatchingPlatformArticleDocumentIdentity(doc, url) {
@@ -415,6 +584,14 @@ function sanitizePlatformArticleDiagnostic(value) {
     if (key === 'markdownChars' && value[key] < 0) continue;
     result[key] = value[key];
   }
+  const safeOutcomes = new Set(['APP_WALL', 'LOGIN_REQUIRED', 'ACCESS_BLOCKED', 'FETCH_FAILED', 'RESPONSE_EMPTY', 'ARTICLE_DATA_MISSING', 'BODY_NOT_FOUND', 'IDENTITY_MISMATCH', 'BODY_INVALID']);
+  if (safeOutcomes.has(String(value.failureCode || ''))) result.failureCode = String(value.failureCode);
+  for (const key of ['htmlChars', 'renderDataPresent', 'renderDataArticleFound', 'bodySelectorFound', 'identityMatched']) {
+    if (key.endsWith('Chars')) {
+      const number = Number(value[key]);
+      if (Number.isSafeInteger(number) && number >= 0) result[key] = Math.min(number, 10000000);
+    } else if (typeof value[key] === 'boolean') result[key] = value[key];
+  }
   if (value.source === 'webpage-extraction') {
     if (['none', 'syndication', 'fxembed', 'both'].includes(value.xArticleProvider)) result.xArticleProvider = value.xArticleProvider;
     const safeCodes = new Set([
@@ -438,16 +615,41 @@ function sanitizePlatformArticleDiagnostic(value) {
     };
     if (!Object.keys(result.http).length) delete result.http;
   }
+  if (value.fallback && typeof value.fallback === 'object') {
+    const allowedTypes = new Set(['tardis-ssr', 'info-v2']);
+    const allowedTransports = new Set(['obsidian-requestUrl', 'node-http', 'node-http-failed', 'electron-session']);
+    const attempts = Array.isArray(value.fallback.attempts) ? value.fallback.attempts.slice(0, 3) : [];
+    result.fallback = {
+      attempts: attempts.filter(item => item && allowedTypes.has(String(item.type || ''))).map(item => ({
+        type: String(item.type),
+        transport: allowedTransports.has(String(item.transport || '')) ? String(item.transport) : 'unknown',
+        status: Number.isInteger(Number(item.status)) && Number(item.status) >= 100 && Number(item.status) <= 599
+          ? Number(item.status) : 0,
+        ok: item.ok === true,
+        ...(Number.isSafeInteger(Number(item.responseChars)) && Number(item.responseChars) >= 0
+          ? { responseChars: Math.min(Number(item.responseChars), 10000000) } : {}),
+        ...(['body-found', 'body-empty', 'payload-unrecognized', 'render-html-invalid', 'access-denied', 'response-empty', 'parse-empty'].includes(String(item.outcome || ''))
+          ? { outcome: String(item.outcome) } : {}),
+      })),
+    };
+    if (allowedTypes.has(String(value.fallback.succeeded || ''))) result.fallback.succeeded = String(value.fallback.succeeded);
+  }
   if (value.hiddenBrowser) {
     result.hiddenBrowser = {};
     for (const key of ['ok', 'needsLogin', 'blocked', 'appWall', 'identityMatched']) result.hiddenBrowser[key] = value.hiddenBrowser[key] === true;
     result.hiddenBrowser.bodyTextChars = Number(value.hiddenBrowser.bodyTextChars) || 0;
+    for (const key of ['renderDataPresent', 'renderDataArticleFound']) result.hiddenBrowser[key] = value.hiddenBrowser[key] === true;
+    if (['login', 'blocked', 'app-wall', 'body-empty', 'identity-mismatch', 'unknown'].includes(value.hiddenBrowser.pageState)) {
+      result.hiddenBrowser.pageState = value.hiddenBrowser.pageState;
+    }
   }
   return result;
 }
 
 module.exports = {
   getPlatformArticleIdentity,
+  isToutiaoArticleIdentityUrl,
+  matchesPlatformArticleRenderIdentity,
   hasPlatformArticleBody,
   selectPlatformArticleBody,
   hasMatchingPlatformArticleDocumentIdentity,
@@ -461,6 +663,9 @@ module.exports = {
   isAllowedPlatformArticleNavigation,
   normalizePlatformArticleUrl,
   parseToutiaoRenderData,
+  parseToutiaoInfoV2,
   parseZhihuInitialData,
+  parseZhihuTardisPage,
+  getPlatformArticleFallbackRequests,
   extractPlatformArticleFromHtml,
 };

@@ -18,6 +18,7 @@ const expectedModules = [
   'ai-metadata-error-utils',
   'ai-metadata-utils',
   'asr-diagnostic-evidence',
+  'asr-language-script-utils',
   'asr-recovery-utils',
   'asr-startup-timeout',
   'asr-timeout-process-group',
