@@ -157,6 +157,47 @@ async function run() {
   assert.ok(remoteOnly.metadata.markdown.includes(imageUrl));
   assert.strictEqual(remoteOnly.metadata.imageLocalizationFailedCount, 0);
 
+  const xImageUrl = 'https://pbs.twimg.com/media/shared-image.jpg';
+  for (const sourceUrl of [
+    articleUrl,
+    'https://x.com/example/status/123456',
+    'https://www.zhihu.com/question/123/answer/456',
+    'https://www.toutiao.com/article/123456/',
+  ]) {
+    for (const mode of [undefined, 'remote', 'local']) {
+      for (const configured of [false, true]) {
+        const fixture = createPlugin();
+        fixture.plugin.settings = { socialArticleImageStorageMode: mode, socialArticleImageStorageModeConfigured: configured };
+        const originalMarkdown = `![正文图片](${xImageUrl})`;
+        const output = await fixture.plugin.saveMarkdownRemoteImageAssets(
+          originalMarkdown, '临时收集', '2026-08-11', '共享图片测试', { sourceUrl },
+        );
+        if (mode === 'local') {
+          assert.strictEqual(fixture.downloads.length, 1, `${sourceUrl}: local downloads the original image`);
+          assert.strictEqual(fixture.writes.length, 1);
+          assert.ok(fixture.writes[0].filePath.includes('/文章图片/'));
+          assert.ok(output.includes(`![[${fixture.writes[0].filePath}]]`));
+          if (sourceUrl.includes('x.com')) assert.ok(fixture.writes[0].filePath.startsWith('临时收集/2026-08-11/X-共享图片测试/文章图片/'));
+        } else {
+          assert.strictEqual(fixture.downloads.length, 0, `${sourceUrl}: remote/default must not download regardless of the configured marker`);
+          assert.strictEqual(fixture.writes.length, 0);
+          assert.strictEqual(output, originalMarkdown);
+        }
+      }
+    }
+  }
+  const xExplicitRemoteCase = createPlugin();
+  xExplicitRemoteCase.plugin.settings = {
+    socialArticleImageStorageMode: 'remote',
+    socialArticleImageStorageModeConfigured: true,
+  };
+  const xExplicitRemote = await xExplicitRemoteCase.plugin.saveMarkdownRemoteImageAssets(
+    `![X 图片 1](${xImageUrl})`, '临时收集', '2026-08-11', 'X 远程图片测试',
+    { sourceUrl: 'https://x.com/example/status/123456' },
+  );
+  assert.strictEqual(xExplicitRemoteCase.downloads.length, 0, 'an explicit remote-image preference remains respected for X');
+  assert.ok(xExplicitRemote.includes(xImageUrl));
+
   const xiaohongshuRemoteCase = createPlugin();
   xiaohongshuRemoteCase.plugin.settings = { socialArticleImageStorageMode: 'remote' };
   const xiaohongshuRemote = await xiaohongshuRemoteCase.plugin.saveMarkdownRemoteImageAssets(

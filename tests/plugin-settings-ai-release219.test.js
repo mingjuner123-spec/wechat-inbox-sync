@@ -19,15 +19,16 @@ async function main(){
   const tab=Object.create(Plugin.__test.WechatInboxSettingTab.prototype);tab.plugin=plugin;tab.containerEl=new Element();
   const before=JSON.stringify(plugin.settings);tab.display();await Promise.resolve();await Promise.resolve();
   assert.equal(tab.createSettingsNavigation,undefined,'rejected menu must not return');
-  for(const name of ['输入绑定码','保存地址设置','笔记保存方式','图文图片保存方式','立即同步','微信小程序绑定教程','飞书官方 API 连接教程','诊断信息','飞书 App ID','本地转写组件','绑定额外设备','抖音登录状态','登录小红书','API 模型','API Key','API 地址','多语言翻译','AI 总结','本地转写语言'])assert.ok(entries.some(e=>e.name===name),name);
+  for(const name of ['输入绑定码','保存地址设置','笔记保存方式','图文图片保存方式','立即同步','微信小程序绑定教程','飞书官方 API 连接教程','诊断信息','飞书 App ID','本地转写组件','绑定额外设备','抖音登录状态','登录小红书','本地转写语言'])assert.ok(entries.some(e=>e.name===name),name);
   assert.ok(!entries.some(e=>/分段转写时间戳|播放器截图/.test(e.name||'')));
-  const ai=entries.find(e=>e.name==='AI 总结').parent;assert.equal(ai.tag,'details');assert.ok(!ai.open);assert.equal(ai.children[0].options.text,'AI 高级功能');
-  assert.deepEqual(entries.find(e=>e.name==='连接').controls.map(c=>c.label),['测试','教程']);
+  assert.ok(!entries.some(e=>/^(API 模型|API Key|API 地址|多语言翻译|AI 总结|连接)$/.test(e.name)));
+  assert.equal(tab.renderXArticleSettings,undefined);
+  assert.equal(tab.openXArticleTutorial,undefined);
   assert.deepEqual(entries.find(e=>e.name==='诊断信息').controls.map(c=>c.label),['复制诊断']);
   assert.deepEqual(entries.find(e=>e.name==='本地转写语言').controls[0].options,[['zh','简体中文'],['en','English']]);
   assert.equal(saves,0);assert.equal(JSON.stringify(plugin.settings),before);
   await entries.find(e=>e.name==='本地转写语言').controls[0].change('en');assert.equal(plugin.settings.transcriptionLanguage,'en');
   assert.equal(plugin.settings.xTranslationEnabled,false);assert.equal(plugin.settings.xSummaryEnabled,false);
-  console.log('single-page settings: binding/save/tutorial/service retained; AI collapsed and off; one diagnosis action; zh/en language selection passed');
+  console.log('single-page settings: binding/save/tutorial/service retained; AI controls removed; one diagnosis action; zh/en language selection passed');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

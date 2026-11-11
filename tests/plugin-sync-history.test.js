@@ -62,6 +62,17 @@ assert.strictEqual(helpers.categorizeSyncFailure({ code: 'EXTRACTION_FAILED' }),
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'TRANSCRIPTION_FAILED' }), 'TRANSCRIPTION_FAILED');
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'WRITE_FAILED' }), 'WRITE_FAILED');
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'UNSUPPORTED_PLATFORM' }), 'UNSUPPORTED_PLATFORM');
+for (const code of [
+  'CLOUD_FALLBACK_FAILED',
+  'NODE_HTTP_TIMEOUT',
+  'MEDIA_DOWNLOAD_INTERRUPTED',
+  'CHANNELS_OPERATION_FAILED',
+  'DOUYIN_NO_MEDIA',
+  'WECHAT_ARTICLE_BODY_MISSING',
+  'XIAOHONGSHU_CONTENT_UNAVAILABLE',
+]) {
+  assert.strictEqual(helpers.categorizeSyncFailure({ code }), code, `${code} must survive lifecycle reporting`);
+}
 assert.strictEqual(helpers.categorizeSyncFailure(new Error('Unsupported record type: link')), 'UNSUPPORTED_PLATFORM');
 assert.strictEqual(helpers.categorizeSyncFailure({ code: 'UNKNOWN' }), 'SYNC_FAILED');
 assert.strictEqual(helpers.sanitizeSyncNoteTitle('private\\vault\\safe-title.md'), 'safe-title');

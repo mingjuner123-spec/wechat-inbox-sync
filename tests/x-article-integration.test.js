@@ -32,6 +32,8 @@ async function main() {
   assert.equal(plugin.settings.xTranslationEnabled, false); assert.equal(plugin.settings.xSummaryEnabled, false); assert.equal(plugin.settings.xAiApiKey, '');
   assert.equal(Plugin.__test.mergeSettings({}).xAiModel, 'deepseek-flash');
   for (const model of ['deepseek-chat', 'custom-model']) assert.equal(Plugin.__test.mergeSettings({ xAiModel: model }).xAiModel, model);
+  const translationRequests = [];
+  plugin.requestJson = async (...args) => { translationRequests.push(args); throw Object.assign(Error('translation unavailable'), {status:503}); };
   let requests = [];
   requestMock = async opts => { requests.push(opts); return { status: 200, json: tweet }; };
   plugin.saveMarkdownRemoteImageAssets = async md => md;
@@ -40,16 +42,39 @@ async function main() {
   let result = await plugin.hydrateWebpageMarkdown(record, 'Inbox', '2026-11-02', 'title');
   assert.equal(JSON.stringify(record), original); assert.equal(requests.length, 1);
   assert.equal(result.metadata.conversionStatus, 'success'); assert.equal(result.metadata.transcriptOnly, false); assert.equal(result.metadata.transcriptionStatus, undefined); assert.equal(result.metadata.xImageCount, 2);
-  assert.equal(await plugin.enrichRecordMetadataWithAi(result), result);
+  assert.equal(translationRequests[0][0], '/x/translate'); assert.equal(translationRequests[0][1], 'POST');
+  assert.equal(translationRequests[0][2].url, 'https://x.com/i/web/status/123456'); assert.ok(translationRequests[0][2].items.length > 0);
+  assert.equal(result.metadata.sourceMetadataComplete, false, 'X extraction must not suppress existing keyword/description generation');
+  plugin.hasProFeatureAccess = async () => true;
+  const originalMetadataGenerator = plugin.generateMetadataWithDeepSeek;
+  plugin.generateMetadataWithDeepSeek = async () => ({description:'帖子简介',keywords:['关键词']});
+  const enriched = await plugin.enrichRecordMetadataWithAi(result);
+  assert.equal(enriched.metadata.description,'帖子简介');
+  assert.deepEqual(enriched.metadata.keywords,['关键词']);
+  plugin.generateMetadataWithDeepSeek = originalMetadataGenerator;
+  const originalTranslateRequest = plugin.requestJson;
+  plugin.requestJson = async (_path,_method,payload) => ({translations:payload.items.map(item=>({id:item.id,text:item.id===-1?'中文标题':'中文句子'}))});
+  const translated = await plugin.hydrateWebpageMarkdown(record,'Inbox','2026-11-02','title');
+  assert.equal(translated.metadata.title,'Example：中文标题');
+  assert.match(translated.metadata.markdown,/中文标题（Example：/,'body heading still preserves the original');
+  plugin.requestJson = originalTranslateRequest;
+  const originalMockRequest=requestMock;
+  const fullTweetTitle='HubSpot co-founder and CTO Dharmesh Shah says ChatGPT and Claude are the new browsers';
+  requestMock=async()=>({status:200,json:{...tweet,text:fullTweetTitle+'\n\nThe rest of the post.'}});
+  const fullTitleRecord=await plugin.hydrateWebpageMarkdown(record,'Inbox','2026-11-02','title');
+  assert.equal(fullTitleRecord.metadata.title,'Example：'+fullTweetTitle,'tweet title extraction never cuts browsers into bro');
+  requestMock=originalMockRequest;
   assert.ok(!Plugin.__test.getSyncLifecycleOutcomeError(result));
   assert.match(Plugin.__test.buildWebpageMarkdownBody(result, 'title'), /Hello world/);
+  assert.match(Plugin.__test.buildWebpageMarkdownBody(result, 'title'), /^# \*\*Example：/,
+    'X note bodies should start with the post title, without a generic Markdown wrapper heading');
   const originalXRequest = plugin.requestXArticleJson;
   plugin.requestXArticleJson = async () => ({ __typename: 'Tweet', id_str: '123456', text: '', article: {
     title: 'Original long article title', content: { blocks: [{ text: 'A real paragraph from the article body.' }] },
   } });
   const titledArticle = await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: record.content, metadata: {} }, 'Inbox', '2026-11-02', 'fallback');
   assert.match(titledArticle.metadata.title, /Original long article title/);
-  assert.match(titledArticle.metadata.markdown, /# X：Original long article title/);
+  assert.match(titledArticle.metadata.markdown, /^# \*\*X：Original long article title\*\*/m);
   const lifecycleUrl = `https://x.com/example/status/${tweet.id_str}`;
   for (const markdown of [
     '# X：Only title',
@@ -94,7 +119,7 @@ async function main() {
   plugin.settings = originalPluginSettings;
   const originalTranscriptBuilder = plugin.buildTranscriptRecordFromMedia;
   const videoUrl = 'https://video.twimg.com/ext_tw_video/123/pu/vid/avc1/1280x720/test.mp4?tag=12';
-  const articleVideo = { ...tweet, mediaDetails: [{ type: 'video', video_info: { variants: [
+  const articleVideo = { ...tweet, lang: 'en', mediaDetails: [{ type: 'video', video_info: { variants: [
     { content_type: 'video/mp4', bitrate: 256000, url: videoUrl },
   ] } }] };
   const videoRecord = { type: 'webpage', content: 'https://x.com/example/status/123456', metadata: {} };
@@ -105,6 +130,7 @@ async function main() {
   plugin.buildTranscriptRecordFromMedia = async (sourceRecord, options) => {
     videoTranscriptionCalls++;
     assert.equal(options.platform, 'X'); assert.equal(options.mediaUrl, videoUrl);
+    assert.equal(options.transcriptionLanguage, 'en', 'English X videos must not inherit the Chinese ASR default');
     assert.ok(Number(options.maxBytes) > 0, 'X video transcription downloads have a size limit');
     assert.equal(options.binding, binding); assert.equal(options.signal, signal);
     assert.match(options.markdown, /Hello world/); assert.match(options.markdown, /pbs.twimg.com\/media\/a.jpg/);
@@ -144,26 +170,75 @@ async function main() {
   assert.equal(videoWithoutDirectUrl.metadata.conversionStatus, 'success');
   assert.equal(videoWithoutDirectUrl.metadata.transcriptionStatus, 'failed');
   assert.match(videoWithoutDirectUrl.metadata.markdown, /X 视频转写未完成/);
+  const posterUrl = 'https://pbs.twimg.com/amplify_video_thumb/123/video-poster.jpg';
+  const cardOnlyVideo = { __typename: 'Tweet', id_str: '123456', text: 'Video post.', card: {
+    name: 'unified_card', binding_values: { unified_card: { string_value: JSON.stringify({ type: 'video_website' }) } },
+  } };
+  const fxVideoPayload = { code: 200, status: { id: '123456', text: 'Video post.', media: { videos: [{
+    url: videoUrl, thumbnail_url: posterUrl,
+  }] } } };
+  let mediaFallbackCalls = 0, fallbackVideoTranscriptions = 0;
+  plugin.requestXArticleJson = async endpoint => {
+    if (endpoint.startsWith('https://api.fxtwitter.com/')) { mediaFallbackCalls++; return fxVideoPayload; }
+    return cardOnlyVideo;
+  };
+  plugin.buildTranscriptRecordFromMedia = async (sourceRecord, options) => {
+    fallbackVideoTranscriptions++;
+    assert.equal(options.mediaUrl, videoUrl);
+    return { ...sourceRecord, metadata: { ...sourceRecord.metadata, transcriptOnly: true,
+      transcription: '卡片视频转写成功。',
+      transcriptionSegments: [{ startMs: 1000, endMs: 2000, text: '卡片视频转写成功。' }],
+      transcriptionStatus: 'success', conversionStatus: 'success', markdown: options.markdown } };
+  };
+  const fallbackTranscribedVideo = await plugin.hydrateWebpageMarkdown(videoRecord, 'Inbox', '2026-11-02', 'X video', binding, { signal });
+  assert.equal(mediaFallbackCalls, 1, `a Syndication video card without media must use the media fallback (transcription calls: ${fallbackVideoTranscriptions})`);
+  assert.equal(fallbackVideoTranscriptions, 1); assert.equal(fallbackTranscribedVideo.metadata.transcriptionStatus, 'success');
+  assert.match(fallbackTranscribedVideo.metadata.markdown, /^# \*\*X：Video post\.\*\*/m);
+  assert.match(fallbackTranscribedVideo.metadata.markdown, /卡片视频转写成功/);
+  assert.match(fallbackTranscribedVideo.metadata.markdown, /\*\*\[00:01\]\*\*/,
+    'X video segments should retain their timestamps in the paired transcript output');
+  assert.equal(fallbackTranscribedVideo.metadata.transcriptionSegments[0].videoIndex, 1);
+  assert.match(fallbackTranscribedVideo.metadata.markdown, /!\[X 视频封面\].*video-poster\.jpg/,
+    'one separate video cover is retained without adding it as an article photo');
   plugin.requestXArticleJson = originalXRequest;
   plugin.buildTranscriptRecordFromMedia = originalTranscriptBuilder;
   // Exercise real ingestion routes and the atomic note writer, not just hydration.
   const files = new Map();
+  const folders = new Set();
   plugin.settings = { ...plugin.settings, inboxDir: 'Inbox', noteSaveMode: 'root', socialArticleImageStorageMode: 'remote' };
   plugin.app = { vault: { create: async (p, value) => { assert.equal(files.has(p), false); files.set(p, value); }, adapter: {
-    exists: async p => files.has(p), write: async (p, value) => { files.set(p, value); },
-    read: async p => files.get(p), rename: async (from, to) => { files.set(to, files.get(from)); files.delete(from); },
+    exists: async p => files.has(p) || folders.has(p), write: async (p, value) => { files.set(p, value); },
+    read: async p => files.get(p), rename: async (from, to) => {
+      for (const p of [...files.keys()]) if (p === from || p.startsWith(from + '/')) { files.set(to + p.slice(from.length), files.get(p)); files.delete(p); }
+      for (const p of [...folders]) if (p === from || p.startsWith(from + '/')) { folders.add(to + p.slice(from.length)); folders.delete(p); }
+    },
     remove: async p => { files.delete(p); },
   } } };
-  plugin.ensureFolder = async () => {}; plugin.showSyncProgress = () => {};
+  plugin.ensureFolder = async p => { folders.add(p); }; plugin.showSyncProgress = () => {};
   plugin.saveSourceMediaAttachment = async r => r;
   const hydrateForWrite = plugin.hydrateWebpageMarkdown;
   plugin.hydrateWebpageMarkdown = async r => r;
   plugin.nextRecordTitle = async () => 'X-video-asr-failed';
-  const failedVideoWrite = await plugin.writeRecord({ ...videoWithAsrFailure, _id: 'x-video-asr-failed', createdAt: '2026-11-02T00:00:00Z' }, '2026-11-02T00:01:00Z', null, false, { skipAi: true });
-  assert.equal(failedVideoWrite.committed, true, 'an X article remains deliverable if only its video transcript failed');
-  const failedVideoNote = files.get(failedVideoWrite.filePath);
-  assert.match(failedVideoNote, /Hello world/); assert.match(failedVideoNote, /X 视频转写未完成/);
-  assert.equal(Plugin.__test.getSyncLifecycleOutcomeError(videoWithAsrFailure), null);
+  await assert.rejects(plugin.writeRecord({ ...videoWithAsrFailure, _id: 'x-video-asr-failed', createdAt: '2026-11-02T00:00:00Z' }, '2026-11-02T00:01:00Z', null, false, { skipAi: true }),
+    error => /TRANSCRIPTION/.test(error.code), 'failed X video transcription must remain retryable, never acknowledged as success');
+  assert.equal(Plugin.__test.getSyncLifecycleOutcomeError(videoWithAsrFailure).code, 'TRANSCRIPTION_FAILED');
+  plugin.settings.socialArticleImageStorageMode = 'local';
+  folders.add('Inbox/X-video-asr-failed'); folders.add('Inbox/X-video-asr-failed/文章图片');
+  files.set('Inbox/X-video-asr-failed/文章图片/image.jpg', Buffer.from('image-fixture'));
+  const writeFixture = { ...transcribedVideo, metadata: { ...transcribedVideo.metadata,
+    markdown: transcribedVideo.metadata.markdown + '\n![[Inbox/X-video-asr-failed/文章图片/image.jpg]]' } };
+  const successWrite = await plugin.writeRecord({ ...writeFixture, _id: 'x-video-complete', createdAt: '2026-11-02T00:00:00Z' }, '2026-11-02T00:01:00Z', null, false, { skipAi: true });
+  assert.match(successWrite.title, /Example/);
+  assert.doesNotMatch(successWrite.title, /识别到/);
+  assert.equal((files.get(successWrite.filePath).match(/^# /gm) || []).length, 1, 'X video must have a single source title');
+  const imagePath = successWrite.filePath.slice(0, successWrite.filePath.lastIndexOf('/')) + '/文章图片/image.jpg';
+  assert.ok(files.has(imagePath), 'selected local images and final note must stay in the same title folder');
+  assert.ok(files.get(successWrite.filePath).includes(imagePath));
+  plugin.settings.socialArticleImageStorageMode = 'remote';
+  const remoteWrite = await plugin.writeRecord({ ...transcribedVideo, _id: 'x-video-remote', createdAt: '2026-11-02T00:00:00Z' }, '2026-11-02T00:01:00Z', null, false, { skipAi: true });
+  assert.match(remoteWrite.filePath, /^Inbox\/[^/]+\.md$/, 'remote mode keeps the note directly in the selected save folder');
+  assert.match(files.get(remoteWrite.filePath), /pbs\.twimg\.com/);
+  assert.doesNotMatch(files.get(remoteWrite.filePath), /!\[\[/, 'remote mode does not add local image references');
   plugin.hydrateWebpageMarkdown = hydrateForWrite;
   for (const type of ['link', 'text', 'webpage']) {
     plugin.nextRecordTitle = async () => `X-${type}`;
@@ -175,7 +250,7 @@ async function main() {
   result = await plugin.hydrateWebpageMarkdown(record, 'Inbox', '2026-11-02', 'title');
   assert.equal(result.metadata.conversionStatus, 'success');
   const failedAi = await plugin.appendAdvancedAi(result.metadata.markdown, result);
-  assert.match(failedAi, /X_AI_RATE_LIMITED/); assert.match(failedAi, /pbs.twimg.com/); assert.ok(!failedAi.includes('provider-secret'));
+  assert.match(failedAi, /翻译暂未完成/); assert.match(failedAi, /pbs.twimg.com/); assert.ok(!failedAi.includes('provider-secret'));
   requestMock = async () => ({ status: 200, json: {} });
   result = await plugin.hydrateWebpageMarkdown(record, 'Inbox', '2026-11-02', 'title');
   assert.equal(result.metadata.conversionStatus, 'link_saved'); assert.ok(Plugin.__test.getSyncLifecycleOutcomeError(result));
@@ -192,117 +267,18 @@ async function main() {
   requestMock = async () => { throw Error('non-X should use cached markdown'); };
   const other = await plugin.hydrateWebpageMarkdown({ type: 'webpage', content: 'https://example.com/page', metadata: { markdown: 'Existing article' } }, 'Inbox', 'date', 'title');
   assert.equal(other.metadata.markdown, 'Existing article');
-  // The shared writer appends AI output after extraction, for every platform/type.
-  const hydrateOriginal = plugin.hydrateWebpageMarkdown;
-  const enrichOriginal = plugin.enrichRecordMetadataWithAi;
-  plugin.hydrateWebpageMarkdown = async r => r;
-  plugin.enrichRecordMetadataWithAi = async r => r;
-  plugin.writeFileAttachment = async r => r;
-  plugin.writeVoiceAttachment = async r => r;
-  plugin.nextTitle = async (_, title) => title;
-  let summaryCalls = 0;
-  plugin.settings = { ...plugin.settings, xTranslationEnabled: false, xSummaryEnabled: true, xAiApiKey: 'test-placeholder' };
-  requestMock = async options => {
-    summaryCalls++;
-    const body = JSON.parse(options.body);
-    assert.equal(body.model, plugin.settings.xAiModel);
-    assert.ok(JSON.parse(body.messages[1].content).text.includes('实际正文'));
-    return { status: 200, json: { choices: [{ message: { content: '{"summary":"全平台总结成功"}' } }] } };
-  };
-  const cases = [
-    ...['微信', '飞书', '小红书', '普通网页', 'X'].map(platform => ({ type: 'webpage', content: 'https://example.com/' + encodeURIComponent(platform), metadata: { markdown: '实际正文 ![图片](https://pbs.twimg.com/media/a.jpg)', platform } })),
-    { type: 'text', content: '实际正文，来自纯文字收集。', metadata: {} },
-    { type: 'file', content: 'document.pdf', metadata: { convertedMarkdown: '实际正文，来自文档。' } },
-    { type: 'file', content: 'image.png', metadata: { convertedMarkdown: '实际正文，来自图片OCR。' } },
-    { type: 'voice', content: 'audio.mp3', metadata: { transcription: '实际正文，来自语音。', transcriptionStatus: 'success' } },
-    { type: 'webpage', content: 'https://example.com/video', metadata: { transcriptOnly: true, transcription: '实际正文，来自视频。', transcriptionStatus: 'success' } },
-  ];
-  for (const [index, source] of cases.entries()) {
-    const r = { ...source, _id: 'all-platform-' + index, createdAt: '2026-11-02', metadata: { ...source.metadata, sourceMetadataComplete: true, ...(source.type === 'text' ? {} : { conversionStatus: 'success' }) } };
-    plugin.nextRecordTitle = async () => 'all-platform-' + index;
-    const written = await plugin.writeRecord(r, '2026-11-02');
-    assert.equal(written.committed, true); assert.match(files.get(written.filePath), /实际正文/); assert.match(files.get(written.filePath), /## AI 总结\n\n全平台总结成功/);
-  }
-  assert.equal(summaryCalls, cases.length);
-  plugin.nextRecordTitle = async () => 'wechat-reextract';
-  const recovered = await plugin.writeRecord({ type: 'webpage', content: 'https://mp.weixin.qq.com/s/reextract-fixture', createdAt: '2026-11-02', metadata: { markdown: '实际正文，来自重新提取的公众号。', conversionStatus: 'success' } }, '2026-11-02', null, false, { skipAi: true });
-  assert.match(files.get(recovered.filePath), /全平台总结成功/);
-  const captured = { _id: 'captured', type: 'webpage', content: 'https://example.com/captured', createdAt: '2026-11-02', metadata: { transcriptOnly: true, transcription: '实际正文，来自捕获通道。', transcriptionStatus: 'success', conversionStatus: 'success', sourceMetadataComplete: true } };
-  plugin.nextRecordTitle = async () => 'captured-content';
-  const capturedNote = await plugin.writeCapturedWechatChannelsRecord(captured, '2026-11-02');
-  assert.match(files.get(capturedNote.filePath), /全平台总结成功/); assert.equal(summaryCalls, cases.length + 2);
-  const unavailable = { type: 'webpage', content: 'https://www.douyin.com/note/123', metadata: { conversionStatus: 'success', conversionNote: '抖音图文笔记已保存链接（正文未获取）', markdown: '抖音图文笔记：页面未返回可读正文，已保存链接。\n\n> 失败原因' } };
-  assert.equal(await plugin.appendAdvancedAi(unavailable.metadata.markdown, unavailable), unavailable.metadata.markdown);
-  assert.equal(summaryCalls, cases.length + 2, 'no-body success records must not call AI');
-  plugin.settings.xSummaryEnabled = false; plugin.settings.xTranslationEnabled = true;
-  const chineseOnly = await plugin.appendAdvancedAi('原文与图片', { type: 'text', content: '这是一段中文，不需要翻译。' });
-  assert.equal(chineseOnly, '原文与图片'); assert.equal(summaryCalls, cases.length + 2);
-  const unsafeSummary = await plugin.appendAdvancedAi('原文正文', { type: 'text', content: '实际正文', metadata: {
-    xAdvancedAiResult: { summary: '![track](https://evil.example/x) <img src=x> [[secret]] ![[private-note]]' },
-  } });
-  assert.match(unsafeSummary, /&lt;img/); assert.ok(!unsafeSummary.includes('![track]('));
-  assert.ok(!unsafeSummary.includes('![[private-note]]')); assert.ok(!unsafeSummary.includes('[[secret]]'));
-  plugin.settings.xSummaryEnabled = true; plugin.settings.xTranslationEnabled = false;
-  requestMock = async () => ({ status: 500, json: { message: 'private-server-response' } });
-  plugin.nextRecordTitle = async () => 'ai-failure-preserves-note';
-  const failureNote = await plugin.writeRecord({ type: 'text', content: '实际正文不能丢失。', createdAt: '2026-11-02', metadata: {} }, '2026-11-02');
-  assert.equal(failureNote.committed, true); assert.match(files.get(failureNote.filePath), /实际正文不能丢失/); assert.match(files.get(failureNote.filePath), /X_AI_REQUEST_FAILED/);
-  assert.ok(!files.get(failureNote.filePath).includes('private-server-response'));
-  plugin.hydrateWebpageMarkdown = hydrateOriginal; plugin.enrichRecordMetadataWithAi = enrichOriginal;
-  const tab = Object.create(Plugin.__test.WechatInboxSettingTab.prototype); tab.plugin = plugin; plugin.settings = { ...x.DEFAULTS }; let saves = 0; plugin.saveSettings = async () => { saves++; };
+  // Removed settings must stay unavailable, including for legacy users.
+  const tab = Object.create(Plugin.__test.WechatInboxSettingTab.prototype); tab.plugin = plugin;
   const container = new Element();
-  tab.renderXArticleSettings(container);
-  assert.deepEqual(controls.map(c => c.name), ['API 模型', 'API Key', 'API 地址', '连接', '多语言翻译', 'AI 总结']);
-  assert.ok(controls.every(c => !c.description || c.description === '默认统一翻译为中文，中文内容不翻译。'));
-  assert.ok(container.children.some(child => child.tag === 'details'), 'AI settings stay collapsed within the accepted single-page design');
-  const translation = controls.find(c => c.name === '多语言翻译').control;
-  const summary = controls.find(c => c.name === 'AI 总结').control;
-  assert.equal(translation.value, false); assert.equal(summary.value, false);
-  await summary.change(true); assert.equal(plugin.settings.xSummaryEnabled, true); assert.equal(plugin.settings.xTranslationEnabled, false);
-  await translation.change(true); assert.equal(plugin.settings.xTranslationEnabled, true); assert.equal(saves, 2);
-  assert.equal(controls.find(c => c.name === 'API Key').control.inputEl.type, 'password');
-  const modelControl = controls.find(c => c.name === 'API 模型').control;
-  const addressControl = controls.find(c => c.name === 'API 地址').control;
-  assert.equal(modelControl.value, 'DeepSeek · V4.1 Flash'); assert.equal(modelControl.inputEl.readOnly, true);
-  assert.equal(addressControl.value, 'https://api.deepseek.com'); assert.equal(addressControl.inputEl.readOnly, true);
-  assert.ok(!controls.some(c => c.controls.some(item => item.selectEl)), 'Demo has no provider dropdown');
-  await controls.find(c => c.name === 'API Key').control.change(' test-placeholder ');
-  const buttons = controls.find(c => c.name === '连接').controls;
-  assert.deepEqual(buttons.map(c => c.label), ['测试', '教程']);
-  let tested = 0;
-  requestMock = async opts => {
-    tested++; assert.equal(opts.url, 'https://api.deepseek.com/chat/completions');
-    assert.equal(JSON.parse(opts.body).model, 'deepseek-flash');
-    assert.equal(opts.headers.Authorization, 'Bearer test-placeholder');
-    return { status: 200, json: { choices: [{ message: { content: '{"ok":true}' } }] } };
-  };
-  await buttons[0].click(); assert.equal(tested, 1); assert.equal(notices.at(-1), '连接成功');
-  requestMock = async () => { throw new Error('private-provider-message'); };
-  await buttons[0].click(); assert.equal(buttons[0].disabled, false); assert.ok(!notices.at(-1).includes('private-provider-message'));
-  await buttons[1].click(); assert.equal(modals.at(-1).opened, true);
-  const tutorialText = JSON.stringify(modals.at(-1).contentEl);
-  assert.ok(!/Kimi|MiniMax|moonshot|minimax/.test(tutorialText));
-  const mismatchSettings = { ...x.DEFAULTS, xSummaryEnabled: true, xAiModel: 'kimi-k3.1-pro', xAiBaseUrl: 'https://api.deepseek.com/v1', xAiApiKey: 'synthetic-old-key' };
-  plugin.settings = { ...mismatchSettings };
-  const controlOffset = controls.length; const savesBeforeRender = saves;
-  tab.renderXArticleSettings(new Element());
-  assert.deepEqual(plugin.settings, mismatchSettings); assert.equal(saves, savesBeforeRender);
-  const mismatchControls = controls.slice(controlOffset);
-  assert.equal(mismatchControls.find(c => c.name === 'API Key').control.value, '');
-  let wrongProviderCalls = 0;
-  requestMock = async () => { wrongProviderCalls++; throw Error('must not send old key'); };
-  await mismatchControls.find(c => c.name === '连接').controls[0].click();
-  const blockedNote = await plugin.appendAdvancedAi('原文', {type:'text',content:'实际正文'});
-  assert.match(blockedNote, /X_AI_CONFIG_REQUIRED/); assert.equal(wrongProviderCalls, 0);
-  await mismatchControls.find(c => c.name === 'API Key').control.change('new-deepseek-placeholder');
-  assert.equal(plugin.settings.xAiModel, 'deepseek-flash'); assert.equal(plugin.settings.xAiBaseUrl, 'https://api.deepseek.com');
-  requestMock = async opts => {
-    assert.equal(opts.url, 'https://api.deepseek.com/chat/completions');
-    assert.equal(JSON.parse(opts.body).model, 'deepseek-flash');
-    assert.equal(opts.headers.Authorization, 'Bearer new-deepseek-placeholder');
-    return {status:200,json:{choices:[{message:{content:'{"summary":"DeepSeek summary"}'}}]}};
-  };
-  assert.match(await plugin.appendAdvancedAi('原文', {type:'text',content:'实际正文'}), /DeepSeek summary/);
+  assert.equal(tab.renderXArticleSettings, undefined);
+  assert.equal(tab.openXArticleTutorial, undefined);
+  plugin.settings = { ...plugin.settings, xSummaryEnabled: true, xTranslationEnabled: true, xAiApiKey: 'legacy-fixture' };
+  requestMock = async () => { throw Error('retired AI must not call provider'); };
+  for (const type of ['text','webpage','file','voice']) {
+    const source = { type, content: 'Original body.', metadata: { xAdvancedAiResult: {summary:'cached summary'} } };
+    assert.equal(await plugin.prepareAdvancedAiRecord(source), source);
+    assert.equal(await plugin.appendAdvancedAi('Original body.', source), 'Original body.');
+  }
   let diagnosticCalls = 0;
   plugin.copySupportDiagnosticText = async () => { diagnosticCalls++; return true; };
   tab.renderDiagnosticSetting(container);
@@ -343,6 +319,7 @@ async function main() {
   assert.ok(Buffer.byteLength(diagnosticText, 'utf8') <= 32768 + 16384 + 2);
   const bundle = fs.readFileSync(require.resolve('../obsidian-plugin/wechat-inbox-sync/main'), 'utf8');
   for (const removed of ['分段转写时间戳', '播放器截图按钮', '复制本次失败', '复制完整诊断', 'wb-transcript-screenshot', 'wb-transcript-seek']) assert.ok(!bundle.includes(removed), `removed feature remains: ${removed}`);
+  for (const removed of ['function aiConfig(settings)', 'async function processAi(post', 'function renderAi(ai', 'async function testConnection(settings', 'xAdvancedAiResult']) assert.ok(!bundle.includes(removed), `retired local X AI remains: ${removed}`);
   console.log('x-article-integration: all behavior tests passed');
 }
 main().catch(e => { console.error(e); process.exitCode = 1; });

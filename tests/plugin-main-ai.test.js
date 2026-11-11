@@ -54,6 +54,31 @@ function runNoteOutputPlanModuleTests() {
   assert.ok(plan.markdown.includes('<!-- wechat-inbox-record-id: output-plan-text-1 -->'));
   assert.ok(plan.markdown.endsWith('正文\n'));
 
+  const xVideoOutput = createNoteOutputPlanHelpers({
+    buildRecordIdMarker: id => `<!-- record: ${id} -->`,
+    buildAiMetadataErrorComment: () => '',
+    cleanDisplayUrl: value => String(value || ''),
+    defaultNotePropertyFields: 'title,url,synced_at',
+    getRecordAuthor: () => '', getRecordDescription: () => '', getRecordKeywords: () => [],
+    getRecordId: record => record.id,
+    getRecordSourceLabel: () => 'X',
+    getRecordUrl: (record, metadata = record.metadata || {}) => metadata.url || record.content || '',
+    getWebpageSourcePrefix: () => 'X', isFeishuUrl: () => false,
+    isSuccessfulTranscriptionRecord: record => record.metadata.transcriptionStatus === 'success',
+    normalizeNotePropertyFields: value => String(value || ''),
+    normalizeVaultPath: value => String(value || ''),
+    buildWebpageMarkdownBody: record => `## Markdown 内容\n\n${record.metadata.markdown}\n`,
+    buildFileMarkdownBody: record => record.metadata.markdown,
+  });
+  const xVideoMarkdown = xVideoOutput.buildMarkdownForRecord({
+    record: { id: 'x-video-heading', type: 'webpage', content: 'https://x.com/user/status/123', metadata: {
+      url: 'https://x.com/user/status/123', title: '作者：视频标题', transcriptionStatus: 'success',
+      markdown: '# **作者：视频标题**\n\n## 正文\n\n内容\n\n## 视频转写\n\n译文\n\n> 原文',
+    } }, title: '作者：视频标题', syncedAt: '2026-11-11', propertyFields: 'title,url,synced_at',
+  });
+  assert.strictEqual((xVideoMarkdown.match(/^# /gm) || []).length, 1,
+    'X video markdown already has its own title and must not receive a duplicate generic heading');
+
   const webpageRecord = {
     _id: 'output-plan-webpage-1',
     type: 'webpage',
@@ -10299,6 +10324,27 @@ async function runAsyncHydrationTests() {
   assert.strictEqual(result, '第二次查询拿到结果');
   assert.strictEqual(submitCount, 1);
   assert.strictEqual(doubaoPlugin.settings.pendingDoubaoTasks[taskKey], undefined);
+
+  doubaoPlugin.settings.doubaoPollAttempts = 10;
+  doubaoPlugin.settings.doubaoPollIntervalMs = 60000;
+  let cancelQueryCount = 0;
+  requestUrlMock = async ({ url }) => {
+    if (url.includes('/submit')) return { status: 200, headers: { 'X-Api-Status-Code': '20000001' }, json: {} };
+    if (url.includes('/query')) {
+      cancelQueryCount += 1;
+      return { status: 200, headers: { 'X-Api-Status-Code': '20000001' }, json: {} };
+    }
+    throw new Error(`unexpected cancellable doubao request ${url}`);
+  };
+  const abortController = new AbortController();
+  const pendingTranscription = doubaoPlugin.runDoubaoTranscription(
+    'https://media.example.com/cancellable.m4a',
+    { signal: abortController.signal },
+  );
+  await new Promise(resolve => setTimeout(resolve, 10));
+  abortController.abort();
+  await assert.rejects(pendingTranscription, error => error && error.name === 'AbortError');
+  assert.strictEqual(cancelQueryCount, 1, 'cancelling during poll sleep prevents subsequent external polling');
 }
 
 async function runLocalTranscriptionQualityFallbackTests() {

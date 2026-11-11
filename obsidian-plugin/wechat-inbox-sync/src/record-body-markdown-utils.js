@@ -263,8 +263,15 @@ function createRecordBodyMarkdownHelpers(dependencies = {}) {
     }
 
     if (snapshot) {
+      if (/^https?:\/\/(?:(?:www|mobile)\.)?(?:x|twitter)\.com\//i.test(url)) {
+        return `${snapshot.trim()}\n`;
+      }
       if (helpers.isFeishuUrl(url)) {
         return [snapshot, automaticShareTextMarkdown].filter(Boolean).join('\n\n').trim() + '\n';
+      }
+      if (/^https?:\/\/(?:[a-z0-9-]+\.)*(?:zhihu|toutiao)\.com\//i.test(url)) {
+        const heading = /^#\s/m.test(snapshot) ? '' : `# ${String(pageTitle).replace(/[\r\n]+/g, ' ')}`;
+        return [heading, snapshot, automaticShareTextMarkdown].filter(Boolean).join('\n\n').trim() + '\n';
       }
       return [
         '## Markdown 内容',

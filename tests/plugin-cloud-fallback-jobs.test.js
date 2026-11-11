@@ -280,6 +280,24 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   assert.equal(articleRequest.sourceUrl, 'https://mp.weixin.qq.com/s/article-fallback');
   assert.equal(articleSubmitPlugin.settings.cloudFallbackSubmissions.length, 0, 'accepted source job clears its pending submission');
 
+  for (const [sourceType, sourceUrl] of [
+    ['zhihu_article', 'https://www.zhihu.com/question/123456/answer/789012'],
+    ['toutiao_article', 'https://www.toutiao.com/article/7123456789012345678/'],
+  ]) {
+    const platformSubmitPlugin = makePlugin();
+    let platformRequest = null;
+    platformSubmitPlugin.requestJson = async (_path, _method, body) => {
+      platformRequest = body;
+      return { success: true, data: { jobId: `job-${sourceType}`, recordId: 'platform-record', sourceType, sourceUrl, clientRequestId: body.clientRequestId, status: 'queued' } };
+    };
+    await platformSubmitPlugin.submitCloudFallbackJob({
+      sourceType, sourceUrl, recordId: 'platform-record', retryCount: 0,
+      binding: platformSubmitPlugin.settings.bindings[0],
+    });
+    assert.equal(platformRequest.sourceType, sourceType);
+    assert.equal(platformRequest.sourceUrl, sourceUrl);
+  }
+
   const channelsSubmitPlugin = makePlugin();
   let channelsRequest = null;
   channelsSubmitPlugin.requestJson = async (_path, _method, body) => {
@@ -1316,9 +1334,9 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   assert.ok(heartbeatBodies.length >= 1);
   assert.ok(heartbeatBodies.every((item) => item.stage === 'acquiring'), 'media heartbeat must use the backend-supported acquiring stage');
   assert.ok(capacityBodies.length >= 1, 'operator must register capacity before claiming work');
-  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
-  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
-  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(capacityBodies[0].runtimeCapabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'toutiao_article', 'zhihu_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(capacityBodies[0].availableCapabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'toutiao_article', 'zhihu_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
+  assert.deepStrictEqual(operatorCalls.find((item) => item.requestPath.endsWith('/claim')).body.capabilities, ['media_acquire', 'media_handoff', 'xiaohongshu', 'media_transcode', 'wechat_article', 'toutiao_article', 'zhihu_article', 'wechat_channels', 'bilibili', 'xiaoyuzhou', 'local_asr']);
   assert.strictEqual(fs.existsSync(operatorMediaPath), false, 'operator temp media must never remain after completion');
 
   const channelsOperatorJob = {
@@ -1393,6 +1411,89 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     await platformNode.stop();
     assert.equal(platformCompletions.length, 1, `${platformCase.platform} original link uses native plugin extraction`);
     assert.equal(platformCompletions[0].transcription, `${platformCase.platform} transcript`);
+  }
+
+  const toutiaoJob = {
+    ...channelsOperatorJob,
+    jobId: 'toutiao-operator-job',
+    sourceType: 'toutiao_article',
+    sourceUrl: 'https://www.toutiao.com/article/7490000000000000000/',
+  };
+  const toutiaoCompletions = [];
+  const toutiaoPlugin = Object.create(PluginClass.prototype);
+  toutiaoPlugin.acquireOperatorToutiaoArticleContent = async (sourceUrl) => {
+    assert.strictEqual(sourceUrl, toutiaoJob.sourceUrl);
+    return { kind: 'content', content: { markdown: '# 今日头条文章\n\n候选正文' } };
+  };
+  const toutiaoNode = operatorNode.createOperatorMediaNode({
+    plugin: toutiaoPlugin,
+    env: {
+      WECHAT_INBOX_OPERATOR_NODE_ENABLED: '1',
+      WECHAT_INBOX_OPERATOR_NODE_ID: 'toutiao-operator-node',
+      WECHAT_INBOX_OPERATOR_NODE_TOKEN: 'test-token',
+      WECHAT_INBOX_OPERATOR_NODE_API_BASE: 'https://worker.example.test/sync',
+    },
+    request: async (requestPath, body) => {
+      if (requestPath.endsWith('/claim')) return { jobs: [toutiaoJob] };
+      if (requestPath.endsWith('/complete')) { toutiaoCompletions.push(body); return { success: true, data: body }; }
+      return { success: true, data: body };
+    },
+  });
+  toutiaoNode.start();
+  await toutiaoNode.poll();
+  await toutiaoNode.stop();
+  assert.strictEqual(toutiaoCompletions.length, 1, '今日头条文章由运营 Obsidian 节点原生提取');
+  assert.strictEqual(toutiaoCompletions[0].outcome, 'succeeded');
+  assert.strictEqual(toutiaoCompletions[0].content.markdown, '# 今日头条文章\n\n候选正文');
+  assert.strictEqual(operatorNode.resolveMediaSourcePlatform({ sourceType: 'toutiao_article', sourceUrl: 'https://www.toutiao.com/article/7490000000000000000/' }), 'toutiao_article');
+  assert.strictEqual(operatorNode.resolveMediaSourcePlatform({ sourceType: 'toutiao_article', sourceUrl: 'https://toutiao.com.evil.example/article/7490000000000000000/' }), '');
+  assert.strictEqual(operatorNode.isToutiaoSourceUrl('http://www.toutiao.com/article/7490000000000000000/'), false, 'operator claims only HTTPS Toutiao article URLs');
+  assert.strictEqual(operatorNode.isToutiaoSourceUrl('https://www.toutiao.com:8443/article/7490000000000000000/'), false, 'operator rejects nonstandard Toutiao ports');
+  assert.strictEqual(operatorNode.isToutiaoSourceUrl('https://www.toutiao.com/article/7490000000000000000/'), true);
+  const zhihuJob = {
+    ...channelsOperatorJob,
+    jobId: 'zhihu-operator-job',
+    sourceType: 'zhihu_article',
+    sourceUrl: 'https://www.zhihu.com/question/123456/answer/789012',
+  };
+  const zhihuCompletions = [];
+  const zhihuPlugin = Object.create(PluginClass.prototype);
+  zhihuPlugin.acquireOperatorZhihuArticleContent = async (sourceUrl) => {
+    assert.strictEqual(sourceUrl, zhihuJob.sourceUrl);
+    return { kind: 'content', content: { markdown: '# 知乎文章\n\n候选正文' } };
+  };
+  const zhihuNode = operatorNode.createOperatorMediaNode({
+    plugin: zhihuPlugin,
+    env: {
+      WECHAT_INBOX_OPERATOR_NODE_ENABLED: '1',
+      WECHAT_INBOX_OPERATOR_NODE_ID: 'zhihu-operator-node',
+      WECHAT_INBOX_OPERATOR_NODE_TOKEN: 'test-token',
+      WECHAT_INBOX_OPERATOR_NODE_API_BASE: 'https://worker.example.test/sync',
+    },
+    request: async (requestPath, body) => {
+      if (requestPath.endsWith('/claim')) return { jobs: [zhihuJob] };
+      if (requestPath.endsWith('/complete')) { zhihuCompletions.push(body); return { success: true, data: body }; }
+      return { success: true, data: body };
+    },
+  });
+  zhihuNode.start();
+  await zhihuNode.poll();
+  await zhihuNode.stop();
+  assert.strictEqual(zhihuCompletions.length, 1, '知乎文章由运营 Obsidian 节点原生提取');
+  assert.strictEqual(zhihuCompletions[0].outcome, 'succeeded');
+  assert.strictEqual(zhihuCompletions[0].content.markdown, '# 知乎文章\n\n候选正文');
+  assert.strictEqual(operatorNode.resolveMediaSourcePlatform({ sourceType: 'zhihu_article', sourceUrl: zhihuJob.sourceUrl }), 'zhihu_article');
+  assert.strictEqual(operatorNode.resolveMediaSourcePlatform({ sourceType: 'zhihu_article', sourceUrl: 'https://zhihu.com.evil.example/question/1/answer/2' }), '');
+  const strictToutiaoPlugin = Object.create(PluginClass.prototype);
+  for (const unsafeUrl of [
+    'http://www.toutiao.com/article/7490000000000000000/',
+    'https://www.toutiao.com:8443/article/7490000000000000000/',
+  ]) {
+    await assert.rejects(
+      strictToutiaoPlugin.acquireOperatorToutiaoArticleContent(unsafeUrl),
+      error => error && error.code === 'OPERATOR_MEDIA_SOURCE_INVALID',
+      'article acquisition rejects insecure or nonstandard-port URLs before fetching',
+    );
   }
 
   // An idle always-on node backs off geometrically so it does not spend
@@ -1629,6 +1730,90 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   await claimPoll;
   assert.strictEqual(claimCompletions[0].outcome, 'failed', 'claim resolving after shutdown must release the lease');
   assert.strictEqual(claimCompletions[0].error.code, 'OPERATOR_NODE_STOPPED');
+
+  const doubaoJob = {
+    jobId: 'operator-doubao-job', attemptId: 'operator-doubao-attempt', leaseToken: 'lease-doubao', fencingVersion: 1,
+    phase: 'asr', backend: 'doubao', sourceType: 'uploaded_file',
+    controlledMediaUrl: 'https://signed.example.test/doubao-audio.mp3',
+  };
+  const doubaoCompletions = [];
+  const doubaoCapacityBodies = [];
+  let doubaoInvocation = null;
+  const doubaoPlugin = Object.create(PluginClass.prototype);
+  Object.assign(doubaoPlugin, {
+    settings: { doubaoAsrApiKey: 'configured-in-memory' },
+    uploadWorkerMediaForJob: undefined,
+    runOperatorDoubaoTranscription: async (audioUrl, options) => {
+      doubaoInvocation = { audioUrl, options };
+      return { transcription: '豆包队列转写结果', transcriptionSegments: [{ start: 0, end: 1, text: '豆包' }] };
+    },
+  });
+  const doubaoNode = operatorNode.createOperatorMediaNode({
+    plugin: doubaoPlugin,
+    env: {
+      WECHAT_INBOX_OPERATOR_NODE_ENABLED: '1',
+      WECHAT_INBOX_OPERATOR_NODE_ID: 'operator-doubao-node',
+      WECHAT_INBOX_OPERATOR_NODE_TOKEN: 'test-token',
+      WECHAT_INBOX_OPERATOR_NODE_API_BASE: 'https://worker.example.test/sync',
+    },
+    request: async (requestPath, body) => {
+      if (requestPath.endsWith('/capacity')) { doubaoCapacityBodies.push(body); return { success: true, data: body }; }
+      if (requestPath.endsWith('/claim')) return { jobs: [doubaoJob] };
+      if (requestPath.endsWith('/complete')) { doubaoCompletions.push(body); return { success: true, data: body }; }
+      return { success: true, data: {} };
+    },
+  });
+  doubaoNode.start();
+  await doubaoNode.poll();
+  await doubaoNode.stop();
+  assert.ok(doubaoCapacityBodies[0].runtimeCapabilities.includes('doubao'));
+  assert.strictEqual(doubaoInvocation.audioUrl, doubaoJob.controlledMediaUrl, 'Doubao receives only an already controlled media URL');
+  assert.strictEqual(doubaoInvocation.options.attemptId, doubaoJob.attemptId);
+  assert.strictEqual(doubaoInvocation.options.fencingVersion, doubaoJob.fencingVersion);
+  assert.strictEqual(doubaoCompletions.length, 1);
+  assert.strictEqual(doubaoCompletions[0].backend, 'doubao');
+  assert.strictEqual(doubaoCompletions[0].outcome, 'succeeded');
+  assert.strictEqual(doubaoCompletions[0].transcription, '豆包队列转写结果');
+  assert.strictEqual(doubaoCompletions[0].transcriptionSegments.length, 1);
+
+  const legacyCapabilityAttempts = [];
+  const legacyPlugin = Object.create(PluginClass.prototype);
+  Object.assign(legacyPlugin, {
+    settings: { doubaoAsrApiKey: 'configured-in-memory' },
+    acquireOperatorToutiaoArticleContent: async () => ({ content: { markdown: 'article' } }),
+    runDoubaoTranscription: async () => ({ transcription: 'unused' }),
+    getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'ffmpeg' }),
+    isOperatorLocalAsrAvailable: () => true,
+  });
+  const legacyNode = operatorNode.createOperatorMediaNode({
+    plugin: legacyPlugin,
+    env: {
+      WECHAT_INBOX_OPERATOR_NODE_ENABLED: '1',
+      WECHAT_INBOX_OPERATOR_NODE_ID: 'operator-legacy-sync-api',
+      WECHAT_INBOX_OPERATOR_NODE_TOKEN: 'test-token',
+      WECHAT_INBOX_OPERATOR_NODE_API_BASE: 'https://worker.example.test/sync',
+    },
+    request: async (requestPath, body) => {
+      if (requestPath.endsWith('/capacity')) {
+        const capabilities = [...(body.capabilities || [])];
+        legacyCapabilityAttempts.push(capabilities);
+        const unsupported = capabilities.includes('doubao') ? 'doubao' : '';
+        if (unsupported) throw Object.assign(new Error('legacy service does not know new capability'), { code: 'WORKER_CAPABILITY_FORBIDDEN' });
+        return { success: true, data: body };
+      }
+      if (requestPath.endsWith('/claim')) return { jobs: [] };
+      return { success: true, data: {} };
+    },
+  });
+  legacyNode.start();
+  await legacyNode.poll();
+  await legacyNode.stop();
+  assert.ok(legacyCapabilityAttempts.length >= 5);
+  assert.ok(legacyCapabilityAttempts[0].includes('toutiao_article') && legacyCapabilityAttempts[0].includes('zhihu_article') && legacyCapabilityAttempts[0].includes('doubao'));
+  assert.ok(legacyCapabilityAttempts.some(c => c.includes('toutiao_article') && !c.includes('zhihu_article') && !c.includes('doubao')), 'probe Toutiao capability independently');
+  assert.ok(legacyCapabilityAttempts.some(c => c.includes('toutiao_article') && c.includes('zhihu_article') && !c.includes('doubao')), 'then probe Zhihu independently');
+  assert.ok(legacyCapabilityAttempts.at(-1).includes('toutiao_article') && legacyCapabilityAttempts.at(-1).includes('zhihu_article') && !legacyCapabilityAttempts.at(-1).includes('doubao'), 'both article capabilities survive rejection of Doubao');
+  assert.ok(legacyCapabilityAttempts.at(-1).includes('media_acquire') && legacyCapabilityAttempts.at(-1).includes('local_asr'), 'legacy capabilities stay enabled after optional capability rejection');
 
   await fs.promises.rm(mediaTempRoot, { recursive: true, force: true });
   await fs.promises.rm(operatorTempRoot, { recursive: true, force: true });

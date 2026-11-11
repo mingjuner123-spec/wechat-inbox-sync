@@ -30,6 +30,9 @@ assert.equal(formatTranscriptForReading(noisy),speech,'Noise cleanup remains ind
 const load=Module._load;Module._load=function(name,...args){if(name==='obsidian')return {Plugin:class{},PluginSettingTab:class{},Setting:class{},Notice:class{},TFile:class{},normalizePath:x=>x};return load.call(this,name,...args);};
 try{
  const Plugin=require('../obsidian-plugin/wechat-inbox-sync/main.js'),h=Plugin.__test;
+ const zhihuLazy=h.htmlToMarkdown('<p>知乎真实图必须覆盖占位符，保留正文和原图位置。</p><img src="data:image/svg+xml;utf8," data-actualsrc="https://picx.zhimg.com/v2-sample.jpg">');
+ assert.match(zhihuLazy,/https:\/\/picx.zhimg.com\/v2-sample.jpg/);
+ assert.doesNotMatch(zhihuLazy,/data:image/);
  const images=[{'data-src':'//mmbiz.qpic.cn/a.jpg',src:'data:image/gif;base64,AA',alt:'图一'},{'data-original':'/asset/b.jpg',alt:'图二'},{src:'javascript:void(0)'}].map(attrs=>({attrs,removed:false,currentSrc:'',getAttribute(k){return this.attrs[k]||'';},setAttribute(k,v){this.attrs[k]=v;},removeAttribute(k){delete this.attrs[k];},remove(){this.removed=true;}}));
  const assets=prepareBrowserArticleImages({querySelectorAll:()=>images},'https://mp.weixin.qq.com/s/example');
  assert.deepEqual(assets.map(x=>x.src),['https://mmbiz.qpic.cn/a.jpg','https://mp.weixin.qq.com/asset/b.jpg']);

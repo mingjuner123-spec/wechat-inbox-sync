@@ -131,6 +131,9 @@ function extractSourceTitleFromMarkdown(markdown = '') {
 function getCanonicalSourceTitleCandidate(record) {
   const metadata = getMetadata(record);
   const source = getTranscriptionSourcePrefix(record);
+  if (source.toLowerCase() === 'x' && metadata.title) {
+    return { title: cleanTitlePart(metadata.title), titleSource: 'source-title' };
+  }
   const sourceTitle = cleanTitlePart(metadata.sourceTitle || metadata.platformTitle || '');
   if (!['抖音', '小红书', 'B站', '小宇宙', '视频号'].includes(source)) {
     return { title: '', titleSource: '' };

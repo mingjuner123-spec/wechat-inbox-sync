@@ -5,6 +5,7 @@ const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runti
 const { getWechatPlaceholderRecoveryUrl } = require('./wechat-placeholder-utils');
 const douyinBrowserSafety = require('./douyin-browser-safety');
 const xArticle = require('./x-article');
+const { buildEnglishAsrScript } = require('./asr-language-script-utils');
 const { createAutoSyncController } = require('./auto-sync-controller');
 const {
   createDiagnosticId,
@@ -252,6 +253,8 @@ const {
 const {
   extractPlatformArticleFromHtml,
   getPlatformArticleIdentity,
+  isToutiaoArticleIdentityUrl,
+  matchesPlatformArticleRenderIdentity,
   hasPlatformArticleBody,
   selectPlatformArticleBody,
   hasMatchingPlatformArticleDocumentIdentity,
@@ -264,12 +267,16 @@ const {
   isToutiaoUrl,
   isZhihuUrl,
   normalizePlatformArticleUrl,
+  getPlatformArticleFallbackRequests,
+  parseToutiaoInfoV2,
+  parseZhihuTardisPage,
 } = require('./platform-article-utils');
 const {
   buildTranscriptSegmentsMarkdown,
   extractDoubaoUtteranceSegments,
   normalizeTranscriptSegments,
   parseTranscriptSegmentsSidecar,
+  transcriptSegmentsCoverText,
 } = require('./transcript-segment-utils');
 const {
   decodeDataUrl,
@@ -385,7 +392,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.3';
+const PLUGIN_RUNTIME_VERSION = '1.4.4';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -11865,11 +11872,16 @@ function buildDouyinFallbackMarkdown(url, reason = '') {
 }
 
 function imageTagToMarkdown(tag) {
-  const sourceMatch = String(tag || '').match(/\s(?:data-src|src)=["']([^"']+)["']/i);
-  if (!sourceMatch || !sourceMatch[1]) return '';
+  const sources = ['data-src', 'data-original', 'data-actualsrc', 'data-lazy-src', 'src']
+    .map(attribute => String(tag || '').match(new RegExp('\\s' + attribute + '=["\\\']([^"\\\']+)["\\\']', 'i')))
+    .filter(Boolean).map(match => match[1]);
+  // Structured payloads may list an SVG placeholder before the real lazy URL.
+  // Keep existing inline-data support when no ordinary URL is available.
+  const source = sources.find(value => !/^data:/i.test(value)) || sources[0];
+  if (!source) return '';
   const altMatch = String(tag || '').match(/\salt=["']([^"']*)["']/i);
   const alt = altMatch && altMatch[1] ? stripHtmlTags(altMatch[1]) : '图片';
-  return `\n\n![${alt}](${decodeHtmlEntities(sourceMatch[1])})\n\n`;
+  return `\n\n![${alt}](${decodeHtmlEntities(source)})\n\n`;
 }
 
 function escapeMarkdownTableCell(value) {
@@ -12060,6 +12072,28 @@ function getWechatSession() {
   } catch (error) {
     return null;
   }
+}
+
+function isOperatorArticleSessionEnabled(env = process.env) {
+  return String(env[OPERATOR_NODE_ENABLED_ENV] || '').trim() === '1'
+    && Boolean(String(env[OPERATOR_NODE_ID_ENV] || '').trim())
+    && Boolean(String(env[OPERATOR_NODE_TOKEN_ENV] || '').trim());
+}
+
+function getPlatformArticleBrowserPreferences(platform, { operatorSession = false } = {}) {
+  const security = { contextIsolation: true, nodeIntegration: false, sandbox: true };
+  if (platform === 'zhihu' && !operatorSession) {
+    // No persistent/user login session participates in the customer's first attempt.
+    return { ...security, partition: 'wechat-inbox-zhihu-public' };
+  }
+  if (platform === 'zhihu' && !isOperatorArticleSessionEnabled()) {
+    throw Object.assign(new Error('文章运营节点未启用'), { code: 'OPERATOR_NODE_DISABLED' });
+  }
+  const session = getWechatSession();
+  if (platform === 'zhihu' && !session) {
+    throw Object.assign(new Error('运营节点浏览器会话不可用'), { code: 'OPERATOR_BROWSER_UNAVAILABLE' });
+  }
+  return { ...security, session: session || undefined };
 }
 
 function getDouyinSession() {
@@ -13544,27 +13578,20 @@ const PLATFORM_ARTICLE_SELECTORS = {
   },
 };
 
-// Zhihu and Toutiao are read through the persistent WeChat session partition so
-// an already logged-in Obsidian never has to sign in again. The extractor only
-// clones the article body; every selector is per-platform and fails closed.
-async function renderPlatformArticleWithElectron(url) {
+// Public Zhihu capture never uses customer credentials. Only an explicitly
+// configured operator node may reuse its own persistent login session.
+async function renderPlatformArticleWithElectron(url, { operatorSession = false } = {}) {
   const platform = getPlatformArticleKind(url);
   if (!platform) throw new Error('不是支持的平台文章链接');
   const BrowserWindow = getElectronBrowserWindow();
   if (!BrowserWindow) {
     throw new Error('当前 Obsidian 环境不支持隐藏浏览器渲染');
   }
-  const session = getWechatSession();
   const win = new BrowserWindow({
     width: 1280,
     height: 1600,
     show: false,
-    webPreferences: {
-      session: session || undefined,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-    },
+    webPreferences: getPlatformArticleBrowserPreferences(platform, { operatorSession }),
   });
   try {
     installPlatformArticleNavigationGuards(win.webContents, platform, url);
@@ -13584,6 +13611,9 @@ async function renderPlatformArticleWithElectron(url) {
     const selectors = PLATFORM_ARTICLE_SELECTORS[platform] || PLATFORM_ARTICLE_SELECTORS.zhihu;
     const result = await win.webContents.executeJavaScript(`
       (async () => {
+        // Serialized bundled helpers retain esbuild's function-name wrapper.
+        // The page has no access to the plugin bundle's lexical scope.
+        const __name = (target) => target;
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const clean = (value) => String(value || '')
           .replace(/\\u00a0/g, ' ')
@@ -13669,15 +13699,19 @@ async function renderPlatformArticleWithElectron(url) {
     const embedded = extractPlatformArticleFromHtml(result.initialDataHtml, platform, result.finalUrl);
     delete result.initialDataHtml;
     if (embedded) {
-      result.markdown = embedded.contentHtml ? htmlToMarkdown(embedded.contentHtml) : embedded.contentText;
+      if (embedded.contentHtml) {
+        const embeddedDoc = new DOMParser().parseFromString(embedded.contentHtml, 'text/html');
+        embeddedDoc.body.querySelectorAll('script,style,noscript').forEach(node => node.remove());
+        result.assets = prepareBrowserArticleImages(embeddedDoc.body, result.finalUrl);
+        result.html = embeddedDoc.body.innerHTML;
+        result.markdown = htmlToMarkdown(result.html);
+      } else {
+        result.markdown = embedded.contentText;
+      }
       result.title = embedded.title || result.title;
       result.author = embedded.author || result.author;
     }
-    const expected = getPlatformArticleIdentity(url);
-    const actual = getPlatformArticleIdentity(result.finalUrl);
-    result.identityMatched = expected
-      ? Boolean(actual && actual.platform === expected.platform && actual.type === expected.type && actual.id === expected.id)
-      : Boolean(getPlatformArticleKind(url) && getPlatformArticleKind(url) === getPlatformArticleKind(result.finalUrl));
+    result.identityMatched = matchesPlatformArticleRenderIdentity(url, result.finalUrl);
     if (!result.identityMatched || !hasPlatformArticleBody(result.markdown)) result.markdown = '';
     if (loadFailure) {
       result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || '').slice(0, 160);
@@ -18041,6 +18075,30 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async loginZhihuArticle() {
+    if (!isOperatorArticleSessionEnabled()) return false;
+    if (this.zhihuLoginWindow && !this.zhihuLoginWindow.isDestroyed()) {
+      this.zhihuLoginWindow.show(); this.zhihuLoginWindow.focus(); return;
+    }
+    const BrowserWindow = getElectronBrowserWindow();
+    const session = getWechatSession();
+    if (!BrowserWindow || !session) { new Notice('当前环境不支持知乎登录窗口'); return; }
+    const loginUrl = 'https://www.zhihu.com/signin';
+    const win = new BrowserWindow({ width: 1000, height: 800, show: true,
+      title: '运营节点 · 知乎登录',
+      webPreferences: { session, contextIsolation: true, nodeIntegration: false, sandbox: true } });
+    this.zhihuLoginWindow = win;
+    try {
+      installPlatformArticleNavigationGuards(win.webContents, 'zhihu', loginUrl);
+      win.on('closed', () => { if (this.zhihuLoginWindow === win) this.zhihuLoginWindow = null; });
+      if (typeof this.register === 'function') this.register(() => { if (!win.isDestroyed()) win.destroy(); });
+      await win.loadURL(loginUrl);
+    } catch (_) {
+      if (!win.isDestroyed()) win.destroy();
+      new Notice('知乎登录页面未能打开，请稍后重试');
+    }
+  }
+
   async loginFeishu(targetUrl = '') {
     try {
       const loggedIn = await loginFeishuWeb(targetUrl || null);
@@ -18747,95 +18805,9 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async generateMetadataWithDeepSeek(record, binding = null) {
-    if (!this.settings.deepseekApiKey) {
-      return await this.generateMetadataWithCloud(record, binding);
-    }
-    const inputText = extractAiMetadataInputText(record);
-    if (!inputText) return { title: '', description: '', keywords: [] };
-    if (shouldForceWechatChannelsAiMetadata(record)) {
-      const requestVideoMetadata = async (messages) => {
-        return await this.requestExternalJson(this.settings.deepseekBaseUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: 'Bearer ' + this.settings.deepseekApiKey,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
-            temperature: 0.2,
-            response_format: { type: 'json_object' },
-            messages,
-          }),
-        });
-      };
-      const summaryPayload = await requestVideoMetadata([
-        {
-          role: 'system',
-          content: 'Generate a one-sentence description and 3 to 8 concise keywords from the user content. Return ONLY JSON: {"description":"...","keywords":["..."]}. Use Simplified Chinese when the content is mainly Chinese.',
-        },
-        {
-          role: 'user',
-          content: inputText,
-        },
-      ]);
-      const summary = parseGeneratedMetadataResponse(
-        extractOpenAICompatibleText(summaryPayload) || JSON.stringify(summaryPayload || {}),
-      );
-      const description = String(summary.description || '').trim();
-      const keywords = getRecordKeywords(summary).map((item) => String(item || '').trim()).filter(Boolean);
-      if (!description || !keywords.length) {
-        throw new Error('DeepSeek video metadata summary response is empty.');
-      }
-      let modelTitle = '';
-      try {
-        const titlePayload = await requestVideoMetadata([
-          {
-            role: 'system',
-            content: 'Generate one independent concise title using ONLY the supplied description and keywords. Return ONLY JSON: {"title":"..."}. Do not repeat the description verbatim. For Chinese metadata, use a natural 8 to 24 character Simplified Chinese title.',
-          },
-          {
-            role: 'user',
-            content: 'Description: ' + description + '\nKeywords: ' + keywords.join(', '),
-          },
-        ]);
-        const parsedTitle = parseGeneratedMetadataResponse(
-          extractOpenAICompatibleText(titlePayload) || JSON.stringify(titlePayload || {}),
-        );
-        modelTitle = String(parsedTitle.title || '').trim();
-      } catch (error) {
-        modelTitle = '';
-      }
-      return {
-        title: modelTitle || buildKeywordDerivedTitle(keywords),
-        description,
-        keywords,
-      };
-    }
-    const payload = await this.requestExternalJson(this.settings.deepseekBaseUrl, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.settings.deepseekApiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.settings.deepseekModel || DEFAULT_SETTINGS.deepseekModel,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-        messages: [
-          {
-            role: 'system',
-            content: '你是内容整理助手。请基于用户提供的文案生成独立标题、简介和关键词。只输出 JSON：{"title":"主题式短标题","description":"一句话简介","keywords":["关键词1","关键词2"]}。title 用 8 到 24 个中文字符概括核心主题，不带平台名，不使用“这是一份”“本文介绍”“本视频讲述”等报告式开头；description 控制在 1 句话；keywords 返回 3 到 8 个简洁中文或英文关键词。',
-          },
-          {
-            role: 'user',
-            content: inputText,
-          },
-        ],
-      }),
-    });
-    return parseGeneratedMetadataResponse(extractOpenAICompatibleText(payload) || JSON.stringify(payload || {}));
+    // All metadata generation uses the authenticated cloud endpoint; legacy local API keys are ignored.
+    return await this.generateMetadataWithCloud(record, binding);
   }
-
   async enrichRecordMetadataWithAi(record, binding = null) {
     if (record && record.metadata && record.metadata.sourceMetadataComplete === true
       && !shouldForceWechatChannelsAiMetadata(record)) return record;
@@ -18894,7 +18866,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       metadata.keywords = keywords;
     }
     if (semanticTitle || description || keywords.length) {
-      metadata.aiMetadataSource = this.settings.deepseekApiKey ? 'deepseek' : 'cloud';
+      metadata.aiMetadataSource = 'cloud';
     }
     return {
       ...record,
@@ -19365,11 +19337,15 @@ class WechatObsidianInboxPlugin extends Plugin {
             ? isXiaohongshuUrl(sourceUrl)
             : sourceType === 'wechat_article'
               ? isWechatArticleUrl(sourceUrl)
+              : sourceType === 'zhihu_article'
+                ? getPlatformArticleKind(sourceUrl) === 'zhihu' && Boolean(getPlatformArticleIdentity(sourceUrl))
+                : sourceType === 'toutiao_article'
+                  ? getPlatformArticleKind(sourceUrl) === 'toutiao' && (Boolean(getPlatformArticleIdentity(sourceUrl)) || /^https:\/\/m\.toutiao\.com\/is\/[A-Za-z0-9_-]{4,128}\/?(?:\?[^#]*)?$/i.test(sourceUrl))
               : sourceType === 'wechat_channels_url'
                 ? isWechatChannelsUrl(sourceUrl)
                 : sourceType === 'bilibili_url'
                   ? isBilibiliUrl(sourceUrl)
-                  : isXiaoyuzhouUrl(sourceUrl));
+              : isXiaoyuzhouUrl(sourceUrl));
       if (!isAcceptedLink) {
         const error = new Error(sourceType === 'douyin_url'
           ? '云端兜底只接受有效的抖音原始链接'
@@ -19377,6 +19353,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             ? '云端兜底只接受有效的小红书原始链接'
             : sourceType === 'wechat_article'
               ? '云端兜底只接受有效的公众号原始链接'
+              : sourceType === 'zhihu_article'
+                ? '云端兜底只接受有效的知乎文章链接'
+                : sourceType === 'toutiao_article'
+                  ? '云端兜底只接受有效的今日头条文章链接'
               : sourceType === 'wechat_channels_url'
                 ? '云端兜底只接受有效的视频号原始链接'
                 : sourceType === 'bilibili_url'
@@ -21650,6 +21630,40 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async maybeSubmitPlatformArticleCloudFallback(record, {
+    url = '', binding = null, signal = null, title = '', localError = '',
+  } = {}) {
+    if (this.settings.cloudFallbackEnabled !== true || !binding || !binding.token) return null;
+    const platform = getPlatformArticleKind(url);
+    const identity = getPlatformArticleIdentity(url);
+    const validToutiaoShareLink = platform === 'toutiao'
+      && /^https:\/\/m\.toutiao\.com\/is\/[A-Za-z0-9_-]{4,128}\/?(?:\?[^#]*)?$/i.test(String(url || '').trim());
+    if (!platform || (!identity && !validToutiaoShareLink) || (identity && identity.platform !== platform)) return null;
+    const sourceType = platform === 'zhihu' ? 'zhihu_article' : 'toutiao_article';
+    const label = platform === 'zhihu' ? '知乎' : '今日头条';
+    const gate = await this.evaluateCloudFallbackUserGate({
+      binding,
+      requireTranscriptionComponent: false,
+      featureName: `${label}文章云端兜底`,
+    });
+    if (!gate.allowed) return { gateMessage: gate.message };
+    try {
+      const job = await this.submitCloudFallbackJob({
+        sourceType, sourceUrl: normalizePlatformArticleUrl(url), recordId: getRecordId(record),
+        retryCount: record && record.retryCount,
+        title: title || (record && record.metadata && record.metadata.title) || `${label}文章`,
+        localError, provider: this.settings.aiProvider || '', binding, signal,
+      });
+      if (job.status === 'succeeded' && job.content) {
+        return { record: this.buildCloudFallbackContentRecord(record, job, { url, platform: label }) };
+      }
+      throw createCloudFallbackPendingError(job, localError, `云端已接收任务，正在由运营节点提取${label}正文`);
+    } catch (error) {
+      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
+      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+    }
+  }
+
   openTranscriptionSetupSettings() {
     const settings = this.app && this.app.setting;
     if (!settings || typeof settings.open !== 'function') return false;
@@ -23301,6 +23315,187 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw error;
   }
 
+  async acquireOperatorToutiaoArticleContent(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || '').trim();
+    const shortLink = /^https:\/\/m\.toutiao\.com\/is\/[A-Za-z0-9_-]{4,128}\/?(?:\?[^#]*)?$/i.test(pageUrl);
+    if ((!shortLink && !isToutiaoArticleIdentityUrl(pageUrl)) || (!getPlatformArticleIdentity(pageUrl) && !shortLink)) {
+      const error = new Error('运营节点只接受可识别的今日头条文章链接');
+      error.code = 'OPERATOR_MEDIA_SOURCE_INVALID';
+      error.retryable = false;
+      throw error;
+    }
+    throwIfAborted(signal);
+    let rendered = null;
+    try {
+      rendered = await renderPlatformArticleWithElectron(pageUrl);
+    } catch (error) {
+      if (isAbortError(error) || signal && signal.aborted) throw createAbortError();
+    }
+    throwIfAborted(signal);
+    const renderedMarkdown = String(rendered && rendered.markdown || '').trim();
+    const renderedTargetMatched = shortLink
+      ? isToutiaoArticleIdentityUrl(rendered && rendered.finalUrl)
+      : rendered && rendered.identityMatched === true;
+    if (renderedMarkdown && renderedTargetMatched && hasPlatformArticleBody(renderedMarkdown)) {
+      return { kind: 'content', content: { markdown: renderedMarkdown, title: String(rendered.title || '').trim(), author: String(rendered.author || '').trim(), imageUrls: [], tags: [] } };
+    }
+
+    let html = '';
+    let articleUrl = pageUrl;
+    let httpStatus = 0;
+    try {
+      const response = await requestUrl({
+        url: pageUrl,
+        method: 'GET',
+        headers: { ...getSocialRequestHeaders(pageUrl), Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      });
+      html = String(response && response.text || '');
+      httpStatus = Number(response && response.status) || 0;
+      if (shortLink) {
+        const resolvedUrl = String(response && response.url || '').trim();
+        if (isToutiaoArticleIdentityUrl(resolvedUrl)) articleUrl = resolvedUrl;
+        else html = '';
+      }
+    } catch (error) {
+      if (isAbortError(error) || signal && signal.aborted) throw createAbortError();
+      httpStatus = Number(error && (error.status || error.response && error.response.status)) || 0;
+      try {
+        const fallbackHtml = String(await this.downloadWebpageHtmlViaNode(pageUrl) || '');
+        if (!shortLink) html = fallbackHtml;
+      } catch (nodeError) {
+        if (isAbortError(nodeError) || signal && signal.aborted) throw createAbortError();
+      }
+    }
+    throwIfAborted(signal);
+    const embedded = html ? extractPlatformArticleFromHtml(html, 'toutiao', articleUrl) : null;
+    let markdown = '';
+    let identityMatched = false;
+    let bodySelectorFound = false;
+    if (embedded && (embedded.contentHtml || embedded.contentText)) {
+      try { markdown = embedded.contentHtml ? htmlToMarkdown(embedded.contentHtml) : embedded.contentText; } catch (_) { markdown = ''; }
+    }
+    if (!markdown && html) {
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        identityMatched = hasMatchingPlatformArticleDocumentIdentity(doc, articleUrl);
+        const body = selectPlatformArticleBody(doc, 'toutiao', getPlatformArticleIdentity(articleUrl));
+        bodySelectorFound = Boolean(body);
+        if (body && identityMatched) markdown = htmlToMarkdown(body.innerHTML);
+      } catch (_) { markdown = ''; }
+    } else identityMatched = Boolean(embedded && getPlatformArticleIdentity(articleUrl));
+    if (identityMatched && hasPlatformArticleBody(markdown)) {
+      return { kind: 'content', content: { markdown: String(markdown).trim(), title: String(rendered && rendered.title || embedded && embedded.title || '').trim(), author: String(rendered && rendered.author || embedded && embedded.author || '').trim(), imageUrls: [], tags: [] } };
+    }
+    const blocked = Boolean(rendered && rendered.blocked) || httpStatus === 403 || httpStatus === 429;
+    const error = new Error(rendered && rendered.appWall
+      ? '今日头条页面要求在 App 打开，云端节点也未取得文章正文'
+      : rendered && rendered.needsLogin
+        ? '今日头条要求登录，云端节点未取得文章正文'
+        : blocked ? '今日头条限制了当前访问，云端节点未取得文章正文'
+          : '运营节点未提取到与目标链接匹配的今日头条正文');
+    error.code = rendered && rendered.appWall ? 'OPERATOR_TOUTIAO_APP_WALL'
+      : rendered && rendered.needsLogin ? 'OPERATOR_TOUTIAO_LOGIN_REQUIRED'
+        : blocked ? 'OPERATOR_TOUTIAO_ACCESS_BLOCKED' : !html ? 'OPERATOR_TOUTIAO_FETCH_FAILED' : 'OPERATOR_TOUTIAO_ARTICLE_EMPTY';
+    error.retryable = httpStatus !== 404 && httpStatus !== 410;
+    error.diagnostic = sanitizePlatformArticleDiagnostic({
+      source: 'platform-article', platform: 'toutiao', stage: 'operator-capture',
+      failureCode: blocked ? 'ACCESS_BLOCKED' : bodySelectorFound && !identityMatched ? 'IDENTITY_MISMATCH' : 'BODY_NOT_FOUND',
+      http: httpStatus ? { status: httpStatus, transport: 'obsidian-requestUrl' } : undefined,
+      htmlChars: html.length,
+      renderDataPresent: /<script[^>]*\bid=["']RENDER_DATA["']/i.test(html),
+      renderDataArticleFound: Boolean(embedded),
+      bodySelectorFound,
+      identityMatched,
+      hiddenBrowser: rendered ? { ok: Boolean(renderedMarkdown), needsLogin: rendered.needsLogin === true, blocked: rendered.blocked === true, appWall: rendered.appWall === true } : undefined,
+    });
+    throw error;
+  }
+
+  async acquireOperatorZhihuArticleContent(sourceUrl, { signal = null } = {}) {
+    const pageUrl = String(sourceUrl || '').trim();
+    const identity = getPlatformArticleIdentity(pageUrl);
+    if (!identity || identity.platform !== 'zhihu' || !isZhihuUrl(pageUrl)) {
+      const error = new Error('运营节点只接受可识别的知乎文章链接');
+      error.code = 'OPERATOR_MEDIA_SOURCE_INVALID';
+      error.retryable = false;
+      throw error;
+    }
+    throwIfAborted(signal);
+    let rendered = null;
+    try {
+      rendered = await renderPlatformArticleWithElectron(pageUrl, { signal, operatorSession: true });
+    } catch (error) {
+      if (isAbortError(error) || signal && signal.aborted) throw createAbortError();
+    }
+    throwIfAborted(signal);
+    const renderedMarkdown = String(rendered && rendered.markdown || '').trim();
+    const renderedTargetMatched = rendered && rendered.identityMatched === true
+      && matchesPlatformArticleRenderIdentity(pageUrl, rendered.finalUrl || pageUrl);
+    if (renderedMarkdown && renderedTargetMatched && hasPlatformArticleBody(renderedMarkdown)) {
+      return { kind: 'content', content: { markdown: renderedMarkdown, title: String(rendered.title || '').trim(), author: String(rendered.author || '').trim(), imageUrls: [], tags: [] } };
+    }
+
+    let html = '';
+    let httpStatus = 0;
+    try {
+      const response = await requestUrl({
+        url: pageUrl,
+        method: 'GET',
+        headers: { ...getSocialRequestHeaders(pageUrl), Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8' },
+      });
+      html = String(response && response.text || '');
+      httpStatus = Number(response && response.status) || 0;
+    } catch (error) {
+      if (isAbortError(error) || signal && signal.aborted) throw createAbortError();
+      httpStatus = Number(error && (error.status || error.response && error.response.status)) || 0;
+      try { html = String(await this.downloadWebpageHtmlViaNode(pageUrl) || ''); }
+      catch (nodeError) {
+        if (isAbortError(nodeError) || signal && signal.aborted) throw createAbortError();
+      }
+    }
+    throwIfAborted(signal);
+    const embedded = html ? extractPlatformArticleFromHtml(html, 'zhihu', pageUrl) : null;
+    let markdown = '';
+    let identityMatched = false;
+    let bodySelectorFound = false;
+    if (embedded && (embedded.contentHtml || embedded.contentText)) {
+      try { markdown = embedded.contentHtml ? htmlToMarkdown(embedded.contentHtml) : embedded.contentText; } catch (_) { markdown = ''; }
+      identityMatched = Boolean(getPlatformArticleIdentity(pageUrl));
+    }
+    if (!markdown && html) {
+      try {
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        identityMatched = hasMatchingPlatformArticleDocumentIdentity(doc, pageUrl);
+        const body = selectPlatformArticleBody(doc, 'zhihu', identity);
+        bodySelectorFound = Boolean(body);
+        if (body && identityMatched) markdown = htmlToMarkdown(body.innerHTML);
+      } catch (_) { markdown = ''; }
+    }
+    if (identityMatched && hasPlatformArticleBody(markdown)) {
+      return { kind: 'content', content: { markdown: String(markdown).trim(), title: String(rendered && rendered.title || embedded && embedded.title || '').trim(), author: String(rendered && rendered.author || embedded && embedded.author || '').trim(), imageUrls: [], tags: [] } };
+    }
+    const blocked = Boolean(rendered && rendered.blocked) || httpStatus === 403 || httpStatus === 429;
+    const error = new Error(rendered && rendered.needsLogin
+      ? '知乎要求登录，运营节点未取得文章正文'
+      : blocked ? '知乎限制了当前访问，运营节点未取得文章正文'
+        : '运营节点未提取到与目标链接匹配的知乎正文');
+    error.code = rendered && rendered.needsLogin ? 'OPERATOR_ZHIHU_LOGIN_REQUIRED'
+      : blocked ? 'OPERATOR_ZHIHU_ACCESS_BLOCKED' : !html ? 'OPERATOR_ZHIHU_FETCH_FAILED' : 'OPERATOR_ZHIHU_ARTICLE_EMPTY';
+    error.retryable = httpStatus !== 404 && httpStatus !== 410;
+    error.diagnostic = sanitizePlatformArticleDiagnostic({
+      source: 'platform-article', platform: 'zhihu', stage: 'operator-capture',
+      failureCode: blocked ? 'ACCESS_BLOCKED' : bodySelectorFound && !identityMatched ? 'IDENTITY_MISMATCH' : 'BODY_NOT_FOUND',
+      http: httpStatus ? { status: httpStatus, transport: 'obsidian-requestUrl' } : undefined,
+      htmlChars: html.length,
+      initialDataPresent: /<script[^>]*\bid=["']js-initialData["']/i.test(html),
+      initialDataArticleFound: Boolean(embedded),
+      bodySelectorFound,
+      identityMatched,
+      hiddenBrowser: rendered ? { ok: Boolean(renderedMarkdown), needsLogin: rendered.needsLogin === true, blocked: rendered.blocked === true } : undefined,
+    });
+    throw error;
+  }
+
   async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null } = {}) {
     const pageUrl = String(sourceUrl || '').trim();
     if (!isWechatChannelsUrl(pageUrl)) {
@@ -24131,7 +24326,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     const installStatus = this.getLocalAsrInstallStatus();
     const installRoot = this.getConfiguredLocalAsrInstallRoot();
     const platform = this.getConfiguredLocalAsrPlatform();
-    const transcriptionLanguage = this.settings.transcriptionLanguage === 'en' ? 'en' : 'zh';
+    const transcriptionLanguage = ['en', 'zh'].includes(options.transcriptionLanguage)
+      ? options.transcriptionLanguage : this.settings.transcriptionLanguage === 'en' ? 'en' : 'zh';
     if (installStatus.scriptOutdated) {
       throw new Error('本地转写脚本过旧：请在插件设置里重新点击“安装/更新本地转写组件”，安装完成后再同步。');
     }
@@ -24414,6 +24610,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const suppliedInputPath = String(options.inputPath || '').trim();
     const ownsInputPath = !suppliedInputPath;
     let outputPath = '';
+    let englishScriptPath = '';
     let command = '';
     let channelsStage = 'download';
     try {
@@ -24468,6 +24665,17 @@ class WechatObsidianInboxPlugin extends Plugin {
           .replace(/\{output\}/g, quote(outputPath))
         : `${commandTemplate} ${quote(inputPath)}`;
       command = command.replace(/\{language\}/g, transcriptionLanguage);
+      if (platform === 'win32' && transcriptionLanguage === 'en'
+        && (commandTemplate === getDefaultLocalTranscriptionCommand(platform)
+          || commandTemplate === getDefaultLocalTranscriptionCommand(platform, installRoot))) {
+        const englishScript = buildEnglishAsrScript(scriptSource, installRoot);
+        if (englishScript) {
+          const candidateScriptPath = `${inputPath}.${crypto.randomBytes(8).toString('hex')}.english.ps1`;
+          fs.writeFileSync(candidateScriptPath, '\uFEFF' + englishScript, { encoding: 'utf8', flag: 'wx' });
+          englishScriptPath = candidateScriptPath;
+          command = command.replace(/-File\s+"[^"]+"/i, () => `-File ${quote(englishScriptPath)}`);
+        }
+      }
       const executeTranscription = async (cpuPreferred, attemptOffset = 0) => asrRecovery.executeWithMacRecovery({
         platform, managed, signal: abortController.signal,
         cpuPreferred,
@@ -24798,7 +25006,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       } catch (_) { /* Evidence collection cannot mask the original result. */ }
       try { asrRecovery.saveSession(installRoot, session, this.settings); }
       finally {
-        [inputPath, outputPath, outputPath ? outputPath.replace(/\.txt$/i, '') + '.segments.json' : ''].forEach((filePath, index) => {
+        [inputPath, outputPath, outputPath ? outputPath.replace(/\.txt$/i, '') + '.segments.json' : '', englishScriptPath].forEach((filePath, index) => {
           try {
             const canDelete = index === 0
               ? ownsInputPath && !(options.retainInputFileOnError === true && session.status === 'failed')
@@ -25160,6 +25368,8 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async runDoubaoTranscription(audioUrl, options = {}) {
+    const signal = options.signal || null;
+    throwIfAborted(signal);
     // Callers that need the timestamped utterances pass withSegments; the
     // default stays a plain string for existing call sites.
     const formatResult = (state) => (options.withSegments === true
@@ -25170,12 +25380,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     const existingTask = pendingTasks[taskKey];
     if (existingTask && existingTask.requestId) {
       try {
-        const existingState = await this.queryDoubaoTranscription(existingTask.requestId);
+        const existingState = await waitForPromiseWithAbort(this.queryDoubaoTranscription(existingTask.requestId), signal);
+        throwIfAborted(signal);
         if (existingState.status === 'success') {
           await this.clearPendingDoubaoTask(taskKey);
           return formatResult(existingState);
         }
       } catch (error) {
+        if (signal && signal.aborted) throw createAbortError();
         await this.clearPendingDoubaoTask(taskKey);
         throw error;
       }
@@ -25188,13 +25400,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       audioUrl,
       requestId,
     });
-    const submitResponse = await requestUrl({
+    const submitResponse = await waitForPromiseWithAbort(requestUrl({
       url: request.url,
       method: 'POST',
       headers: request.headers,
       body: JSON.stringify(request.body),
       throw: request.throw,
-    });
+    }), signal);
+    throwIfAborted(signal);
 
     const submitState = parseDoubaoAsrTaskState(submitResponse);
     if (submitState.status === 'success') {
@@ -25208,13 +25421,16 @@ class WechatObsidianInboxPlugin extends Plugin {
 
     for (let attempt = 0; attempt < this.settings.doubaoPollAttempts; attempt += 1) {
       if (attempt > 0) {
-        await sleep(this.settings.doubaoPollIntervalMs);
+        await waitForPromiseWithAbort(sleep(this.settings.doubaoPollIntervalMs), signal);
       }
+      throwIfAborted(signal);
 
       let state;
       try {
-        state = await this.queryDoubaoTranscription(requestId);
+        state = await waitForPromiseWithAbort(this.queryDoubaoTranscription(requestId), signal);
+        throwIfAborted(signal);
       } catch (error) {
+        if (signal && signal.aborted) throw createAbortError();
         await this.clearPendingDoubaoTask(taskKey);
         throw error;
       }
@@ -25769,6 +25985,12 @@ class WechatObsidianInboxPlugin extends Plugin {
     return nextMarkdown;
   }
 
+  getEffectiveArticleImageMode(sourceUrl, options = {}) {
+    return normalizeSocialArticleImageStorageMode(
+      options.socialArticleImageStorageMode || this.settings?.socialArticleImageStorageMode,
+    );
+  }
+
   async saveMarkdownRemoteImageAssets(markdown, rootDir, dateFolder, title, options = {}) {
     rootDir = normalizeConfiguredVaultPath(rootDir);
     if (!markdown
@@ -25783,9 +26005,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const isWechatArticleSource = isWechatArticleUrl(sourceUrl);
     const isFeishuSource = isFeishuUrl(sourceUrl);
     const isPlatformArticleSource = isPlatformArticleUrl(sourceUrl);
-    const socialArticleImageStorageMode = normalizeSocialArticleImageStorageMode(
-      options.socialArticleImageStorageMode || (this.settings && this.settings.socialArticleImageStorageMode),
-    );
+    const socialArticleImageStorageMode = this.getEffectiveArticleImageMode(sourceUrl, options);
     const isSessionBackedSource = isFeishuSource || isWechatArticleSource || isPlatformArticleSource;
     let nextMarkdown = isXiaohongshuSource
       ? sanitizeXiaohongshuMarkdownImages(String(markdown))
@@ -25794,10 +26014,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const imageMatches = Array.from(nextMarkdown.matchAll(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g));
     if (!imageMatches.length) return nextMarkdown;
 
-    const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(
-      sourceUrl,
-      socialArticleImageStorageMode,
-    );
+    const usePerNoteImageFolder = shouldStoreWebpageNoteInOwnFolder(sourceUrl, socialArticleImageStorageMode);
     const noteDir = this.settings && this.settings.noteSaveMode === 'root'
       ? rootDir
       : `${rootDir}/${dateFolder}`;
@@ -26013,6 +26230,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     preparedMedia = false,
     maxBytes = 0,
     forceLocal = false,
+    transcriptionLanguage = '',
     signal = null,
   }) {
     throwIfAborted(signal);
@@ -26249,6 +26467,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               decryptKey: candidateDecryptKey,
               forceLocal: forceLocal === true || platform === '视频号' || metadata.transcriptionMode === 'local',
               sourcePlatform: platform,
+              transcriptionLanguage,
               retryLocalQualityOnce: platform === '视频号',
               preserveLocalMediaForCloudFallback: isDouyinUrl(url) && this.settings.cloudFallbackEnabled === true,
               signal,
@@ -27034,12 +27253,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         markdown: `> ${error.message}\n\n原始链接：${url}` } };
     }
     throwIfAborted(signal);
-    const pageTitle = `${post.author || 'X'}：${post.title || post.text.slice(0, 80) || (post.hasVideo ? 'X 视频' : '图片')}`;
+    const firstLine = String(post.text || '').split('\n').find(line => line.trim()) || '';
+    const firstSentence = xArticle.sentences(firstLine)[0] || '';
+    const excerptTitle = firstSentence.length > 240
+      ? firstSentence.slice(0, 240).replace(/\s+\S*$/, '') + '…' : firstSentence;
+    const contentTitle = post.title || excerptTitle || (post.hasVideo ? 'X 视频' : '图片');
+    const pageTitle = `${post.author || 'X'}：${contentTitle}`;
     const cleanMetadata = { ...metadata };
     for (const key of ['transcription', 'transcriptionStatus', 'transcriptionError', 'conversionError', 'xArticleErrorCode', 'aiMetadataError']) delete cleanMetadata[key];
     const articleMetadata = { ...cleanMetadata, url: post.url, title: pageTitle, xOriginalTitle: post.title || '',
       author: post.author, publishedAt: post.createdAt, platform: 'X', contentCategory: '图文',
-      sourceMetadataComplete: true, transcriptOnly: false, webpageMediaType: 'article',
+      sourceMetadataComplete: false, transcriptOnly: false, webpageMediaType: 'article',
       conversionStatus: 'success', xOriginalText: [post.text, post.quote && post.quote.text].filter(Boolean).join('\n\n'),
       xImageCount: post.images.length + (post.quote ? post.quote.images.length : 0),
     };
@@ -27049,54 +27273,93 @@ class WechatObsidianInboxPlugin extends Plugin {
     let transcriptionStatus = '';
     let transcriptionError = '';
     let mediaUrls = [];
-    const videoUrls = Array.isArray(post.videos) ? [...new Set(post.videos.map(xArticle.videoUrl).filter(Boolean))].slice(0, 4) : [];
+    const successful = [];
+    let videoUrls = Array.isArray(post.videos) ? [...new Set(post.videos.map(xArticle.videoUrl).filter(Boolean))].slice(0, 4) : [];
+    const videoDiagnostic = { source: 'x-video', candidateCount: videoUrls.length, fallbackAttempted: false,
+      fallbackCandidateCount: 0, failureStage: '', failureCodes: [] };
     if (post.hasVideo) {
       mediaUrls = videoUrls;
-      if (!videoUrls.length) {
-        transcriptionStatus = 'failed';
-        transcriptionError = 'X 帖子包含视频，但暂未获取到可转写的视频地址。';
-      } else {
-        const successful = [];
-        const failures = [];
-        for (const [index, videoUrl] of videoUrls.entries()) {
+      const failures = [];
+      const attemptedUrls = new Set();
+      const transcribeCandidates = async (urls, baseIndex = 0) => {
+        for (const [index, videoUrl] of urls.entries()) {
+          if (attemptedUrls.has(videoUrl)) continue;
+          attemptedUrls.add(videoUrl);
           throwIfAborted(signal);
           try {
             const result = await this.buildTranscriptRecordFromMedia(articleRecord, {
               url: post.url, platform: 'X', mediaUrl: videoUrl, mediaUrls: [videoUrl],
               source: 'x-video', noMediaError: '未能读取 X 视频地址', markdown: sourceMarkdown,
               binding, title: title || pageTitle, sourceTitle: pageTitle, signal,
+              transcriptionLanguage: post.language === 'en' ? 'en' : '',
               maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
             });
             const resultMetadata = result && result.metadata || {};
             if (resultMetadata.transcriptionStatus === 'success' && String(resultMetadata.transcription || '').trim()) {
-              successful.push({ index: index + 1, text: String(resultMetadata.transcription).trim() });
+              const rawText = String(resultMetadata.transcription).trim();
+              const segments = normalizeTranscriptSegments(resultMetadata.transcriptionSegments || []);
+              successful.push({
+                index: baseIndex + index + 1,
+                text: segments.length && transcriptSegmentsCoverText(segments, rawText)
+                  ? segments.map(segment => segment.text).join('\n\n') : rawText,
+                segments,
+              });
             } else {
               failures.push(String(resultMetadata.transcriptionError || '视频转写未完成'));
+              const code = String(resultMetadata.transcriptionErrorCode || resultMetadata.xVideoErrorCode || '');
+              if (/^[A-Z][A-Z0-9_]{2,63}$/.test(code)) videoDiagnostic.failureCodes.push(code);
             }
           } catch (error) {
             if (isAbortError(error) || signal?.aborted) throw error;
             failures.push(String(error && error.message || '视频转写未完成'));
+            const code = String(error && error.code || '');
+            if (/^[A-Z][A-Z0-9_]{2,63}$/.test(code)) videoDiagnostic.failureCodes.push(code);
           }
         }
+      };
+      await transcribeCandidates(videoUrls);
+      if (post.hasVideo && !successful.length) {
+        videoDiagnostic.fallbackAttempted = true;
+        try {
+          const fallbackPost = await xArticle.fetchPost(url, request, signal, { skipSyndication: true });
+          const fallbackUrls = Array.isArray(fallbackPost.videos)
+            ? [...new Set(fallbackPost.videos.map(xArticle.videoUrl).filter(Boolean))].slice(0, 4)
+            : [];
+          videoDiagnostic.fallbackCandidateCount = fallbackUrls.length;
+          const newFallbackUrls = fallbackUrls.filter(candidate => !attemptedUrls.has(candidate));
+          await transcribeCandidates(newFallbackUrls, videoUrls.length);
+          videoUrls = [...videoUrls, ...newFallbackUrls].slice(0, 8);
+          mediaUrls = videoUrls;
+        } catch (error) {
+          if (isAbortError(error) || signal?.aborted) throw error;
+          const code = String(error && error.code || '');
+          if (/^[A-Z][A-Z0-9_]{2,63}$/.test(code)) videoDiagnostic.failureCodes.push(code);
+        }
+      }
+      if (post.hasVideo) {
         if (successful.length) {
-          videoTranscript = successful.map(item => videoUrls.length > 1 ? `视频 ${item.index}\n${item.text}` : item.text).join('\n\n');
+          videoTranscript = successful.map(item => item.text).join('\n\n');
           transcriptionStatus = 'success';
           if (failures.length) transcriptionError = '部分视频未能完成转写。';
         } else {
           transcriptionStatus = 'failed';
-          transcriptionError = failures[0] || 'X 视频转写未完成。';
+          transcriptionError = failures[0] || (!videoUrls.length
+            ? 'X 帖子包含视频，但暂未获取到可转写的视频地址。'
+            : 'X 视频转写未完成。');
+          videoDiagnostic.failureStage = videoUrls.length ? 'transcription' : 'media-url';
         }
+        videoDiagnostic.failureCodes = [...new Set(videoDiagnostic.failureCodes)].slice(0, 8);
       }
     }
     throwIfAborted(signal);
-    const aiSettings = xArticle.demoSettings(this.settings);
-    let ai = { titleTranslation: '', pairs: [], summary: '', warnings: [] };
-    if (aiSettings.xTranslationEnabled || aiSettings.xSummaryEnabled) {
-      ai = await xArticle.processAi({ ...post, title: pageTitle, videoTranscript,
-        aiText: [post.text, post.quote && post.quote.text, videoTranscript].filter(Boolean).join('\n\n') },
-      aiSettings, request, signal);
-    }
-    const markdownSource = xArticle.renderPost({ ...post, title: pageTitle, videoTranscript }, ai);
+    const videoTranscriptSegments = successful.flatMap(item => item.segments.map(segment => ({ ...segment, videoIndex: item.index })));
+    const ai = await xArticle.processCloudTranslation({ ...post, title: contentTitle, videoTranscript },
+      async (payload, translationSignal) => {
+        const response = await this.requestJson('/x/translate', 'POST', payload, binding || null, { signal: translationSignal, timeoutMs: 50000, preserveSettings: true });
+        return response && response.data ? response.data : response;
+      }, signal);
+    if (ai.titleTranslation) ai.titleTranslation = `${post.author || 'X'}：${ai.titleTranslation}`;
+    const markdownSource = xArticle.renderPost({ ...post, title: pageTitle, videoTranscript, videoTranscriptSegments, transcriptionError }, ai);
     let markdown = markdownSource;
     let imageFailures = 0;
     try {
@@ -27107,11 +27370,14 @@ class WechatObsidianInboxPlugin extends Plugin {
     throwIfAborted(signal);
     if (imageFailures) markdown += '\n\n> 部分图片未能保存到本地，已保留原始图片链接。';
     if (transcriptionError) markdown += `\n\n> ${post.hasVideo ? 'X 视频转写未完成，原帖文字和图片已保留。' : transcriptionError}`;
-    const translatedTitle = ai.titleTranslation && ai.titleTranslation !== pageTitle
-      ? `${ai.titleTranslation}（${pageTitle}）` : pageTitle;
+    // Bilingual headings are rendered in the note; filenames use the translated
+    // title alone so the original does not consume the filename length budget.
+    const translatedTitle = ai.titleTranslation || pageTitle;
     return { ...record, metadata: { ...articleMetadata, title: translatedTitle, markdown,
-      transcription: videoTranscript, ...(post.hasVideo ? { transcriptionStatus } : {}),
+      transcription: videoTranscript, ...(videoTranscriptSegments.length ? { transcriptionSegments: videoTranscriptSegments } : {}),
+      ...(post.hasVideo ? { transcriptionStatus } : {}),
       ...(transcriptionError ? { transcriptionError } : {}), mediaUrls,
+      ...(post.hasVideo ? { xVideoDiagnostic: videoDiagnostic } : {}),
       xAdvancedAiProcessed: true,
     } };
   }
@@ -29089,16 +29355,30 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isPlatformArticleUrl(url)) {
-        const platformUrl = normalizePlatformArticleUrl(url);
+        let platformUrl = normalizePlatformArticleUrl(url);
         const platformKind = getPlatformArticleKind(platformUrl);
+        if (platformKind === 'toutiao' && !getPlatformArticleIdentity(platformUrl)) {
+          const redirectResult = await resolveRedirectUrlWithDiagnostics(platformUrl);
+          if (isToutiaoArticleIdentityUrl(redirectResult && redirectResult.url)) platformUrl = redirectResult.url;
+        }
         const platformLabel = getPlatformArticleLabel(platformUrl);
         let platformResult = null;
         let platformStage = '';
         let platformError = null;
         let platformHiddenBrowserDiagnostic = null;
         let platformHttpDiagnostic = null;
+        let platformFallbackDiagnostic = null;
+        let platformHtmlChars = 0;
+        let platformRenderDataPresent = false;
+        let platformRenderDataArticleFound = false;
+        let platformBodySelectorFound = false;
+        let platformIdentityMatched = false;
         try {
           platformResult = await renderPlatformArticleWithElectron(platformUrl);
+          const initialDataHtml = String(platformResult && platformResult.initialDataHtml || '');
+          platformRenderDataPresent = /<script[^>]*\bid=["']RENDER_DATA["']/i.test(initialDataHtml);
+          platformRenderDataArticleFound = Boolean(initialDataHtml && extractPlatformArticleFromHtml(initialDataHtml, platformKind, platformUrl));
+          platformHtmlChars = initialDataHtml.length;
           platformHiddenBrowserDiagnostic = {
             ok: Boolean(platformResult && String(platformResult.markdown || '').trim()),
             needsLogin: Boolean(platformResult && platformResult.needsLogin),
@@ -29106,6 +29386,12 @@ class WechatObsidianInboxPlugin extends Plugin {
             appWall: Boolean(platformResult && platformResult.appWall),
             identityMatched: Boolean(platformResult && platformResult.identityMatched),
             bodyTextChars: Number(platformResult && platformResult.bodyTextChars) || 0,
+            renderDataPresent: platformRenderDataPresent,
+            renderDataArticleFound: platformRenderDataArticleFound,
+            pageState: platformResult && platformResult.appWall ? 'app-wall'
+              : platformResult && platformResult.needsLogin ? 'login'
+                : platformResult && platformResult.blocked ? 'blocked'
+                  : platformResult && platformResult.markdown ? 'unknown' : 'body-empty',
             finalHost: getSafeUrlDiagnostic(platformResult && platformResult.finalUrl || platformUrl).host || '',
             ...(platformResult && platformResult.loadError ? { loadError: platformResult.loadError } : {}),
           };
@@ -29142,6 +29428,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               },
             });
             html = String(response && response.text || '');
+            platformHtmlChars = html.length;
             platformHttpDiagnostic = { transport: 'obsidian-requestUrl', status: Number(response && response.status) || 0 };
           } catch (error) {
             transportError = error;
@@ -29152,6 +29439,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             };
             try {
               html = String(await this.downloadWebpageHtmlViaNode(platformUrl) || '');
+              platformHtmlChars = html.length;
               platformHttpDiagnostic.transport = 'node-http';
               // Node's helper returns HTML only; do not label its response with
               // the earlier requestUrl HTTP status.
@@ -29175,6 +29463,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           if (html) {
             const embedded = extractPlatformArticleFromHtml(html, platformKind, platformUrl);
+            platformRenderDataPresent = platformRenderDataPresent || /<script[^>]*\bid=["']RENDER_DATA["']/i.test(html);
+            platformRenderDataArticleFound = Boolean(embedded);
             let markdown = '';
             if (embedded && embedded.contentHtml) {
               try {
@@ -29189,7 +29479,9 @@ class WechatObsidianInboxPlugin extends Plugin {
               try {
                 const doc = new DOMParser().parseFromString(html, 'text/html');
                 const body = selectPlatformArticleBody(doc, platformKind, getPlatformArticleIdentity(platformUrl));
-                if (body && hasMatchingPlatformArticleDocumentIdentity(doc, platformUrl)) markdown = htmlToMarkdown(body.innerHTML);
+                platformBodySelectorFound = Boolean(body);
+                platformIdentityMatched = hasMatchingPlatformArticleDocumentIdentity(doc, platformUrl);
+                if (body && platformIdentityMatched) markdown = htmlToMarkdown(body.innerHTML);
               } catch (error) {
                 if (!platformError) platformError = error;
               }
@@ -29206,14 +29498,146 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
         }
 
+        // Use first-party public reader endpoints after the page/HTML routes.
+        // The fallback URL is derived only from a numeric article identity;
+        // never synthesize private signatures, cookies, or browser fingerprints.
+        if (!platformStage) {
+          const fallbackTargets = [...new Set([
+            String(platformResult && platformResult.finalUrl || ''),
+            String(platformUrl || ''),
+          ].filter(Boolean))];
+          const fallbackRequests = [];
+          const seenFallbackUrls = new Set();
+          for (const targetUrl of fallbackTargets) {
+            for (const candidate of getPlatformArticleFallbackRequests(targetUrl)) {
+              if (seenFallbackUrls.has(candidate.url)) continue;
+              seenFallbackUrls.add(candidate.url);
+              fallbackRequests.push({ ...candidate, targetUrl });
+            }
+          }
+          platformFallbackDiagnostic = { attempts: [] };
+          for (const fallback of fallbackRequests) {
+            let responseText = '';
+            let responseJson = null;
+            let transport = 'obsidian-requestUrl';
+            let status = 0;
+            const headers = {
+              ...getSocialRequestHeaders(fallback.url),
+              Accept: fallback.type === 'info-v2'
+                ? 'application/json,text/plain,*/*'
+                : 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              Referer: fallback.targetUrl,
+            };
+            try {
+              const response = await requestUrl({ url: fallback.url, method: 'GET', headers });
+              status = Number(response && response.status) || 0;
+              responseText = String(response && response.text || '');
+              responseJson = response && response.json && typeof response.json === 'object' ? response.json : null;
+            } catch (requestError) {
+              status = Number(requestError && (requestError.status || requestError.response && requestError.response.status)) || 0;
+              try {
+                responseText = String(await this.downloadWebpageHtmlViaNode(fallback.url, headers) || '');
+                transport = 'node-http';
+              } catch (_) {
+                transport = 'node-http-failed';
+              }
+            }
+            // Customer extraction stays anonymous. Persistent Zhihu sessions
+            // are used only by acquireOperatorZhihuArticleContent.
+            const attemptDiagnostic = { type: fallback.type, transport, status, ok: false,
+              responseChars: responseText.length || (responseJson ? JSON.stringify(responseJson).length : 0), outcome: 'parse-empty' };
+            platformFallbackDiagnostic.attempts.push(attemptDiagnostic);
+            let candidateResult = null;
+            let candidateStage = '';
+            if ((responseText || responseJson) && fallback.type === 'info-v2') {
+              const parsed = parseToutiaoInfoV2(responseJson || responseText, fallback.targetUrl);
+              if (parsed) {
+                const markdown = parsed.contentHtml ? htmlToMarkdown(parsed.contentHtml) : parsed.contentText;
+                if (hasPlatformArticleBody(markdown)) {
+                  candidateResult = {
+                    title: parsed.title,
+                    author: parsed.author,
+                    markdown,
+                    finalUrl: fallback.targetUrl,
+                    identityMatched: true,
+                  };
+                  candidateStage = 'mobile-info-v2';
+                  attemptDiagnostic.outcome = 'body-found';
+                } else {
+                  attemptDiagnostic.outcome = 'body-empty';
+                }
+              }
+            } else if ((responseText || responseJson) && fallback.type === 'tardis-ssr') {
+              const parsed = parseZhihuTardisPage(responseJson || responseText, fallback.targetUrl);
+              if (parsed) {
+                try {
+                  const doc = new DOMParser().parseFromString(parsed.renderHtml, 'text/html');
+                  const targetIdentity = getPlatformArticleIdentity(fallback.targetUrl);
+                  const body = selectPlatformArticleBody(doc, 'zhihu', targetIdentity);
+                  const markdown = body ? htmlToMarkdown(body.innerHTML) : '';
+                  if (hasPlatformArticleBody(markdown)) {
+                    const titleNode = doc.querySelector('h1.Post-Title, .QuestionHeader-title, h1');
+                    const authorNode = doc.querySelector('.AuthorInfo-name, .UserLink-link');
+                    candidateResult = {
+                      title: parsed.title || String(titleNode && (titleNode.innerText || titleNode.textContent) || ''),
+                      author: parsed.author || String(authorNode && (authorNode.innerText || authorNode.textContent) || ''),
+                      markdown,
+                      finalUrl: fallback.targetUrl,
+                      identityMatched: true,
+                    };
+                    candidateStage = 'tardis-ssr';
+                    attemptDiagnostic.outcome = 'body-found';
+                  } else {
+                    attemptDiagnostic.outcome = 'body-empty';
+                  }
+                } catch (_) {
+                  // A malformed/empty SSR fragment is not valid article content.
+                  attemptDiagnostic.outcome = 'render-html-invalid';
+                }
+              } else {
+                attemptDiagnostic.outcome = 'payload-unrecognized';
+              }
+            } else if (status === 403 || status === 429) {
+              attemptDiagnostic.outcome = 'access-denied';
+            } else if (!responseText && !responseJson) {
+              attemptDiagnostic.outcome = 'response-empty';
+            }
+            if (candidateResult) {
+              attemptDiagnostic.ok = true;
+              platformFallbackDiagnostic.succeeded = fallback.type;
+              platformResult = { ...(platformResult || {}), ...candidateResult };
+              platformStage = candidateStage;
+              break;
+            }
+          }
+        }
+
         if (!platformStage || !platformResult || !hasPlatformArticleBody(platformResult.markdown)) {
           const error = platformError || new Error(`${platformLabel}正文提取失败`);
-          error.platformDiagnostic = redactSensitiveObject({
+          const failureCode = platformResult && platformResult.appWall ? 'APP_WALL'
+            : platformResult && platformResult.needsLogin ? 'LOGIN_REQUIRED'
+              : platformResult && platformResult.blocked ? 'ACCESS_BLOCKED'
+                : platformHttpDiagnostic && [403, 429].includes(Number(platformHttpDiagnostic.status)) ? 'ACCESS_BLOCKED'
+                  : !platformHtmlChars ? 'FETCH_FAILED'
+                    : platformBodySelectorFound && !platformIdentityMatched ? 'IDENTITY_MISMATCH'
+                      : platformRenderDataPresent && !platformRenderDataArticleFound ? 'ARTICLE_DATA_MISSING'
+                        : platformBodySelectorFound ? 'BODY_INVALID' : 'BODY_NOT_FOUND';
+          if (platformKind === 'zhihu' && ['LOGIN_REQUIRED', 'ACCESS_BLOCKED'].includes(failureCode)) {
+            error.message = '知乎暂未返回文章正文';
+          }
+          error.platformDiagnostic = sanitizePlatformArticleDiagnostic({
             source: 'platform-article',
             platform: platformKind,
             stage: platformStage || 'hidden-browser',
             hiddenBrowser: platformHiddenBrowserDiagnostic,
             http: platformHttpDiagnostic,
+            fallback: platformFallbackDiagnostic,
+            failureCode,
+            htmlChars: platformHtmlChars,
+            renderDataPresent: platformRenderDataPresent,
+            renderDataArticleFound: platformRenderDataArticleFound,
+            bodySelectorFound: platformBodySelectorFound,
+            identityMatched: platformIdentityMatched,
             reason: String(error && (error.message || error) || '').slice(0, 200),
           });
           throw error;
@@ -29895,8 +30319,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
       }
       if (isPlatformArticleUrl(url)) {
+        // A public-read failure belongs to the article extraction queue. The
+        // operator computers own their sessions; customers never need to log in.
+        const platformFallback = await this.maybeSubmitPlatformArticleCloudFallback(record, {
+          url,
+          binding,
+          signal,
+          title: title || metadata.title || '',
+          localError: String(error && (error.message || error) || '平台文章正文提取失败'),
+        });
+        if (platformFallback && platformFallback.record) return platformFallback.record;
         const platformLabel = getPlatformArticleLabel(url);
-        const failureReason = String(error && (error.message || error) || '').trim();
+        const failureReason = [String(error && (error.message || error) || '').trim(),
+          platformFallback && platformFallback.gateMessage].filter(Boolean).join('；');
         const needsLogin = /登录|安全验证|验证码/.test(failureReason);
         return {
           ...record,
@@ -30198,40 +30633,19 @@ class WechatObsidianInboxPlugin extends Plugin {
       noteDir,
       assetFolderTitle,
       fileTitle,
-      storageMode: this.settings && this.settings.socialArticleImageStorageMode,
+      storageMode: this.getEffectiveArticleImageMode(sourceUrl),
       adapter: this.app && this.app.vault && this.app.vault.adapter,
     });
   }
-  async appendAdvancedAi(markdown, record, options = {}) {
-    if (record && record.metadata && record.metadata.xAdvancedAiProcessed === true) return markdown;
-    const settings = xArticle.demoSettings(this.settings);
-    if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return markdown;
-    const text = xArticle.recordText(record);
-    if (!text) return markdown;
-    const result = record.metadata && record.metadata.xAdvancedAiResult
-      || await xArticle.processAi({ text, title: record.metadata && record.metadata.title || '' }, settings,
-        (url, config) => this.requestXArticleJson(url, config), options.signal);
-    const summary = result.summary ? xArticle.renderAi({ summary: result.summary }) : '';
-    const translation = xArticle.renderAi({ ...result, summary: '' });
-    if (!summary && !translation) return markdown;
-    const match = /^(---\r?\n[\s\S]*?\r?\n---\r?\n?)([\s\S]*)$/.exec(markdown);
-    if (!match) return [summary, markdown, translation].filter(Boolean).join('\n\n') + '\n';
-    return [match[1].trimEnd(), summary, match[2].trim(), translation].filter(Boolean).join('\n\n') + '\n';
+  async appendAdvancedAi(markdown) {
+    // Retired generic translation and summary are ignored, including legacy cached results.
+    return markdown;
   }
 
-  async prepareAdvancedAiRecord(record, fallbackTitle, signal = null) {
-    if (!record || !record.metadata || record.metadata.xAdvancedAiProcessed === true) return record;
-    const settings = xArticle.demoSettings(this.settings);
-    if (!settings.xTranslationEnabled && !settings.xSummaryEnabled) return record;
-    const text = xArticle.recordText(record);
-    if (!text) return record;
-    const title = String(record.metadata.title || fallbackTitle || '').trim();
-    const result = await xArticle.processAi({ text, title }, settings,
-      (url, config) => this.requestXArticleJson(url, config), signal);
-    const translatedTitle = result.titleTranslation && result.titleTranslation !== title
-      ? `${result.titleTranslation}（${title}）` : title;
-    return { ...record, metadata: { ...record.metadata, ...(translatedTitle ? { title: translatedTitle } : {}), xAdvancedAiResult: result } };
+  async prepareAdvancedAiRecord(record) {
+    return record;
   }
+
 
   async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
     const signal = progress.signal || null;
@@ -30357,11 +30771,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
     }
-    const xArticleBodySaved = xArticle.isXUrl(getRecordUrl(recordForMarkdown))
-      && String(recordForMarkdown.metadata && recordForMarkdown.metadata.platform || '').toLowerCase() === 'x'
-      && String(recordForMarkdown.metadata && recordForMarkdown.metadata.conversionStatus || '').toLowerCase() === 'success'
-      && hasXArticleBody(String(recordForMarkdown.metadata && recordForMarkdown.metadata.markdown || ''), recordForMarkdown.metadata || {});
-    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial && !xArticleBodySaved) {
+    if (isAudioVideoTranscriptionIncompleteRecord(recordForMarkdown) && !qualityRejectedPartial) {
       const metadata = recordForMarkdown.metadata || {};
       const status = metadata.transcriptionStatus || 'pending';
       // A Xiaohongshu record reaches this point only when the mini program
@@ -30415,10 +30825,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.enrichRecordMetadataWithAi(recordForMarkdown, binding);
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.prepareAdvancedAiRecord(recordForMarkdown, title, signal);
-    if (recordForMarkdown.metadata && recordForMarkdown.metadata.xAdvancedAiResult && recordForMarkdown.metadata.title) {
-      title = recordForMarkdown.metadata.title;
-      localizedImageFolderTitle = title;
-    }
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
       fallbackTitle: title,
@@ -30433,7 +30839,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       || recordForMarkdown && recordForMarkdown.content || '').trim();
     const usePerNoteFolder = shouldStoreWebpageNoteInOwnFolder(
       recordUrl,
-      this.settings && this.settings.socialArticleImageStorageMode,
+      this.getEffectiveArticleImageMode(recordUrl),
     );
     const alignedImageFolder = await this.alignSocialArticleImageFolder(recordForMarkdown, {
       sourceUrl: recordUrl,
@@ -31683,66 +32089,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
       });
   }
 
-  renderXArticleSettings(containerEl) {
-    const panel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
-    panel.createEl('summary', { text: 'AI 高级功能' });
-    containerEl = panel;
-    const preset = xArticle.DEMO_PRESET;
-    const settings = xArticle.demoSettings(this.plugin.settings);
-    const readOnly = (name, value) => new Setting(containerEl).setName(name).addText(text => {
-      text.setValue(value);
-      text.inputEl.readOnly = true;
-    });
-    readOnly('API 模型', preset.label);
-    new Setting(containerEl).setName('API Key').addText(text => {
-      text.inputEl.type = 'password'; text.inputEl.autocomplete = 'off';
-      text.setPlaceholder('填写 DeepSeek API Key').setValue(settings.xAiApiKey || '').onChange(async value => {
-        this.plugin.settings.xAiModel = preset.model;
-        this.plugin.settings.xAiBaseUrl = preset.baseUrl;
-        this.plugin.settings.xAiApiKey = value.trim();
-        await this.plugin.saveSettings();
-      });
-    });
-    readOnly('API 地址', preset.baseUrl);
-    new Setting(containerEl).setName('连接')
-      .addButton(button => button.setButtonText('测试').onClick(async () => {
-        button.setDisabled(true);
-        try {
-          await xArticle.testConnection(xArticle.demoSettings(this.plugin.settings), (url, config) => this.plugin.requestXArticleJson(url, config));
-          new Notice('连接成功');
-        } catch (error) { new Notice(`连接失败：${xArticle.errorCode(error)}。请检查配置和网络。`); }
-        finally { button.setDisabled(false); }
-      }))
-      .addButton(button => button.setButtonText('教程').onClick(() => this.openXArticleTutorial()));
-    new Setting(containerEl).setName('多语言翻译').setDesc('默认统一翻译为中文，中文内容不翻译。')
-      .addToggle(toggle => toggle.setValue(this.plugin.settings.xTranslationEnabled === true).onChange(async value => {
-        this.plugin.settings.xTranslationEnabled = value; await this.plugin.saveSettings();
-      }));
-    new Setting(containerEl).setName('AI 总结')
-      .addToggle(toggle => toggle.setValue(this.plugin.settings.xSummaryEnabled === true).onChange(async value => {
-        this.plugin.settings.xSummaryEnabled = value; await this.plugin.saveSettings();
-      }));
-  }
-
-  openXArticleTutorial() {
-    const modal = new Modal(this.app);
-    modal.contentEl.createEl('h3', { text: 'API 设置教程' });
-    const steps = modal.contentEl.createEl('ol');
-    for (const text of [
-      '在 DeepSeek 开放平台创建 API Key。',
-      '填写 DeepSeek API Key，模型和地址已配置。',
-      '点击测试，连接成功后按需开启翻译或 AI 总结。',
-    ]) steps.createEl('li', { text });
-    for (const preset of [xArticle.DEMO_PRESET]) {
-      const row = modal.contentEl.createEl('p');
-      row.createEl('a', { text: preset.label, href: preset.docs, attr: { target: '_blank', rel: 'noopener noreferrer' } });
-      row.createEl('span', { text: `：${preset.baseUrl}` });
-    }
-    modal.contentEl.createEl('p', { text: '对新同步的各平台已提取正文生效。开启后会将正文发送到 DeepSeek；测试及处理可能产生 API 费用。' });
-    modal.open();
-    return modal;
-  }
-
   renderDiagnosticSetting(containerEl) {
     new Setting(containerEl).setName('诊断信息').addButton(button => button
       .setButtonText('复制诊断')
@@ -32038,7 +32384,6 @@ class WechatInboxSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("立即同步").addButton(button => button.setButtonText("同步").setCta().onClick(() => this.plugin.syncInbox()));
 
     this.renderDiagnosticSetting(containerEl);
-    this.renderXArticleSettings(containerEl);
 
     containerEl.createEl('h3', {
       text: '登录设置',
@@ -32259,6 +32604,11 @@ class WechatInboxSettingTab extends PluginSettingTab {
         : '未登录或登录已过期：请打开抖音登录后再同步。');
     });
 
+    if (isOperatorArticleSessionEnabled()) {
+      new Setting(containerEl).setName('运营节点 · 知乎')
+        .addButton(button => button.setButtonText('登录知乎').onClick(() => this.plugin.loginZhihuArticle()));
+    }
+
     const socialPanel = containerEl.createEl('details', { cls: 'wechat-inbox-sync-advanced-panel' });
     socialPanel.createEl('summary', { text: '登录小红书评论区' });
     socialPanel.createDiv({
@@ -32316,6 +32666,8 @@ class WechatInboxSettingTab extends PluginSettingTab {
 }
 
 WechatObsidianInboxPlugin.__test = {
+  isOperatorArticleSessionEnabled,
+  getPlatformArticleBrowserPreferences,
   WechatInboxSettingTab,
   createDiagnosticId,
   createSyncDiagnosticReporter,

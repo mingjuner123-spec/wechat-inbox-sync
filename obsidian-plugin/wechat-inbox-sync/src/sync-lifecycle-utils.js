@@ -8,6 +8,15 @@ const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 
 const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
+  // Preserve safe, machine-readable failure causes through the lifecycle API.
+  // The mini-program uses these codes to show a precise recovery step.
+  CLOUD_FALLBACK_FAILED: '\u4e91\u7aef\u515c\u5e95\u5904\u7406\u5931\u8d25\uff0c\u5c1a\u672a\u4ea4\u4ed8\u7ed3\u679c',
+  NODE_HTTP_TIMEOUT: '\u8bf7\u6c42\u5904\u7406\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5',
+  MEDIA_DOWNLOAD_INTERRUPTED: '\u5a92\u4f53\u4e0b\u8f7d\u4e2d\u65ad\uff0c\u8bf7\u5728\u7f51\u7edc\u7a33\u5b9a\u540e\u91cd\u8bd5',
+  CHANNELS_OPERATION_FAILED: '\u89c6\u9891\u53f7\u5904\u7406\u672a\u5b8c\u6210',
+  DOUYIN_NO_MEDIA: '\u672a\u83b7\u5f97\u4e0e\u8fd9\u6761\u6296\u97f3\u5185\u5bb9\u5339\u914d\u7684\u5a92\u4f53',
+  WECHAT_ARTICLE_BODY_MISSING: '\u672a\u83b7\u53d6\u516c\u4f17\u53f7\u6587\u7ae0\u6b63\u6587',
+  XIAOHONGSHU_CONTENT_UNAVAILABLE: '\u672a\u83b7\u53d6\u8fd9\u6761\u5c0f\u7ea2\u4e66\u5185\u5bb9',
   UNSUPPORTED_PLATFORM: '\u6682\u4e0d\u652f\u6301\u6b64\u5e73\u53f0',
   NETWORK_FAILED: '\u7f51\u7edc\u8fde\u63a5\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u65b0\u540c\u6b65',
   EXTRACTION_FAILED: '\u5185\u5bb9\u89e3\u6790\u5931\u8d25\uff0c\u8bf7\u91cd\u65b0\u540c\u6b65',
@@ -377,9 +386,6 @@ function getSyncLifecycleOutcomeError(record) {
     metadata.contentSnapshot,
   ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
   const xRecord = isXUrl(url);
-  const xArticleBodySaved = xRecord
-    && conversionStatus === 'success'
-    && hasXArticleBody(markdown, metadata);
   const declaredError = `${metadata.conversionError || ''} ${metadata.transcriptionError || ''}`.trim();
   if (xRecord && (['failed', 'link_saved'].includes(conversionStatus)
     || (conversionStatus === 'success' && !hasXArticleBody(markdown, metadata)))) {
@@ -403,7 +409,7 @@ function getSyncLifecycleOutcomeError(record) {
 
   const channelsOutcome = channelsDiagnostic.outcome(metadata.mediaResolutionDiagnostic);
   if (channelsOutcome && transcriptionStatus === 'failed') return createSyncLifecycleOutcomeError(channelsOutcome.code, channelsOutcome.message, channelsOutcome.diagnostic);
-  if (transcriptionStatus === 'failed' && !transcription && !xArticleBodySaved) {
+  if (transcriptionStatus === 'failed' && !transcription) {
     // Xiaohongshu shares are webpages first; the mini program tags every
     // xhslink.com/a/ link as audio_video, so a persisted transcript failure on
     // those records would surface as "音视频转写失败" for a note that was only
@@ -452,7 +458,7 @@ function getSyncLifecycleOutcomeError(record) {
     );
   }
 
-  if (transcriptionStatus === 'failed' && !transcription && !xArticleBodySaved) {
+  if (transcriptionStatus === 'failed' && !transcription) {
     return createSyncLifecycleOutcomeError(
       'TRANSCRIPTION_FAILED',
       declaredError || SYNC_LIFECYCLE_FAILURE_MESSAGES.TRANSCRIPTION_FAILED,
