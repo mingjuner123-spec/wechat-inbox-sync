@@ -4785,6 +4785,37 @@ var require_xiaohongshu_diagnostic_utils = __commonJS({
   }
 });
 
+// src/fallback-decision.js
+var require_fallback_decision = __commonJS({
+  "src/fallback-decision.js"(exports2, module2) {
+    "use strict";
+    var GATE_CODES = /* @__PURE__ */ new Set([
+      "CLOUD_FALLBACK_DISABLED",
+      "CLOUD_FALLBACK_BINDING_REQUIRED",
+      "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED",
+      "LOCAL_COMPONENT_SETUP_REQUIRED",
+      "DOUYIN_LOGIN_REQUIRED",
+      "DOUYIN_RESOLVER_NOT_INSTALLED",
+      "SOURCE_UNAVAILABLE"
+    ]);
+    function sanitizeFallbackDecision2(value) {
+      if (!value || value.status !== "not_submitted") return null;
+      const code = GATE_CODES.has(value.code) ? value.code : "CLOUD_FALLBACK_SUBMIT_FAILED";
+      return { status: "not_submitted", code, stage: code === "CLOUD_FALLBACK_SUBMIT_FAILED" ? "submission" : "eligibility" };
+    }
+    __name(sanitizeFallbackDecision2, "sanitizeFallbackDecision");
+    function attachFallbackDecision2(error, decision) {
+      if (!error || !decision || !decision.gateMessage) return error;
+      error.diagnostic = { ...error.diagnostic || {}, cloudFallback: sanitizeFallbackDecision2({ status: "not_submitted", code: decision.gateCode }) };
+      error.cloudFallbackGateMessage = decision.gateMessage;
+      error.message = [error.message, decision.gateMessage].filter(Boolean).join("；");
+      return error;
+    }
+    __name(attachFallbackDecision2, "attachFallbackDecision");
+    module2.exports = { sanitizeFallbackDecision: sanitizeFallbackDecision2, attachFallbackDecision: attachFallbackDecision2 };
+  }
+});
+
 // src/failure-technical-report.js
 var require_failure_technical_report = __commonJS({
   "src/failure-technical-report.js"(exports2, module2) {
@@ -4796,6 +4827,7 @@ var require_failure_technical_report = __commonJS({
     var asrDiagnosticEvidence2 = require_asr_diagnostic_evidence();
     var diagnosticNativeEvidence = require_diagnostic_native_evidence();
     var xhsDiagnostic2 = require_xiaohongshu_diagnostic_utils();
+    var { sanitizeFallbackDecision: sanitizeFallbackDecision2 } = require_fallback_decision();
     var MAX_REPORT_TEXT_BYTES = 128 * 1024;
     var MAX_SESSION_BYTES = 768 * 1024;
     var UNAVAILABLE_REASONS = /* @__PURE__ */ new Set([
@@ -5434,6 +5466,8 @@ var require_failure_technical_report = __commonJS({
       if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
       const xiaohongshuDiagnostic = safeXiaohongshuExtractionDiagnostic(source.diagnostic, settings);
       if (xiaohongshuDiagnostic) value.xiaohongshuDiagnostic = xiaohongshuDiagnostic;
+      const cloudFallback = sanitizeFallbackDecision2(source.diagnostic && source.diagnostic.cloudFallback);
+      if (cloudFallback) value.cloudFallback = cloudFallback;
       return redactTree(value, settings);
     }
     __name(safeError, "safeError");
@@ -18861,6 +18895,14 @@ var require_sync_lifecycle_utils = __commonJS({
     var crypto2 = require("node:crypto");
     var channelsDiagnostic2 = require_wechat_channels_diagnostic_utils();
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
+      CLOUD_FALLBACK_DISABLED: "本地提取失败，云端兜底未开启；请在插件设置中开启后重试。",
+      CLOUD_FALLBACK_BINDING_REQUIRED: "云端兜底未提交，请先完成小程序与插件绑定。",
+      LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
+      LOCAL_TRANSCRIPTION_BINDING_REQUIRED: "请先完成小程序与插件绑定，再重新同步。",
+      LOCAL_COMPONENT_SETUP_REQUIRED: "本地转写组件未就绪，请在插件设置安装或更新组件后重试。",
+      DOUYIN_LOGIN_REQUIRED: "请在插件设置中登录抖音后重试。",
+      DOUYIN_RESOLVER_NOT_INSTALLED: "抖音解析组件未就绪，请在插件设置安装或更新组件后重试。",
+      CLOUD_FALLBACK_SUBMIT_FAILED: "本地提取失败，云端兜底暂未接收任务；请保持插件联网，稍后重试。",
       // Preserve safe, machine-readable failure causes through the lifecycle API.
       // The mini-program uses these codes to show a precise recovery step.
       CLOUD_FALLBACK_FAILED: "云端兜底处理失败，尚未交付结果",
@@ -18894,8 +18936,8 @@ var require_sync_lifecycle_utils = __commonJS({
     function categorizeSyncFailure2(error) {
       const code = String(error && error.code || "").trim().toUpperCase();
       const message = String(error && error.message || error || "").trim().toUpperCase();
-      if (code === "LOCAL_COMPONENT_SETUP_REQUIRED") return "LOCAL_COMPONENT_UNAVAILABLE";
-      if (code === "LOCAL_TRANSCRIPTION_BINDING_REQUIRED" || code === "LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED") return "SYNC_FAILED";
+      const fallbackCode = error && error.diagnostic && error.diagnostic.cloudFallback && error.diagnostic.cloudFallback.code;
+      if (fallbackCode && Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, fallbackCode)) return fallbackCode;
       if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
       if (/^XIAOHONGSHU_/.test(code)) {
         return code === "XIAOHONGSHU_PRO_REQUIRED" ? "SYNC_FAILED" : "EXTRACTION_FAILED";
@@ -19010,7 +19052,8 @@ var require_sync_lifecycle_utils = __commonJS({
         finalKind: String(conversionDiagnostic.finalKind || "").slice(0, 40),
         finalState: String(conversionDiagnostic.finalState || "").slice(0, 40),
         note: String(metadata.conversionNote || metadata.conversionError || "").slice(0, 200),
-        ...sanitizePlatformArticleDiagnostic2(conversionDiagnostic) || {}
+        ...sanitizePlatformArticleDiagnostic2(conversionDiagnostic) || {},
+        ...require_fallback_decision().sanitizeFallbackDecision(conversionDiagnostic.cloudFallback) ? { cloudFallback: require_fallback_decision().sanitizeFallbackDecision(conversionDiagnostic.cloudFallback) } : {}
       };
     }
     __name(buildWebpageExtractionFailureDiagnostic, "buildWebpageExtractionFailureDiagnostic");
@@ -23674,8 +23717,12 @@ var {
 } = require_sync_diagnostic_reporter();
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var bilibiliDiagnostic = require_bilibili_diagnostic_utils();
-function retainedSyncFailureDiagnostic(value, settings) {
-  return channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
+var { sanitizeFallbackDecision, attachFallbackDecision } = require_fallback_decision();
+function retainedSyncFailureDiagnostic(value, settings, preserveActiveDiagnostic = false) {
+  const specific = channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
+  const cloudFallback = sanitizeFallbackDecision(value && value.cloudFallback);
+  const base = specific || (preserveActiveDiagnostic ? redactSensitiveObject(value) : null);
+  return cloudFallback ? { ...base || {}, cloudFallback } : base;
 }
 __name(retainedSyncFailureDiagnostic, "retainedSyncFailureDiagnostic");
 function retainedSyncFailureContext(item = {}) {
@@ -24037,7 +24084,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.6";
+var PLUGIN_RUNTIME_VERSION = "1.4.7";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -39288,7 +39335,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     void this.maybeCheckPluginUpdate().catch(() => {
     });
   }
-  async saveSettings(nextSettings) {
+  async saveSettings(nextSettings, { pendingDoubaoMutation = null } = {}) {
     this.ensureSerializedSaveData();
     if (!nextSettings || typeof nextSettings !== "object") nextSettings = this.settings || {};
     if (this.syncDiagnosticPersistencePromise) {
@@ -39296,9 +39343,15 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       });
     }
     const latestOutbox = this.settings && this.settings.syncDiagnosticOutbox;
+    const latestDoubaoTasks = { ...this.settings && this.settings.pendingDoubaoTasks || {} };
+    if (pendingDoubaoMutation && pendingDoubaoMutation.key) {
+      if (pendingDoubaoMutation.task) latestDoubaoTasks[pendingDoubaoMutation.key] = pendingDoubaoMutation.task;
+      else delete latestDoubaoTasks[pendingDoubaoMutation.key];
+    }
     this.settings = mergeSettings({
       ...nextSettings || {},
-      ...Array.isArray(latestOutbox) ? { syncDiagnosticOutbox: latestOutbox } : {}
+      ...Array.isArray(latestOutbox) ? { syncDiagnosticOutbox: latestOutbox } : {},
+      pendingDoubaoTasks: latestDoubaoTasks
     });
     this.settings.settingsRevision = (Number(this.settings.settingsRevision) || 0) + 1;
     if (this.autoSyncController) this.autoSyncController.setEnabled(this.settings.autoSyncEnabled);
@@ -42658,8 +42711,8 @@ ${installation}`, "sync-install-diagnostic.txt");
     localError = "",
     linkDiagnostic = null
   } = {}) {
-    if (this.settings.cloudFallbackEnabled !== true) return null;
-    if (!binding || !binding.token) return null;
+    if (this.settings.cloudFallbackEnabled !== true) return { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "本地提取失败；云端兜底未开启，请在插件设置中开启后重试。" };
+    if (!binding || !binding.token) return { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "云端兜底未提交：请先完成小程序绑定。" };
     if (!isXiaohongshuUrl(url)) return null;
     const diagnostic = linkDiagnostic && typeof linkDiagnostic === "object" ? linkDiagnostic : null;
     const responseStatus = Number(diagnostic && diagnostic.request && diagnostic.request.responseStatus) || 0;
@@ -42670,7 +42723,7 @@ ${installation}`, "sync-install-diagnostic.txt");
       binding,
       featureName: "小红书云端兜底"
     });
-    if (!gate.allowed) return { gateMessage: gate.message };
+    if (!gate.allowed) return { gateCode: gate.code, gateMessage: gate.message };
     try {
       const job = await this.submitCloudFallbackJob({
         sourceType: "xiaohongshu_url",
@@ -42693,7 +42746,7 @@ ${installation}`, "sync-install-diagnostic.txt");
       );
     } catch (error) {
       if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
-      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+      return { gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED", gateMessage: "云端兜底暂未接收任务，请保持插件联网，稍后重试。" };
     }
   }
   // WeChat answers a captcha page to the user's network; the operator node
@@ -42707,15 +42760,15 @@ ${installation}`, "sync-install-diagnostic.txt");
     title = "",
     localError = ""
   } = {}) {
-    if (this.settings.cloudFallbackEnabled !== true) return null;
-    if (!binding || !binding.token) return null;
+    if (this.settings.cloudFallbackEnabled !== true) return { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "本地提取失败；云端兜底未开启，请在插件设置中开启后重试。" };
+    if (!binding || !binding.token) return { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "云端兜底未提交：请先完成小程序绑定。" };
     if (!isWechatArticleUrl(url)) return null;
     const gate = await this.evaluateCloudFallbackUserGate({
       binding,
       requireTranscriptionComponent: false,
       featureName: "公众号云端兜底"
     });
-    if (!gate.allowed) return { gateMessage: gate.message };
+    if (!gate.allowed) return { gateCode: gate.code, gateMessage: gate.message };
     try {
       const job = await this.submitCloudFallbackJob({
         sourceType: "wechat_article",
@@ -42737,8 +42790,8 @@ ${installation}`, "sync-install-diagnostic.txt");
         "云端兜底任务已提交，正在由云端节点抓取公众号正文"
       );
     } catch (error) {
-      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
-      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+      if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
+      return { gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED", gateMessage: "云端兜底暂未接收任务，请保持插件联网，稍后重试。" };
     }
   }
   async maybeSubmitPlatformArticleCloudFallback(record, {
@@ -42748,7 +42801,8 @@ ${installation}`, "sync-install-diagnostic.txt");
     title = "",
     localError = ""
   } = {}) {
-    if (this.settings.cloudFallbackEnabled !== true || !binding || !binding.token) return null;
+    if (this.settings.cloudFallbackEnabled !== true) return { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "本地提取失败；云端兜底未开启，请在插件设置中开启后重试。" };
+    if (!binding || !binding.token) return { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "云端兜底未提交：请先完成小程序绑定。" };
     const platform = getPlatformArticleKind(url);
     const identity = getPlatformArticleIdentity(url);
     const validToutiaoShareLink = platform === "toutiao" && /^https:\/\/m\.toutiao\.com\/is\/[A-Za-z0-9_-]{4,128}\/?(?:\?[^#]*)?$/i.test(String(url || "").trim());
@@ -42760,7 +42814,7 @@ ${installation}`, "sync-install-diagnostic.txt");
       requireTranscriptionComponent: false,
       featureName: `${label}文章云端兜底`
     });
-    if (!gate.allowed) return { gateMessage: gate.message };
+    if (!gate.allowed) return { gateCode: gate.code, gateMessage: gate.message };
     try {
       const job = await this.submitCloudFallbackJob({
         sourceType,
@@ -42778,8 +42832,8 @@ ${installation}`, "sync-install-diagnostic.txt");
       }
       throw createCloudFallbackPendingError(job, localError, `云端已接收任务，正在由运营节点提取${label}正文`);
     } catch (error) {
-      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
-      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+      if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
+      return { gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED", gateMessage: "云端兜底暂未接收任务，请保持插件联网，稍后重试。" };
     }
   }
   openTranscriptionSetupSettings() {
@@ -46422,21 +46476,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     return parseDoubaoAsrTaskState(queryResponse);
   }
   async savePendingDoubaoTask(taskKey, task) {
-    await this.saveSettings({
-      ...this.settings,
-      pendingDoubaoTasks: {
-        ...this.settings.pendingDoubaoTasks || {},
-        [taskKey]: task
-      }
-    });
+    await this.saveSettings(this.settings, { pendingDoubaoMutation: { key: taskKey, task } });
   }
   async clearPendingDoubaoTask(taskKey) {
-    const nextTasks = { ...this.settings.pendingDoubaoTasks || {} };
-    delete nextTasks[taskKey];
-    await this.saveSettings({
-      ...this.settings,
-      pendingDoubaoTasks: nextTasks
-    });
+    await this.saveSettings(this.settings, { pendingDoubaoMutation: { key: taskKey, task: null } });
   }
   async runTencentTranscription(audioUrl) {
     const createPayload = await this.postTencent("CreateRecTask", buildTencentCreateRecTaskBody({
@@ -50673,6 +50716,7 @@ ${finalized.markdown}
           localError: "小红书拒绝了当前请求（平台限流或安全验证）"
         });
         if (rateLimitedFallback && rateLimitedFallback.record) return rateLimitedFallback.record;
+        attachFallbackDecision(error, rateLimitedFallback);
         throw error;
       }
       if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
@@ -50688,8 +50732,7 @@ ${finalized.markdown}
           });
           if (fallback && fallback.record) return fallback.record;
           if (fallback && fallback.gateMessage) {
-            error.cloudFallbackGateMessage = redactDiagnosticText(fallback.gateMessage);
-            error.message += `；${error.cloudFallbackGateMessage}`;
+            attachFallbackDecision(error, fallback);
           }
         }
         throw error;
@@ -50703,6 +50746,7 @@ ${finalized.markdown}
           localError: String(error && (error.message || error) || "公众号正文提取失败")
         });
         if (wechatFallback && wechatFallback.record) return wechatFallback.record;
+        attachFallbackDecision(error, wechatFallback);
       }
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
@@ -50730,7 +50774,7 @@ ${finalized.markdown}
         if (cloudFallback && cloudFallback.record) return cloudFallback.record;
         if (cloudFallback && cloudFallback.gateMessage) {
           const error2 = createRetryableXiaohongshuContentError(failureDiagnostic);
-          error2.message = [error2.message, cloudFallback.gateMessage].filter(Boolean).join("；");
+          attachFallbackDecision(error2, cloudFallback);
           throw error2;
         }
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
@@ -50744,6 +50788,7 @@ ${finalized.markdown}
           localError: String(error && (error.message || error) || "平台文章正文提取失败")
         });
         if (platformFallback && platformFallback.record) return platformFallback.record;
+        attachFallbackDecision(error, platformFallback);
         const platformLabel = getPlatformArticleLabel(url);
         const failureReason = [
           String(error && (error.message || error) || "").trim(),
@@ -50765,7 +50810,10 @@ ${finalized.markdown}
             ].join("\n"),
             conversionStatus: "link_saved",
             conversionError: failureReason || `${platformLabel}正文提取失败`,
-            ...error && error.platformDiagnostic ? { conversionDiagnostic: error.platformDiagnostic } : {}
+            ...error && (error.platformDiagnostic || error.diagnostic) ? { conversionDiagnostic: {
+              ...error.platformDiagnostic || error.diagnostic,
+              ...error.diagnostic && error.diagnostic.cloudFallback ? { cloudFallback: error.diagnostic.cloudFallback } : {}
+            } } : {}
           }
         };
       }
@@ -51952,7 +52000,7 @@ ${finalized.markdown}
             };
           }
         }
-        const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? retainedSyncFailureDiagnostic(error.diagnostic, this.settings) || redactSensitiveObject(error.diagnostic) : null;
+        const diagnostic = error && error.diagnostic && typeof error.diagnostic === "object" ? retainedSyncFailureDiagnostic(error.diagnostic, this.settings, true) : null;
         const diagnosticSourceUrl = sanitizeSourceLink(getDiagnosticSourceUrl(record));
         const failedAt = (/* @__PURE__ */ new Date()).toISOString();
         let failedTitle = "小红书内容";

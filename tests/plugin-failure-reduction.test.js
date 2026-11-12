@@ -226,6 +226,53 @@ function run() {
         assert.equal(ok.version, '1');
       }
 
+      // Concurrent settings saves must neither lose paid task IDs nor resurrect
+      // cleared tasks after reconciliation. Exercise the actual persistence API.
+      {
+        const plugin = new Plugin(); const snapshots = [];
+        plugin.settings = h.mergeSettings({ bindings: [{ token: 'fixture-binding' }] });
+        plugin.saveData = async value => snapshots.push(JSON.parse(JSON.stringify(value)));
+        plugin.writeSettingsGuard = () => {};
+        const stale = { ...plugin.settings };
+        let release;
+        plugin.syncDiagnosticPersistencePromise = new Promise(resolve => { release = resolve; });
+        const a = plugin.savePendingDoubaoTask('one', { requestId: 'paid-request-one', phase: 'submission_unknown' });
+        const b = plugin.savePendingDoubaoTask('two', { requestId: 'paid-request-two', phase: 'submitted' });
+        const unrelated = plugin.saveSettings({ ...stale, autoSyncEnabled: false });
+        release(); await Promise.all([a, b, unrelated]);
+        assert.deepEqual(Object.keys(plugin.settings.pendingDoubaoTasks).sort(), ['one', 'two']);
+        const beforeClear = { ...plugin.settings };
+        await plugin.clearPendingDoubaoTask('one');
+        await plugin.saveSettings(beforeClear);
+        assert.deepEqual(Object.keys(plugin.settings.pendingDoubaoTasks), ['two']);
+        assert.equal(snapshots.at(-1).pendingDoubaoTasks.two.requestId, 'paid-request-two');
+      }
+      {
+        const { attachFallbackDecision } = require('../obsidian-plugin/wechat-inbox-sync/src/fallback-decision');
+        const { categorizeSyncFailure } = require('../obsidian-plugin/wechat-inbox-sync/src/sync-lifecycle-utils');
+        const { buildFailureTechnicalReport } = require('../obsidian-plugin/wechat-inbox-sync/src/failure-technical-report');
+        const plugin = new Plugin(); plugin.settings = h.mergeSettings({ cloudFallbackEnabled: true });
+        const input = { url: 'https://mp.weixin.qq.com/s/synthetic', binding: { token: 'fixture' } };
+        plugin.evaluateCloudFallbackUserGate = async () => ({ allowed: false,
+          code: 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', message: '请刷新 Pro 权限' });
+        plugin.submitCloudFallbackJob = async () => { throw Error('must not submit'); };
+        const decision = await plugin.maybeSubmitWechatArticleCloudFallback({ _id: 'fixture' }, input);
+        const error = attachFallbackDecision(Object.assign(Error('公众号正文未取得'), { code: 'WECHAT_ARTICLE_BODY_MISSING' }), decision);
+        assert.equal(categorizeSyncFailure(error), 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
+        const report = JSON.parse(buildFailureTechnicalReport({ error }).text);
+        assert.deepEqual(report.failure.cloudFallback, { status: 'not_submitted', code: 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', stage: 'eligibility' });
+        assert.doesNotMatch(JSON.stringify(report.failure.cloudFallback), /fixture|https/);
+        plugin.evaluateCloudFallbackUserGate = async () => ({ allowed: true });
+        const uncertain = Object.assign(Error('response lost'), { code: 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN' });
+        plugin.submitCloudFallbackJob = async () => { throw uncertain; };
+        await assert.rejects(plugin.maybeSubmitWechatArticleCloudFallback({ _id: 'fixture' }, input), e => e === uncertain);
+        plugin.submitCloudFallbackJob = async () => { throw Error('credential=must-not-leak'); };
+        const rejected = await plugin.maybeSubmitWechatArticleCloudFallback({ _id: 'fixture' }, input);
+        assert.equal(rejected.gateCode, 'CLOUD_FALLBACK_SUBMIT_FAILED');
+        assert.doesNotMatch(rejected.gateMessage, /must-not-leak/);
+        plugin.settings.cloudFallbackEnabled = false;
+        assert.equal((await plugin.maybeSubmitWechatArticleCloudFallback({}, input)).gateCode, 'CLOUD_FALLBACK_DISABLED');
+      }
       console.log('plugin failure reduction tests passed');
     })();
   }

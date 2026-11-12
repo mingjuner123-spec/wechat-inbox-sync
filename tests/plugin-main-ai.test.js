@@ -9755,8 +9755,10 @@ async function runAsyncHydrationTests() {
       }, '', '', '不可用图文测试'),
       (error) => error
         && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE'
-        && error.message === '小红书内容提取失败，已保留记录，请在小程序“同步记录”中点击“重试”。'
+        && error.message.includes('小红书内容提取失败，已保留记录')
+        && error.message.includes('云端兜底未提交：请先完成小程序绑定。')
         && error.diagnostic
+        && error.diagnostic.cloudFallback.code === 'CLOUD_FALLBACK_BINDING_REQUIRED'
         && error.diagnostic.request.pageType === 'xiaohongshu-generic-landing',
     );
   } finally {
@@ -10346,9 +10348,9 @@ async function runAsyncHydrationTests() {
     doubaoPollIntervalMs: 1,
     pendingDoubaoTasks: {},
   };
-  doubaoPlugin.saveSettings = async (nextSettings) => {
-    doubaoPlugin.settings = helpers.mergeSettings(nextSettings);
-  };
+  // Exercise actual persistence ordering while keeping all writes in memory.
+  doubaoPlugin.saveData = async () => {};
+  doubaoPlugin.writeSettingsGuard = () => {};
   let submitCount = 0;
   let queryCount = 0;
   requestUrlMock = async ({ url }) => {

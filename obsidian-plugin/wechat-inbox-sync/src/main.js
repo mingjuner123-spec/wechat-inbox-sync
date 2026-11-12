@@ -17,8 +17,12 @@ const {
 } = require('./sync-diagnostic-reporter');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const bilibiliDiagnostic = require('./bilibili-diagnostic-utils');
-function retainedSyncFailureDiagnostic(value, settings) {
-  return channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
+const { sanitizeFallbackDecision, attachFallbackDecision } = require('./fallback-decision');
+function retainedSyncFailureDiagnostic(value, settings, preserveActiveDiagnostic = false) {
+  const specific = channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
+  const cloudFallback = sanitizeFallbackDecision(value && value.cloudFallback);
+  const base = specific || (preserveActiveDiagnostic ? redactSensitiveObject(value) : null);
+  return cloudFallback ? { ...(base || {}), cloudFallback } : base;
 }
 function retainedSyncFailureContext(item = {}) {
   return {
@@ -393,7 +397,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.6';
+const PLUGIN_RUNTIME_VERSION = '1.4.7';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -17775,7 +17779,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     void this.maybeCheckPluginUpdate().catch(() => {});
   }
 
-  async saveSettings(nextSettings) {
+  async saveSettings(nextSettings, { pendingDoubaoMutation = null } = {}) {
     this.ensureSerializedSaveData();
     // A caller that forgets the argument must not silently rebuild settings
     // from defaults: that is exactly how bindings were once wiped.
@@ -17787,9 +17791,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     // settings write was waiting. Keep that latest snapshot so an unrelated
     // settings update cannot restore an older outbox and lose an event.
     const latestOutbox = this.settings && this.settings.syncDiagnosticOutbox;
+    const latestDoubaoTasks = { ...(this.settings && this.settings.pendingDoubaoTasks || {}) };
+    if (pendingDoubaoMutation && pendingDoubaoMutation.key) {
+      if (pendingDoubaoMutation.task) latestDoubaoTasks[pendingDoubaoMutation.key] = pendingDoubaoMutation.task;
+      else delete latestDoubaoTasks[pendingDoubaoMutation.key];
+    }
     this.settings = mergeSettings({
       ...(nextSettings || {}),
       ...(Array.isArray(latestOutbox) ? { syncDiagnosticOutbox: latestOutbox } : {}),
+      pendingDoubaoTasks: latestDoubaoTasks,
     });
     this.settings.settingsRevision = (Number(this.settings.settingsRevision) || 0) + 1;
     if (this.autoSyncController) this.autoSyncController.setEnabled(this.settings.autoSyncEnabled);
@@ -21547,8 +21557,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     localError = '',
     linkDiagnostic = null,
   } = {}) {
-    if (this.settings.cloudFallbackEnabled !== true) return null;
-    if (!binding || !binding.token) return null;
+    if (this.settings.cloudFallbackEnabled !== true) return { gateCode: 'CLOUD_FALLBACK_DISABLED', gateMessage: '本地提取失败；云端兜底未开启，请在插件设置中开启后重试。' };
+    if (!binding || !binding.token) return { gateCode: 'CLOUD_FALLBACK_BINDING_REQUIRED', gateMessage: '云端兜底未提交：请先完成小程序绑定。' };
     if (!isXiaohongshuUrl(url)) return null;
     const diagnostic = linkDiagnostic && typeof linkDiagnostic === 'object' ? linkDiagnostic : null;
     const responseStatus = Number(diagnostic && diagnostic.request && diagnostic.request.responseStatus) || 0;
@@ -21563,7 +21573,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       binding,
       featureName: '小红书云端兜底',
     });
-    if (!gate.allowed) return { gateMessage: gate.message };
+    if (!gate.allowed) return { gateCode: gate.code, gateMessage: gate.message };
     try {
       const job = await this.submitCloudFallbackJob({
         sourceType: 'xiaohongshu_url',
@@ -21586,7 +21596,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       );
     } catch (error) {
       if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
-      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+      return { gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED', gateMessage: '云端兜底暂未接收任务，请保持插件联网，稍后重试。' };
     }
   }
 
@@ -21601,15 +21611,15 @@ class WechatObsidianInboxPlugin extends Plugin {
     title = '',
     localError = '',
   } = {}) {
-    if (this.settings.cloudFallbackEnabled !== true) return null;
-    if (!binding || !binding.token) return null;
+    if (this.settings.cloudFallbackEnabled !== true) return { gateCode: 'CLOUD_FALLBACK_DISABLED', gateMessage: '本地提取失败；云端兜底未开启，请在插件设置中开启后重试。' };
+    if (!binding || !binding.token) return { gateCode: 'CLOUD_FALLBACK_BINDING_REQUIRED', gateMessage: '云端兜底未提交：请先完成小程序绑定。' };
     if (!isWechatArticleUrl(url)) return null;
     const gate = await this.evaluateCloudFallbackUserGate({
       binding,
       requireTranscriptionComponent: false,
       featureName: '公众号云端兜底',
     });
-    if (!gate.allowed) return { gateMessage: gate.message };
+    if (!gate.allowed) return { gateCode: gate.code, gateMessage: gate.message };
     try {
       const job = await this.submitCloudFallbackJob({
         sourceType: 'wechat_article',
@@ -21631,15 +21641,16 @@ class WechatObsidianInboxPlugin extends Plugin {
         '云端兜底任务已提交，正在由云端节点抓取公众号正文',
       );
     } catch (error) {
-      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
-      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+      if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
+      return { gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED', gateMessage: '云端兜底暂未接收任务，请保持插件联网，稍后重试。' };
     }
   }
 
   async maybeSubmitPlatformArticleCloudFallback(record, {
     url = '', binding = null, signal = null, title = '', localError = '',
   } = {}) {
-    if (this.settings.cloudFallbackEnabled !== true || !binding || !binding.token) return null;
+    if (this.settings.cloudFallbackEnabled !== true) return { gateCode: 'CLOUD_FALLBACK_DISABLED', gateMessage: '本地提取失败；云端兜底未开启，请在插件设置中开启后重试。' };
+    if (!binding || !binding.token) return { gateCode: 'CLOUD_FALLBACK_BINDING_REQUIRED', gateMessage: '云端兜底未提交：请先完成小程序绑定。' };
     const platform = getPlatformArticleKind(url);
     const identity = getPlatformArticleIdentity(url);
     const validToutiaoShareLink = platform === 'toutiao'
@@ -21652,7 +21663,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       requireTranscriptionComponent: false,
       featureName: `${label}文章云端兜底`,
     });
-    if (!gate.allowed) return { gateMessage: gate.message };
+    if (!gate.allowed) return { gateCode: gate.code, gateMessage: gate.message };
     try {
       const job = await this.submitCloudFallbackJob({
         sourceType, sourceUrl: normalizePlatformArticleUrl(url), recordId: getRecordId(record),
@@ -21665,8 +21676,8 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       throw createCloudFallbackPendingError(job, localError, `云端已接收任务，正在由运营节点提取${label}正文`);
     } catch (error) {
-      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
-      return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
+      if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
+      return { gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED', gateMessage: '云端兜底暂未接收任务，请保持插件联网，稍后重试。' };
     }
   }
 
@@ -25482,22 +25493,11 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async savePendingDoubaoTask(taskKey, task) {
-    await this.saveSettings({
-      ...this.settings,
-      pendingDoubaoTasks: {
-        ...(this.settings.pendingDoubaoTasks || {}),
-        [taskKey]: task,
-      },
-    });
+    await this.saveSettings(this.settings, { pendingDoubaoMutation: { key: taskKey, task } });
   }
 
   async clearPendingDoubaoTask(taskKey) {
-    const nextTasks = { ...(this.settings.pendingDoubaoTasks || {}) };
-    delete nextTasks[taskKey];
-    await this.saveSettings({
-      ...this.settings,
-      pendingDoubaoTasks: nextTasks,
-    });
+    await this.saveSettings(this.settings, { pendingDoubaoMutation: { key: taskKey, task: null } });
   }
 
   async runTencentTranscription(audioUrl) {
@@ -30307,6 +30307,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           localError: '小红书拒绝了当前请求（平台限流或安全验证）',
         });
         if (rateLimitedFallback && rateLimitedFallback.record) return rateLimitedFallback.record;
+        attachFallbackDecision(error, rateLimitedFallback);
         throw error;
       }
       if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
@@ -30322,8 +30323,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
           if (fallback && fallback.record) return fallback.record;
           if (fallback && fallback.gateMessage) {
-            error.cloudFallbackGateMessage = redactDiagnosticText(fallback.gateMessage);
-            error.message += `；${error.cloudFallbackGateMessage}`;
+            attachFallbackDecision(error, fallback);
           }
         }
         throw error;
@@ -30341,6 +30341,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           localError: String(error && (error.message || error) || '公众号正文提取失败'),
         });
         if (wechatFallback && wechatFallback.record) return wechatFallback.record;
+        attachFallbackDecision(error, wechatFallback);
       }
       if (isRetryableTranscriptionError(error) || isRetryableXiaohongshuContentError(error) || isRetryableWechatArticleContentError(error)) {
         throw error;
@@ -30368,7 +30369,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (cloudFallback && cloudFallback.record) return cloudFallback.record;
         if (cloudFallback && cloudFallback.gateMessage) {
           const error = createRetryableXiaohongshuContentError(failureDiagnostic);
-          error.message = [error.message, cloudFallback.gateMessage].filter(Boolean).join('；');
+          attachFallbackDecision(error, cloudFallback);
           throw error;
         }
         throw createRetryableXiaohongshuContentError(failureDiagnostic);
@@ -30384,6 +30385,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           localError: String(error && (error.message || error) || '平台文章正文提取失败'),
         });
         if (platformFallback && platformFallback.record) return platformFallback.record;
+        attachFallbackDecision(error, platformFallback);
         const platformLabel = getPlatformArticleLabel(url);
         const failureReason = [String(error && (error.message || error) || '').trim(),
           platformFallback && platformFallback.gateMessage].filter(Boolean).join('；');
@@ -30403,7 +30405,10 @@ class WechatObsidianInboxPlugin extends Plugin {
             ].join('\n'),
             conversionStatus: 'link_saved',
             conversionError: failureReason || `${platformLabel}正文提取失败`,
-            ...(error && error.platformDiagnostic ? { conversionDiagnostic: error.platformDiagnostic } : {}),
+            ...(error && (error.platformDiagnostic || error.diagnostic) ? { conversionDiagnostic: {
+              ...(error.platformDiagnostic || error.diagnostic),
+              ...(error.diagnostic && error.diagnostic.cloudFallback ? { cloudFallback: error.diagnostic.cloudFallback } : {}),
+            } } : {}),
           },
         };
       }
@@ -31704,7 +31709,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
 
     const diagnostic = error && error.diagnostic && typeof error.diagnostic === 'object'
-      ? (retainedSyncFailureDiagnostic(error.diagnostic, this.settings) || redactSensitiveObject(error.diagnostic))
+      ? retainedSyncFailureDiagnostic(error.diagnostic, this.settings, true)
       : null;
         const diagnosticSourceUrl = sanitizeSourceLink(getDiagnosticSourceUrl(record));
         const failedAt = new Date().toISOString();
