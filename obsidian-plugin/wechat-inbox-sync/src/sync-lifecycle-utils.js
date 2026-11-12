@@ -8,6 +8,14 @@ const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 
 const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
+  CLOUD_FALLBACK_DISABLED: "本地提取失败，云端兜底未开启；请在插件设置中开启后重试。",
+  CLOUD_FALLBACK_BINDING_REQUIRED: "云端兜底未提交，请先完成小程序与插件绑定。",
+  LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
+  LOCAL_TRANSCRIPTION_BINDING_REQUIRED: "请先完成小程序与插件绑定，再重新同步。",
+  LOCAL_COMPONENT_SETUP_REQUIRED: "本地转写组件未就绪，请在插件设置安装或更新组件后重试。",
+  DOUYIN_LOGIN_REQUIRED: "请在插件设置中登录抖音后重试。",
+  DOUYIN_RESOLVER_NOT_INSTALLED: "抖音解析组件未就绪，请在插件设置安装或更新组件后重试。",
+  CLOUD_FALLBACK_SUBMIT_FAILED: "本地提取失败，云端兜底暂未接收任务；请保持插件联网，稍后重试。",
   // Preserve safe, machine-readable failure causes through the lifecycle API.
   // The mini-program uses these codes to show a precise recovery step.
   CLOUD_FALLBACK_FAILED: '\u4e91\u7aef\u515c\u5e95\u5904\u7406\u5931\u8d25\uff0c\u5c1a\u672a\u4ea4\u4ed8\u7ed3\u679c',
@@ -43,9 +51,8 @@ function getSyncNoteTitleFromPath(filePath) {
 function categorizeSyncFailure(error) {
   const code = String(error && error.code || '').trim().toUpperCase();
   const message = String(error && error.message || error || '').trim().toUpperCase();
-  // Keep the existing server lifecycle contract; setup is not an ASR engine failure.
-  if (code === 'LOCAL_COMPONENT_SETUP_REQUIRED') return 'LOCAL_COMPONENT_UNAVAILABLE';
-  if (code === 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED' || code === 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED') return 'SYNC_FAILED';
+  const fallbackCode = error && error.diagnostic && error.diagnostic.cloudFallback && error.diagnostic.cloudFallback.code;
+  if (fallbackCode && Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, fallbackCode)) return fallbackCode;
   if (Object.prototype.hasOwnProperty.call(SYNC_LIFECYCLE_FAILURE_MESSAGES, code)) return code;
   // Xiaohongshu records are webpage extractions first. The mini program tags
   // every xhslink.com/a/ share as audio_video, so a wall, an unavailable note or
@@ -175,6 +182,8 @@ function buildWebpageExtractionFailureDiagnostic(source, metadata, markdown) {
     finalState: String(conversionDiagnostic.finalState || '').slice(0, 40),
     note: String(metadata.conversionNote || metadata.conversionError || '').slice(0, 200),
     ...(sanitizePlatformArticleDiagnostic(conversionDiagnostic) || {}),
+    ...(require('./fallback-decision').sanitizeFallbackDecision(conversionDiagnostic.cloudFallback)
+      ? { cloudFallback: require('./fallback-decision').sanitizeFallbackDecision(conversionDiagnostic.cloudFallback) } : {}),
   };
 }
 

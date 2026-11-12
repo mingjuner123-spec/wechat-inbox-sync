@@ -126,7 +126,7 @@ async function main() {
   assert.match(noticeUtils.buildSyncResultNotice([],[],[],[{setupRequired:true,message:'待安装组件'}]),/待准备/);
   assert.doesNotMatch(noticeUtils.buildSyncResultNotice([],[],[],[{setupRequired:true,message:'待安装组件'}]),/同步失败|已同步/);
   assert.match(noticeUtils.buildSyncResultNotice([],[],[],[{message:'引擎崩溃'},{setupRequired:true,message:'待安装组件'}]),/1 条内容未同步/);
-  assert.equal(Plugin.__test.categorizeSyncFailure(setup.setupError('LOCAL_COMPONENT_SETUP_REQUIRED','待安装')), 'LOCAL_COMPONENT_UNAVAILABLE');
+  assert.equal(Plugin.__test.categorizeSyncFailure(setup.setupError('LOCAL_COMPONENT_SETUP_REQUIRED','待安装')), 'LOCAL_COMPONENT_SETUP_REQUIRED');
   const isolated=fixture(); isolated.plugin.runLocalTranscription = Plugin.prototype.runLocalTranscription;
   const calls=[]; isolated.plugin.getLocalTranscriptionComponentReadiness=()=>({asrStatus:{ready:false},ocrStatus:{ready:false},resolverStatus:{ready:false}});
   isolated.plugin.installLocalAsr=async()=>calls.push('asr'); isolated.plugin.installLocalOcr=async()=>{throw Error('OCR must not run');}; isolated.plugin.ensureLocalDouyinResolver=async()=>{throw Error('resolver must not run');};

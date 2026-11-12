@@ -7,6 +7,7 @@ const { diagnosticRedact, readMatchingCrashSummary } = require('./asr-recovery-u
 const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
 const diagnosticNativeEvidence = require('./diagnostic-native-evidence');
 const xhsDiagnostic = require('./xiaohongshu-diagnostic-utils');
+const { sanitizeFallbackDecision } = require('./fallback-decision');
 
 const MAX_REPORT_TEXT_BYTES = 128 * 1024;
 const MAX_SESSION_BYTES = 768 * 1024;
@@ -626,6 +627,8 @@ function safeError(error, settings = {}) {
   if (extractionDiagnostic) value.extractionDiagnostic = extractionDiagnostic;
   const xiaohongshuDiagnostic = safeXiaohongshuExtractionDiagnostic(source.diagnostic, settings);
   if (xiaohongshuDiagnostic) value.xiaohongshuDiagnostic = xiaohongshuDiagnostic;
+  const cloudFallback = sanitizeFallbackDecision(source.diagnostic && source.diagnostic.cloudFallback);
+  if (cloudFallback) value.cloudFallback = cloudFallback;
   return redactTree(value, settings);
 }
 function matchAsrSession(session, { recordId, attemptId, now }) {
