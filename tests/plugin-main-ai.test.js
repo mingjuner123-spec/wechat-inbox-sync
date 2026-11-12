@@ -8900,12 +8900,70 @@ async function runAsyncHydrationTests() {
         content: 'http://xhslink.cn/o/external-redirect',
         metadata: { url: 'http://xhslink.cn/o/external-redirect' },
       }, '', '', '外站伪造小红书页面'),
-      (error) => error && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE',
+      (error) => error && helpers.isRetryableXiaohongshuContentError(error),
     );
+    const originalLink = 'http://xhslink.cn/o/external-redirect';
+    const redirectRecord = { id: 'xhs-redirect-fixture', type: 'webpage', content: originalLink, metadata: { url: originalLink } };
+    const binding = { token: 'synthetic-only' };
+    externalRedirectPlugin.settings.cloudFallbackEnabled = true;
+    externalRedirectPlugin.evaluateCloudFallbackUserGate = async () => ({ allowed: true });
+    const submissions = [];
+    externalRedirectPlugin.submitCloudFallbackJob = async payload => {
+      submissions.push(payload);
+      return { status: 'queued', jobId: 'cfb_fixture' };
+    };
+    await assert.rejects(externalRedirectPlugin.hydrateWebpageMarkdown(redirectRecord, '', '', '', binding),
+      error => { assert.strictEqual(error.code, 'CLOUD_FALLBACK_QUEUED', `submissions=${submissions.length}; ${error.message}`); return true; });
+    assert.strictEqual(submissions.length, 1);
+    assert.strictEqual(submissions[0].sourceUrl, originalLink, 'send original share link, never the rejected redirect');
+    assert.strictEqual(submissions[0].recordId, redirectRecord.id);
+    const uncertain = Object.assign(new Error('accepted but response lost'), { code: 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN' });
+    externalRedirectPlugin.submitCloudFallbackJob = async () => { throw uncertain; };
+    await assert.rejects(externalRedirectPlugin.hydrateWebpageMarkdown(redirectRecord, '', '', '', binding),
+      error => error === uncertain, 'pending submission keeps its identity for recovery');
+    externalRedirectPlugin.submitCloudFallbackJob = async () => { throw new Error('must not submit'); };
+    externalRedirectPlugin.evaluateCloudFallbackUserGate = async () => ({ allowed: false, message: 'Pro 权益校验未通过' });
+    await assert.rejects(externalRedirectPlugin.hydrateWebpageMarkdown(redirectRecord, '', '', '', binding), error => {
+      assert.strictEqual(error.code, 'XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED');
+      assert.match(error.message, /Pro 权益/);
+      assert.match(require('../obsidian-plugin/wechat-inbox-sync/src/failure-reason-utils').failureMessage(error), /Pro 权益/);
+      const report = require('../obsidian-plugin/wechat-inbox-sync/src/failure-technical-report').buildFailureTechnicalReport({ error });
+      const failure = JSON.parse(report.text).failure;
+      assert.strictEqual(failure.xiaohongshuDiagnostic.request.finalHost, 'attacker.example');
+      assert.strictEqual(failure.xiaohongshuDiagnostic.request.pageType, 'unexpected-host');
+      assert.ok(!report.text.includes('/fake-note'));
+      return true;
+    });
+    externalRedirectPlugin.evaluateCloudFallbackUserGate = async () => { throw new Error('worker must not recurse'); };
+    await assert.rejects(externalRedirectPlugin.hydrateWebpageMarkdown(redirectRecord, '', '', '', binding, { operatorNode: true }),
+      error => error.code === 'XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED');
     assert.strictEqual(externalRedirectTargetProbes, 0);
     assert.strictEqual(externalRedirectPageFetches, 0);
     assert.strictEqual(externalRedirectBrowserRenders, 0);
     assert.strictEqual(externalRedirectImageSaves, 0);
+    const operatorFetches = [];
+    const operatorPlugin = new PluginClass();
+    operatorPlugin.settings = helpers.mergeSettings({});
+    operatorPlugin.renderXiaohongshuPage = async () => { throw Error('unexpected browser'); };
+    https.request = (parsed, opts, callback) => {
+      operatorFetches.push(parsed.href);
+      const req = new EventEmitter();req.setTimeout=()=>req;req.destroy=()=>{};
+      req.end=()=>{
+        const res=new EventEmitter();res.resume=()=>{};
+        res.statusCode=parsed.hostname==='xhslink.cn'?302:200;
+        res.headers=res.statusCode===302?{location:'https://www.xiaohongshu.com/explore/6a4ccf88000000001101d144'}:{};
+        callback(res);
+        if(res.statusCode===200){res.emit('data',Buffer.from(canonicalTargetHtml));res.emit('end');}
+      };return req;
+    };
+    const captured=await operatorPlugin.acquireOperatorXiaohongshuContent(submissions[0].sourceUrl);
+    assert.strictEqual(captured.kind,'content');
+    assert.ok(captured.content.markdown);
+    assert.strictEqual(operatorFetches[0],'https://xhslink.cn/o/external-redirect');
+    assert.ok(operatorFetches.every(url=>helpers.isTrustedXiaohongshuTransportUrl(url)));
+    for(const invalid of ['http://attacker.example/note','http://u:p@xhslink.cn/o/a','http://xhslink.cn:8080/o/a']){
+      await assert.rejects(operatorPlugin.acquireOperatorXiaohongshuContent(invalid),error=>error.code==='OPERATOR_XIAOHONGSHU_SOURCE_INVALID');
+    }
   } finally {
     http.request = originalHttpRequestForExternalRedirect;
     https.request = originalHttpsRequestForExternalRedirect;
@@ -12248,9 +12306,13 @@ async function runXiaohongshuShareOnlyPageRemainsPendingTest() {
     }, false);
     assert.deepStrictEqual(result.written, []);
     assert.strictEqual(result.failed.length, 1);
-    assert.strictEqual(result.failed[0].message, '未取得这条小红书内容。请确认原内容仍可打开；可正常打开时保留任务编号排查提取路径。');
+    assert.match(result.failed[0].message, /未取得这条小红书内容/);
+    assert.match(result.failed[0].message, /Pro/, 'the unmet fallback gate must survive the final user prompt');
     assert.deepStrictEqual(vaultWrites, []);
-    assert.deepStrictEqual(requestCalls, [[
+    assert.ok(requestCalls.every(([route]) => route === '/records?status=pending' || route.startsWith('/entitlements/status?')),
+      'failed extraction may check fallback eligibility, but must not ACK or submit when Pro is unconfirmed');
+    const contentRequests = requestCalls.filter(([route]) => !route.startsWith('/entitlements/status?'));
+    assert.deepStrictEqual(contentRequests, [[
       '/records?status=pending',
       'GET',
       {},

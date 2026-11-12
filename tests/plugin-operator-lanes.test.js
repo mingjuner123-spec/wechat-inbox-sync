@@ -46,6 +46,55 @@ async function providerFailure(mode) {
   } finally { await node.stop(); }
 }
 async function run() {
+  // End-to-end node dispatch: idle ASR never uploads; busy/failed local work
+  // hands off the already captured audio, without acquiring a second job.
+  for (const mode of ['idle', 'busy', 'raced', 'preflight-raced', 'failed', 'empty', 'no-speech', 'no-speech-markers', 'no-speech-linux', 'cancelled']) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator-local-first-'));
+    let issued = false, uploads = 0, asr = 0, availabilityChecks = 0, capturing = false;
+    const completions = [];
+    const plugin = {
+      settings: {}, getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'fixture' }),
+      isOperatorLocalAsrAvailable: () => mode !== 'busy' && !(mode === 'preflight-raced' && capturing && ++availabilityChecks >= 3),
+      acquireOperatorDouyinMediaToTempFile: async () => { capturing=true; const p=path.join(dir,'media.mp4'); fs.writeFileSync(p,'fixture'); return p; },
+      transcodeCloudFallbackMediaToMp3: async p => ({ path:p, owned:false }),
+      runOperatorLocalTranscription: async () => {
+        asr++;
+        if (mode === 'raced') throw Object.assign(Error('busy'), { code:'OPERATOR_ASR_BUSY' });
+        if (mode === 'failed') throw Object.assign(Error('native exit'), { code:'LOCAL_ASR_FAILED' });
+        if (mode === 'cancelled') throw Object.assign(Error('cancelled'), { name:'AbortError' });
+        if (mode === 'empty') return { transcription:'' };
+        if (mode === 'no-speech') throw Object.assign(Error('silence'), { code:'TRANSCRIPTION_NO_SPEECH',noSpeechEvidence:'full-decode-and-vad-no-speech-segments' });
+        if (mode === 'no-speech-markers') throw Object.assign(Error('music'), { code:'TRANSCRIPTION_NO_SPEECH',noSpeechEvidence:'non-speech-markers' });
+        if (mode === 'no-speech-linux') throw Object.assign(Error('silence'), { code:'LOCAL_ASR_NO_SPEECH',noSpeech:true,retryable:false });
+        return { transcription:'fixture transcript', transcriptionSegments:[{ start:0, end:2, text:'fixture transcript' }] };
+      },
+      uploadWorkerMediaForJob: async (p, job) => {
+        assert.ok(fs.existsSync(p)); assert.equal(job.jobId,'local-first'); uploads++;
+        return { completion:{ mediaReady:true } };
+      },
+    };
+    const node=createOperatorMediaNode({ plugin,env,setTimer:()=>1,clearTimer(){},request:async(route,body)=>{
+      if(route.endsWith('/claim') && body.phases[0]==='media' && !issued){issued=true;return {jobs:[{
+        jobId:'local-first',attemptId:'attempt',fencingVersion:1,leaseToken:'fixture',phase:'media',
+        sourceType:'douyin_url',sourceUrl:'https://www.douyin.com/video/123456789',
+      }]};}
+      if(route.endsWith('/complete'))completions.push(body);
+      return {jobs:[]};
+    }});
+    node.start();
+    try {
+      await node.poll();
+      assert.equal(uploads,['busy','raced','preflight-raced','failed','empty'].includes(mode)?1:0,mode);
+      assert.equal(asr,['busy','preflight-raced'].includes(mode)?0:1,mode);
+      if(mode==='idle'){
+        assert.equal(completions.length,1);assert.equal(completions[0].phase,'media');
+        assert.equal(completions[0].backend,'local_whisper_cpp');assert.equal(completions[0].outcome,'succeeded');
+        assert.equal(completions[0].transcriptionSegments.length,1);
+      }
+      if(mode==='cancelled')assert.equal(completions[0].outcome,'failed');
+      if(mode.startsWith('no-speech'))assert.equal(completions[0].outcome,'no_speech');
+    } finally {await node.stop();fs.rmSync(dir,{recursive:true,force:true});}
+  }
   for (const mode of ['heartbeat-fails', 'save-fails', 'abort', 'denied']) await providerFailure(mode);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'operator-lanes-'));
   let releaseAsr, asrStarted = false, uploaded = false, providerFinished = false;
@@ -55,7 +104,11 @@ async function run() {
     settings: { doubaoAsrApiKey: 'fixture-only' },
     getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'fixture' }),
     isOperatorLocalAsrAvailable: () => !asrStarted,
-    acquireOperatorDouyinMediaToTempFile: async () => { const p = path.join(dir, 'input.mp4'); fs.writeFileSync(p, 'fixture'); return p; },
+    acquireOperatorDouyinMediaToTempFile: async () => {
+      for (let n=0;n<50 && !asrStarted;n++) await tick();
+      assert.ok(asrStarted, 'fixture starts existing ASR before media capture returns');
+      const p = path.join(dir, 'input.mp4'); fs.writeFileSync(p, 'fixture'); return p;
+    },
     uploadWorkerMediaForJob: async (_p, job, opts) => { assert.equal(job.phase, 'media'); await opts.beforeComplete(); uploaded = true; return { completion: { mediaReady: true } }; },
     downloadMediaToTempFile: async () => { const p = path.join(dir, 'audio.mp3'); fs.writeFileSync(p, 'fixture'); return p; },
     verifyOperatorControlledMediaFile: async () => {},

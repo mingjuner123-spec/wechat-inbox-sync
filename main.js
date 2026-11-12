@@ -1507,6 +1507,75 @@ var require_operator_doubao_task = __commonJS({
   }
 });
 
+// src/operator-linux-asr.js
+var require_operator_linux_asr = __commonJS({
+  "src/operator-linux-asr.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var crypto2 = require("crypto");
+    var MAX_BYTES = 100 * 1024 * 1024;
+    function configuration(env = process.env, platform = process.platform) {
+      if (platform !== "linux" || env.WECHAT_INBOX_OPERATOR_NODE_ENABLED !== "1") return null;
+      const cfg = {
+        modulePath: env.WECHAT_INBOX_OPERATOR_ASR_MODULE || "",
+        moduleHash: env.WECHAT_INBOX_OPERATOR_ASR_MODULE_SHA256 || "",
+        dependencyHash: env.WECHAT_INBOX_OPERATOR_ASR_DEPENDENCY_SHA256 || "",
+        executablePath: env.CLOUD_TRANSCRIPTION_LOCAL_ASR_EXECUTABLE || "",
+        modelPath: env.CLOUD_TRANSCRIPTION_LOCAL_ASR_MODEL || "",
+        ffmpegPath: env.FFMPEG_PATH || ""
+      };
+      if (!/^[a-f0-9]{64}$/.test(cfg.moduleHash) || !/^[a-f0-9]{64}$/.test(cfg.dependencyHash)) return null;
+      cfg.dependencyPath = path2.join(path2.dirname(cfg.modulePath), "media-security.js");
+      try {
+        for (const p of [cfg.modulePath, cfg.executablePath, cfg.modelPath, cfg.ffmpegPath]) {
+          if (!path2.isAbsolute(p) || !fs2.statSync(p).isFile()) return null;
+        }
+        if (crypto2.createHash("sha256").update(fs2.readFileSync(cfg.modulePath)).digest("hex") !== cfg.moduleHash) return null;
+        if (crypto2.createHash("sha256").update(fs2.readFileSync(cfg.dependencyPath)).digest("hex") !== cfg.dependencyHash) return null;
+      } catch (_) {
+        return null;
+      }
+      return cfg;
+    }
+    __name(configuration, "configuration");
+    function status(env = process.env, platform = process.platform) {
+      const cfg = configuration(env, platform);
+      return { ready: Boolean(cfg), ffmpegPath: cfg ? cfg.ffmpegPath : "" };
+    }
+    __name(status, "status");
+    async function transcribe(inputPath, { signal = null, env = process.env, platform = process.platform, loadModule = require } = {}) {
+      const cfg = configuration(env, platform);
+      if (!cfg) throw Object.assign(Error("运营节点已有 Linux 转写配置未通过校验"), { code: "OPERATOR_ASR_CONFIG_INVALID" });
+      if (signal && signal.aborted) throw Object.assign(Error("Cancelled"), { name: "AbortError" });
+      const stat = await fs2.promises.stat(inputPath);
+      if (!stat.isFile() || stat.size < 1 || stat.size > MAX_BYTES) throw Object.assign(Error("运营节点音频大小无效"), { code: "OPERATOR_MEDIA_SIZE_INVALID" });
+      const buffer = await fs2.promises.readFile(inputPath);
+      if (buffer.length > MAX_BYTES) throw Object.assign(Error("运营节点音频超过限制"), { code: "OPERATOR_MEDIA_SIZE_INVALID" });
+      const adapterModule = loadModule(cfg.modulePath);
+      if (typeof adapterModule.createWhisperCppLocalAsrAdapter !== "function") throw Object.assign(Error("运营节点转写接口不匹配"), { code: "OPERATOR_ASR_CONFIG_INVALID" });
+      const adapter = adapterModule.createWhisperCppLocalAsrAdapter({
+        executablePath: cfg.executablePath,
+        modelPath: cfg.modelPath,
+        ffmpegPath: cfg.ffmpegPath,
+        threads: 1,
+        maxConcurrent: 1,
+        language: "auto",
+        maxMediaBytes: MAX_BYTES
+      });
+      return await adapter.transcribe({
+        buffer,
+        controlledMediaUrl: "https://local-audio.invalid/retained.mp3",
+        artifactSize: buffer.length,
+        artifactSha256: crypto2.createHash("sha256").update(buffer).digest("hex"),
+        signal
+      });
+    }
+    __name(transcribe, "transcribe");
+    module2.exports = { configuration, status, transcribe };
+  }
+});
+
 // src/transcription-setup-utils.js
 var require_transcription_setup_utils = __commonJS({
   "src/transcription-setup-utils.js"(exports2, module2) {
@@ -3094,6 +3163,7 @@ var require_failure_reason_utils = __commonJS({
       DOUYIN_BROWSER_COOLDOWN: ["抖音浏览器处理处于冷却状态。", "请等待冷却结束后再试，避免连续重复提交；这不等于未登录。"],
       DOUYIN_NO_MEDIA: ["未获得与这条抖音内容匹配的媒体。", "请确认原内容仍可打开；若可以，保留任务编号排查提取路径，不要仅因此重装转写组件。"],
       XIAOHONGSHU_CONTENT_UNAVAILABLE: ["未取得这条小红书内容。", "请确认原内容仍可打开；可正常打开时保留任务编号排查提取路径。"],
+      XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED: ["小红书短链接跳到了非小红书网站，已停止访问该地址。", "这不代表原笔记已删除；请保留任务编号排查，勿反复上传。"],
       WECHAT_ARTICLE_BODY_MISSING: ["未取得公众号文章正文。", "请确认原文可打开，并在插件中检查公众号访问验证；仍失败时保留任务编号。"],
       CHANNELS_OPERATION_FAILED: ["视频号处理操作未完成。", "请保留任务编号排查具体操作环节，不要反复重新提交。"],
       CLOUD_FALLBACK_FAILED: ["本次云端兜底处理失败，尚未交付结果。", "请保留任务编号查看后续处理；无需因此重装自己电脑的转写组件。"],
@@ -3152,7 +3222,8 @@ var require_failure_reason_utils = __commonJS({
     __name(failureGuidance, "failureGuidance");
     function failureMessage2(error) {
       const guidance = failureGuidance(selectFailureDetail2(error));
-      return guidance ? `${guidance.reason}${guidance.nextStep}` : "";
+      const gateMessage = error && typeof error.cloudFallbackGateMessage === "string" ? error.cloudFallbackGateMessage : "";
+      return guidance ? `${guidance.reason}${gateMessage || guidance.nextStep}` : "";
     }
     __name(failureMessage2, "failureMessage");
     function reportedFailureDetail(event = {}) {
@@ -16204,25 +16275,29 @@ var require_operator_media_node = __commonJS({
       const complete = /* @__PURE__ */ __name(async (job, body) => {
         return await callApi("/transcriptions/fallback/worker/complete", { ...baseForJob(job), ...body }, { signal: null });
       }, "complete");
+      const handoffCapturedMedia = /* @__PURE__ */ __name(async (job, inputPath) => {
+        activeJob.stage = "acquiring";
+        activeJob.progress = 55;
+        const uploaded = await plugin.uploadWorkerMediaForJob(inputPath, job, {
+          signal: activeController.signal,
+          workerConfig: config,
+          request: callApi,
+          beforeComplete: /* @__PURE__ */ __name(async () => {
+            await heartbeat(job, "acquiring", 90);
+          }, "beforeComplete")
+        });
+        stopHeartbeat();
+        return uploaded.completion;
+      }, "handoffCapturedMedia");
       const transcribeCapturedMedia = /* @__PURE__ */ __name(async (job, inputPath) => {
-        if (getCapabilities().includes("media_handoff")) {
-          activeJob.stage = "acquiring";
-          activeJob.progress = 55;
-          const uploaded = await plugin.uploadWorkerMediaForJob(inputPath, job, {
-            signal: activeController.signal,
-            workerConfig: config,
-            request: callApi,
-            beforeComplete: /* @__PURE__ */ __name(async () => {
-              await heartbeat(job, "acquiring", 90);
-            }, "beforeComplete")
-          });
-          stopHeartbeat();
-          return uploaded.completion;
+        if (getCapabilities().includes("media_handoff") && !getCapabilities().includes("local_asr")) {
+          return await handoffCapturedMedia(job, inputPath);
         }
         if (!plugin || typeof plugin.transcodeCloudFallbackMediaToMp3 !== "function" || typeof plugin.runOperatorLocalTranscription !== "function" && typeof plugin.runLocalTranscription !== "function") {
           throw nodeError("OPERATOR_ASR_HANDLER_UNAVAILABLE", "运营节点本地转写能力未就绪", { retryable: true });
         }
         if (typeof plugin.isOperatorLocalAsrAvailable === "function" && !plugin.isOperatorLocalAsrAvailable()) {
+          if (getCapabilities().includes("media_handoff")) return await handoffCapturedMedia(job, inputPath);
           throw nodeError("OPERATOR_ASR_BUSY", "运营节点本地转写正忙", { retryable: true });
         }
         const prepared = await plugin.transcodeCloudFallbackMediaToMp3(inputPath, { signal: activeController.signal });
@@ -16232,23 +16307,37 @@ var require_operator_media_node = __commonJS({
           activeJob.stage = "acquiring";
           activeJob.progress = 55;
           const runLocalAsr = typeof plugin.runOperatorLocalTranscription === "function" ? plugin.runOperatorLocalTranscription.bind(plugin) : plugin.runLocalTranscription.bind(plugin);
-          const result = await runLocalAsr(asrPath, {
-            inputPath: asrPath,
-            signal: activeController.signal,
-            includeQualityDetails: true,
-            recordId: "",
-            sourceUrl: String(job && job.sourceUrl || ""),
-            operatorNode: true
-          });
+          let result;
+          try {
+            result = await runLocalAsr(asrPath, {
+              inputPath: asrPath,
+              signal: activeController.signal,
+              includeQualityDetails: true,
+              recordId: "",
+              sourceUrl: String(job && job.sourceUrl || ""),
+              operatorNode: true
+            });
+          } catch (error) {
+            if (error && (error.code === "TRANSCRIPTION_NO_SPEECH" && ["full-decode-and-vad-no-speech-segments", "non-speech-markers"].includes(error.noSpeechEvidence) || error.code === "LOCAL_ASR_NO_SPEECH" && error.noSpeech === true && error.retryable === false)) {
+              stopHeartbeat();
+              return await complete(job, { phase: "media", backend: "local_whisper_cpp", outcome: "no_speech" });
+            }
+            if (error && error.name !== "AbortError" && !activeController.signal.aborted && getCapabilities().includes("media_handoff")) return await handoffCapturedMedia(job, asrPath);
+            throw error;
+          }
           const transcription = String(result && typeof result === "object" ? result.transcription : result || "").trim();
-          if (!transcription) throw nodeError("OPERATOR_ASR_EMPTY", "运营节点本地转写结果为空", { retryable: true });
+          if (!transcription) {
+            if (getCapabilities().includes("media_handoff") && !activeController.signal.aborted) return await handoffCapturedMedia(job, asrPath);
+            throw nodeError("OPERATOR_ASR_EMPTY", "运营节点本地转写结果为空", { retryable: true });
+          }
           activeJob.progress = 100;
           stopHeartbeat();
           return await complete(job, {
             phase: "media",
             backend: "local_whisper_cpp",
             outcome: "succeeded",
-            transcription
+            transcription,
+            ...Array.isArray(result && result.transcriptionSegments) && result.transcriptionSegments.length ? { transcriptionSegments: result.transcriptionSegments } : {}
           });
         } finally {
           if (prepared && prepared.owned === true && asrPath !== inputPath) {
@@ -16292,7 +16381,7 @@ var require_operator_media_node = __commonJS({
           capabilities.push(DOUBAO_CAPABILITY);
         }
         try {
-          if (!rejectedCapabilities.has("local_asr") && plugin && typeof plugin.getLocalAsrInstallStatus === "function" && plugin.getLocalAsrInstallStatus().ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
+          if (!rejectedCapabilities.has("local_asr") && plugin && typeof plugin.getLocalAsrInstallStatus === "function" && (typeof plugin.getOperatorLocalAsrInstallStatus === "function" ? plugin.getOperatorLocalAsrInstallStatus() : plugin.getLocalAsrInstallStatus()).ready === true && (typeof plugin.isOperatorLocalAsrAvailable !== "function" || plugin.isOperatorLocalAsrAvailable())) capabilities.push("local_asr");
         } catch (_) {
         }
         return capabilities;
@@ -23567,6 +23656,7 @@ var require_transcription_note_title_utils = __commonJS({
 
 // src/main.js
 var { runOperatorDoubaoTask, parseOperatorDoubaoState } = require_operator_doubao_task();
+var operatorLinuxAsr = require_operator_linux_asr();
 var { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require_readable_content_utils();
 var { membershipGuidance, setupError, isSetupRequired, setupSummary } = require_transcription_setup_utils();
 var { getXiaohongshuRuntimeSnapshotExpression } = require_xiaohongshu_runtime_snapshot();
@@ -23947,7 +24037,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.5";
+var PLUGIN_RUNTIME_VERSION = "1.4.6";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -26253,7 +26343,7 @@ function createRetryableXiaohongshuContentError(diagnostic = {}) {
 }
 __name(createRetryableXiaohongshuContentError, "createRetryableXiaohongshuContentError");
 function isRetryableXiaohongshuContentError(error) {
-  return Boolean(error && error.code === "XIAOHONGSHU_CONTENT_UNAVAILABLE");
+  return Boolean(error && ["XIAOHONGSHU_CONTENT_UNAVAILABLE", "XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED"].includes(error.code));
 }
 __name(isRetryableXiaohongshuContentError, "isRetryableXiaohongshuContentError");
 function createRetryableWechatArticleContentError(diagnostic = {}) {
@@ -27045,6 +27135,8 @@ function createAbortError(message = "当前转写已停止") {
 }
 __name(createAbortError, "createAbortError");
 function isAbortError(error) {
+  if (error && error.name === "AbortError") return true;
+  if (error && ["XIAOHONGSHU_CONTENT_UNAVAILABLE", "XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED", "XIAOHONGSHU_RATE_LIMITED", "WEBPAGE_REDIRECT_BLOCKED"].includes(error.code)) return false;
   return error && (error.name === "AbortError" || /aborted|abort|已停止|用户已停止/i.test(error.message || ""));
 }
 __name(isAbortError, "isAbortError");
@@ -28169,7 +28261,7 @@ function requestPublicWebpageText(url, options = {}) {
           return;
         }
         if (typeof options.allowedRedirectUrl === "function" && options.allowedRedirectUrl(redirectUrl, source) !== true) {
-          reject(new Error("网页跳转到了不受信任的地址，已停止抓取"));
+          reject(Object.assign(new Error("网页跳转到了不受信任的地址，已停止抓取"), { code: "WEBPAGE_REDIRECT_BLOCKED", retryable: true }));
           return;
         }
         requestPublicWebpageText(redirectUrl, {
@@ -42600,7 +42692,7 @@ ${installation}`, "sync-install-diagnostic.txt");
         "云端兜底任务已提交，正在由云端电脑抓取小红书内容"
       );
     } catch (error) {
-      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
+      if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
       return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
     }
   }
@@ -44584,7 +44676,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     };
   }
   async acquireOperatorXiaohongshuContent(sourceUrl, { signal = null } = {}) {
-    const pageUrl = String(sourceUrl || "").trim();
+    let pageUrl = String(sourceUrl || "").trim();
+    try {
+      const original = new URL(pageUrl);
+      if (original.protocol === "http:" && !original.username && !original.password && !original.port) {
+        original.protocol = "https:";
+        if (isTrustedXiaohongshuTransportUrl(original.href)) pageUrl = original.href;
+      }
+    } catch (_) {
+    }
     if (!isTrustedXiaohongshuTransportUrl(pageUrl)) {
       const error = new Error("运营节点只接受官方小红书 HTTPS 分享链接");
       error.code = "OPERATOR_XIAOHONGSHU_SOURCE_INVALID";
@@ -44602,9 +44702,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       finalUrl = String(response && response.url || pageUrl).trim();
     } catch (error) {
       if (isAbortError(error) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
+      if (error && error.code === "WEBPAGE_REDIRECT_BLOCKED") throw error;
       html = "";
     }
-    if (!isTrustedXiaohongshuCookieUrl(finalUrl)) {
+    if (!isTrustedXiaohongshuTransportUrl(finalUrl)) {
       const error = new Error("小红书抓取的最终地址无法确认为官方 HTTPS 内容页");
       error.code = "OPERATOR_XIAOHONGSHU_SOURCE_INVALID";
       throw error;
@@ -44615,7 +44716,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       error.linkExpired = true;
       throw error;
     }
-    let extracted = html ? extractXiaohongshuMarkdownFromHtml(html, finalUrl, "", { includeComments: false }) : null;
+    let extracted = html && isTrustedXiaohongshuCookieUrl(finalUrl) ? extractXiaohongshuMarkdownFromHtml(html, finalUrl, "", { includeComments: false }) : null;
     if ((!extracted || extracted.xiaohongshuPrimaryNoteMatched !== true) && typeof this.renderXiaohongshuPage === "function") {
       throwIfAborted(signal);
       try {
@@ -44811,6 +44912,10 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   isOperatorLocalAsrAvailable() {
     return this.operatorLocalAsrActive !== true && !this.localAsrMutexOwner && !this.currentTranscriptionAbortController && !this.currentTranscriptionProcess && !this.currentTranscriptionContext;
   }
+  getOperatorLocalAsrInstallStatus() {
+    const nativeStatus = operatorLinuxAsr.status();
+    return nativeStatus.ready ? nativeStatus : this.getLocalAsrInstallStatus();
+  }
   async runOperatorLocalTranscription(inputPath, options = {}) {
     if (!this.isOperatorLocalAsrAvailable()) {
       const error = new Error("负责人本地转写正忙，运营节点暂不领取本地转写任务");
@@ -44822,6 +44927,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     this.localAsrMutexOwner = mutexToken;
     this.operatorLocalAsrActive = true;
     try {
+      if (operatorLinuxAsr.status().ready) return await operatorLinuxAsr.transcribe(inputPath, { signal: options.signal });
       return await this.runLocalTranscription(inputPath, {
         ...options,
         inputPath,
@@ -48759,15 +48865,17 @@ ${finalized.markdown}
         }
         if (isXiaohongshuUrl(url) && !isXiaohongshuUrl(resolvedUrl)) {
           const externalRedirectError = new Error("小红书短链接跳转到了非官方网站，已停止请求");
-          externalRedirectError.code = "XIAOHONGSHU_CONTENT_UNAVAILABLE";
+          externalRedirectError.code = "XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED";
           try {
             const redirected = new URL(resolvedUrl);
             const original = new URL(url);
             externalRedirectError.diagnostic = {
-              source: "xiaohongshu-redirect",
-              originalHost: original.hostname.slice(0, 80),
-              resolvedHost: redirected.hostname.slice(0, 80),
-              resolvedScheme: redirected.protocol
+              request: {
+                sourceHost: original.hostname.slice(0, 80),
+                finalHost: redirected.hostname.slice(0, 80),
+                redirected: true,
+                pageType: "unexpected-host"
+              }
             };
           } catch (_error) {
           }
@@ -50567,7 +50675,25 @@ ${finalized.markdown}
         if (rateLimitedFallback && rateLimitedFallback.record) return rateLimitedFallback.record;
         throw error;
       }
-      if (error && error.code === "CLOUD_FALLBACK_QUEUED") throw error;
+      if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
+      if (isXiaohongshuUrl(url) && isRetryableXiaohongshuContentError(error)) {
+        if (options.operatorNode !== true) {
+          const fallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+            url,
+            binding,
+            signal,
+            title: title || metadata.title || "",
+            localError: String(error.message || "小红书内容提取失败"),
+            linkDiagnostic: error.diagnostic
+          });
+          if (fallback && fallback.record) return fallback.record;
+          if (fallback && fallback.gateMessage) {
+            error.cloudFallbackGateMessage = redactDiagnosticText(fallback.gateMessage);
+            error.message += `；${error.cloudFallbackGateMessage}`;
+          }
+        }
+        throw error;
+      }
       if (!isAbortError(error) && isWechatArticleUrl(url) && (isRetryableWechatArticleContentError(error) || /环境异常|安全验证|访问频繁|操作频繁/.test(String(error.message || "")))) {
         const wechatFallback = await this.maybeSubmitWechatArticleCloudFallback(record, {
           url,

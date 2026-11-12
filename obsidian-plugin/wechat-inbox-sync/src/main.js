@@ -1,4 +1,5 @@
 const { runOperatorDoubaoTask, parseOperatorDoubaoState } = require('./operator-doubao-task');
+const operatorLinuxAsr = require('./operator-linux-asr');
 const { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require('./readable-content-utils');
 const { membershipGuidance, setupError, isSetupRequired, setupSummary } = require('./transcription-setup-utils');
 const { getXiaohongshuRuntimeSnapshotExpression } = require('./xiaohongshu-runtime-snapshot');
@@ -392,7 +393,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.5';
+const PLUGIN_RUNTIME_VERSION = '1.4.6';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3263,7 +3264,7 @@ function createRetryableXiaohongshuContentError(diagnostic = {}) {
 }
 
 function isRetryableXiaohongshuContentError(error) {
-  return Boolean(error && error.code === 'XIAOHONGSHU_CONTENT_UNAVAILABLE');
+  return Boolean(error && ['XIAOHONGSHU_CONTENT_UNAVAILABLE', 'XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED'].includes(error.code));
 }
 
 function createRetryableWechatArticleContentError(diagnostic = {}) {
@@ -4224,6 +4225,10 @@ function createAbortError(message = '当前转写已停止') {
 }
 
 function isAbortError(error) {
+  if (error && error.name === 'AbortError') return true;
+  // Platform/safety rejections can say "已停止请求". They are recoverable
+  // failures, not a user cancellation; preserve their machine-code meaning.
+  if (error && ['XIAOHONGSHU_CONTENT_UNAVAILABLE', 'XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED', 'XIAOHONGSHU_RATE_LIMITED', 'WEBPAGE_REDIRECT_BLOCKED'].includes(error.code)) return false;
   return error && (error.name === 'AbortError' || /aborted|abort|已停止|用户已停止/i.test(error.message || ''));
 }
 
@@ -5496,7 +5501,7 @@ function requestPublicWebpageText(url, options = {}) {
         }
         if (typeof options.allowedRedirectUrl === 'function'
           && options.allowedRedirectUrl(redirectUrl, source) !== true) {
-          reject(new Error('网页跳转到了不受信任的地址，已停止抓取'));
+          reject(Object.assign(new Error('网页跳转到了不受信任的地址，已停止抓取'), { code: 'WEBPAGE_REDIRECT_BLOCKED', retryable: true }));
           return;
         }
         requestPublicWebpageText(redirectUrl, {
@@ -21580,7 +21585,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         '云端兜底任务已提交，正在由云端电脑抓取小红书内容',
       );
     } catch (error) {
-      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
+      if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
       return { gateMessage: `云端兜底未提交：${error && error.message || error}` };
     }
   }
@@ -23597,7 +23602,17 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async acquireOperatorXiaohongshuContent(sourceUrl, { signal = null } = {}) {
-    const pageUrl = String(sourceUrl || '').trim();
+    let pageUrl = String(sourceUrl || '').trim();
+    // Sharing apps still emit HTTP shortlinks. Upgrade only an original
+    // official URL without credentials or non-default ports; never upgrade or
+    // trust the external destination rejected on the user's computer.
+    try {
+      const original = new URL(pageUrl);
+      if (original.protocol === 'http:' && !original.username && !original.password && !original.port) {
+        original.protocol = 'https:';
+        if (isTrustedXiaohongshuTransportUrl(original.href)) pageUrl = original.href;
+      }
+    } catch (_) { /* Fail closed in the transport allowlist below. */ }
     if (!isTrustedXiaohongshuTransportUrl(pageUrl)) {
       const error = new Error('运营节点只接受官方小红书 HTTPS 分享链接');
       error.code = 'OPERATOR_XIAOHONGSHU_SOURCE_INVALID';
@@ -23617,9 +23632,10 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isAbortError(error) || signal?.aborted) throw createAbortError();
       // A logged-in hidden browser on this node is the next best attempt; a
       // node without one reports the transport failure below.
+      if (error && error.code === 'WEBPAGE_REDIRECT_BLOCKED') throw error;
       html = '';
     }
-    if (!isTrustedXiaohongshuCookieUrl(finalUrl)) {
+    if (!isTrustedXiaohongshuTransportUrl(finalUrl)) {
       const error = new Error('小红书抓取的最终地址无法确认为官方 HTTPS 内容页');
       error.code = 'OPERATOR_XIAOHONGSHU_SOURCE_INVALID';
       throw error;
@@ -23630,7 +23646,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       error.linkExpired = true;
       throw error;
     }
-    let extracted = html
+    let extracted = html && isTrustedXiaohongshuCookieUrl(finalUrl)
       ? extractXiaohongshuMarkdownFromHtml(html, finalUrl, '', { includeComments: false })
       : null;
     if ((!extracted || extracted.xiaohongshuPrimaryNoteMatched !== true)
@@ -23841,6 +23857,11 @@ class WechatObsidianInboxPlugin extends Plugin {
       && !this.currentTranscriptionContext;
   }
 
+  getOperatorLocalAsrInstallStatus() {
+    const nativeStatus = operatorLinuxAsr.status();
+    return nativeStatus.ready ? nativeStatus : this.getLocalAsrInstallStatus();
+  }
+
   async runOperatorLocalTranscription(inputPath, options = {}) {
     if (!this.isOperatorLocalAsrAvailable()) {
       const error = new Error('负责人本地转写正忙，运营节点暂不领取本地转写任务');
@@ -23852,6 +23873,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     this.localAsrMutexOwner = mutexToken;
     this.operatorLocalAsrActive = true;
     try {
+      if (operatorLinuxAsr.status().ready) return await operatorLinuxAsr.transcribe(inputPath, { signal: options.signal });
       return await this.runLocalTranscription(inputPath, {
         ...options,
         inputPath,
@@ -28232,17 +28254,19 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         if (isXiaohongshuUrl(url) && !isXiaohongshuUrl(resolvedUrl)) {
           const externalRedirectError = new Error('小红书短链接跳转到了非官方网站，已停止请求');
-          externalRedirectError.code = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
+          externalRedirectError.code = 'XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED';
           // The rejection is only useful if the next report says where the
           // short link actually landed; host and scheme are safe to keep.
           try {
             const redirected = new URL(resolvedUrl);
             const original = new URL(url);
             externalRedirectError.diagnostic = {
-              source: 'xiaohongshu-redirect',
-              originalHost: original.hostname.slice(0, 80),
-              resolvedHost: redirected.hostname.slice(0, 80),
-              resolvedScheme: redirected.protocol,
+              request: {
+                sourceHost: original.hostname.slice(0, 80),
+                finalHost: redirected.hostname.slice(0, 80),
+                redirected: true,
+                pageType: 'unexpected-host',
+              },
             };
           } catch (_error) { /* unparsable redirect keeps the plain error */ }
           throw externalRedirectError;
@@ -30285,7 +30309,25 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (rateLimitedFallback && rateLimitedFallback.record) return rateLimitedFallback.record;
         throw error;
       }
-      if (error && error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
+      if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
+      // Content extraction failure must reach the handoff before the generic
+      // retryable-error exit. Only the original approved URL is sent; the
+      // rejected redirect is never fetched locally or submitted to a worker.
+      if (isXiaohongshuUrl(url) && isRetryableXiaohongshuContentError(error)) {
+        if (options.operatorNode !== true) {
+          const fallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
+            url, binding, signal, title: title || metadata.title || '',
+            localError: String(error.message || '小红书内容提取失败'),
+            linkDiagnostic: error.diagnostic,
+          });
+          if (fallback && fallback.record) return fallback.record;
+          if (fallback && fallback.gateMessage) {
+            error.cloudFallbackGateMessage = redactDiagnosticText(fallback.gateMessage);
+            error.message += `；${error.cloudFallbackGateMessage}`;
+          }
+        }
+        throw error;
+      }
       // A WeChat captcha is this network's refusal. The operator node fetches
       // the same article with its own network, so try the cloud before handing
       // the user a failure they cannot act on.
