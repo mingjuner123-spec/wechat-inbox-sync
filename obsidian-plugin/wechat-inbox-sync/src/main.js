@@ -18,6 +18,7 @@ const {
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 const bilibiliDiagnostic = require('./bilibili-diagnostic-utils');
 const { sanitizeFallbackDecision, attachFallbackDecision } = require('./fallback-decision');
+const { fallbackDeliveryId, hasFallbackDeliveryMarker, markFallbackDelivery } = require('./fallback-delivery-marker');
 function retainedSyncFailureDiagnostic(value, settings, preserveActiveDiagnostic = false) {
   const specific = channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
   const cloudFallback = sanitizeFallbackDecision(value && value.cloudFallback);
@@ -397,7 +398,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.7';
+const PLUGIN_RUNTIME_VERSION = '1.4.8';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -19472,6 +19473,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       payload = await this.requestJson('/transcriptions/fallback/jobs', 'POST', requestBody, binding);
     } catch (error) {
+      if (submission && isCloudFallbackSubmissionUncertain(error)) {
+        error.code = 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN';
+        error.message = '云端兜底提交结果待确认，插件会继续查询，请勿重复上传。';
+        throw error;
+      }
       if (submission && !isCloudFallbackSubmissionUncertain(error)) {
         await this.clearCloudFallbackSubmission({
           bindingFingerprint,
@@ -19535,6 +19541,11 @@ class WechatObsidianInboxPlugin extends Plugin {
         });
       }
       throw createAbortError();
+    }
+    // Even an immediately reusable result must pass the same scoped claim,
+    // write, receipt and ACK path as a result completed on a later poll.
+    if (job.status === 'succeeded') {
+      throw createCloudFallbackPendingError(job, '', '云端结果已就绪，正在领取并保存到 Obsidian');
     }
     return job;
   }
@@ -23921,6 +23932,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       });
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
+      if (error.code === 'CLOUD_FALLBACK_QUEUED') throw error;
       // A durable pending source must never be replaced by the original URL
       // after any failed replay; the server may already have accepted the
       // same idempotency key.
@@ -26387,6 +26399,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         : { binding })
       : null;
     if (!candidates.length) {
+      let fallbackDecision = null;
       if (fallbackGate && fallbackGate.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
@@ -26428,7 +26441,8 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           throw createCloudFallbackPendingError(job, noMediaError);
         } catch (cloudError) {
-          if (cloudError && cloudError.code === 'CLOUD_FALLBACK_QUEUED') throw cloudError;
+          if (cloudError && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(cloudError.code)) throw cloudError;
+          fallbackDecision = sanitizeFallbackDecision({ status: 'not_submitted', code: 'CLOUD_FALLBACK_SUBMIT_FAILED' });
           // Keep the old failed-record behavior when the optional endpoint is
           // unavailable. The record remains retryable and no success is shown.
           noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`]
@@ -26437,6 +26451,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       } else if (fallbackGate) {
         noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join('；');
+        fallbackDecision = sanitizeFallbackDecision({ status: 'not_submitted', code: fallbackGate.code });
+      } else if (fallbackSourceType) {
+        fallbackDecision = sanitizeFallbackDecision({ status: 'not_submitted', code: this.settings.cloudFallbackEnabled !== true ? 'CLOUD_FALLBACK_DISABLED' : 'CLOUD_FALLBACK_BINDING_REQUIRED' });
       }
       return {
         ...record,
@@ -26453,7 +26470,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           markdown,
           trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
-          mediaResolutionDiagnostic: getMediaResolutionDiagnostic('no-media-candidate'),
+          mediaResolutionDiagnostic: { ...(getMediaResolutionDiagnostic('no-media-candidate') || {}), ...(fallbackDecision ? { cloudFallback: fallbackDecision } : {}) },
         }),
       };
     }
@@ -26656,16 +26673,18 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           throw createCloudFallbackPendingError(job, error.message || String(error));
         } catch (cloudError) {
-          if (cloudError && cloudError.code === 'CLOUD_FALLBACK_QUEUED') throw cloudError;
-          finalError = new Error([
-            error.message || String(error),
-            `云端兜底未提交：${cloudError && cloudError.message || cloudError}`,
-          ].filter(Boolean).join('；'));
-          finalError.code = error.code;
+          if (cloudError && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(cloudError.code)) throw cloudError;
+          finalError = attachFallbackDecision(error, {
+            gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED',
+            gateMessage: `云端兜底未提交：${cloudError && cloudError.message || cloudError}`,
+          });
         }
       } else if (fallbackGate) {
-        finalError = new Error([error.message || String(error), fallbackGate.message].filter(Boolean).join('；'));
-        finalError.code = error.code;
+        finalError = attachFallbackDecision(error, { gateCode: fallbackGate.code, gateMessage: fallbackGate.message });
+      } else if (fallbackSourceType && !isSetupRequired(error) && error.code !== 'TRANSCRIPTION_NO_SPEECH') {
+        finalError = attachFallbackDecision(error, this.settings.cloudFallbackEnabled !== true
+          ? { gateCode: 'CLOUD_FALLBACK_DISABLED', gateMessage: '云端兜底未开启，请在插件设置中开启。' }
+          : { gateCode: 'CLOUD_FALLBACK_BINDING_REQUIRED', gateMessage: '尚未绑定，请先完成插件绑定。' });
       }
       const recoveryCandidate = platform === '视频号'
         && finalError.code === 'TRANSCRIPTION_LOW_QUALITY'
@@ -26701,6 +26720,12 @@ class WechatObsidianInboxPlugin extends Plugin {
         sourceTitle: normalizedSourceTitle,
         mediaResolutionDiagnostic: getMediaResolutionDiagnostic('transcription-failed'),
       });
+      if (finalError.diagnostic && finalError.diagnostic.cloudFallback) {
+        failureMetadata.mediaResolutionDiagnostic = {
+          ...(failureMetadata.mediaResolutionDiagnostic || {}),
+          cloudFallback: finalError.diagnostic.cloudFallback,
+        };
+      }
       const qualityRejectedChannels = platform === '视频号' && error.code === 'TRANSCRIPTION_LOW_QUALITY';
       return {
         ...record,
@@ -28158,6 +28183,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             throw loginError;
           }
           const message = douyinDiagnostic.failureMessage('DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED');
+          let noteFallbackDecision = null;
           // Logged in, but this page still served no readable body. The
           // operator node holds its own session, so hand it the note URL and
           // let it try; the user keeps the "login first" precondition either
@@ -28184,10 +28210,16 @@ class WechatObsidianInboxPlugin extends Plugin {
                 });
                 throw createCloudFallbackPendingError(noteJob, message);
               } catch (noteSubmitError) {
-                if (noteSubmitError && noteSubmitError.code === 'CLOUD_FALLBACK_QUEUED') throw noteSubmitError;
-                // A submit failure keeps the link-only note below.
+                if (noteSubmitError && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(noteSubmitError.code)) throw noteSubmitError;
+                noteFallbackDecision = { gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED', gateMessage: '云端兜底暂未接收任务，请保持插件联网后重试。' };
               }
+            } else {
+              noteFallbackDecision = { gateCode: noteFallbackGate.code, gateMessage: noteFallbackGate.message };
             }
+          } else {
+            noteFallbackDecision = this.settings.cloudFallbackEnabled !== true
+              ? { gateCode: 'CLOUD_FALLBACK_DISABLED', gateMessage: '云端兜底未开启，请在插件设置中开启。' }
+              : { gateCode: 'CLOUD_FALLBACK_BINDING_REQUIRED', gateMessage: '尚未绑定，请先完成插件绑定。' };
           }
           const failureDiagnostic = douyinDiagnostic.sanitize({
             attemptId: douyinAttemptId,
@@ -28209,23 +28241,12 @@ class WechatObsidianInboxPlugin extends Plugin {
             }],
           });
           douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), failureDiagnostic);
-          // The page carried no readable content, so the note keeps its link
-          // and the reason. It is still a saved note - never a transcription
-          // failure the user is asked to retry.
-          return {
-            ...record,
-            metadata: {
-              ...metadata,
-              title: metadata.title || title || '抖音笔记',
-              url,
-              platform: '抖音',
-              contentCategory: '图文',
-              markdown: ['抖音图文笔记：页面未返回可读正文，已保存链接。', '', `原始链接：${url}`, '', `> ${message}`].join('\n'),
-              conversionStatus: 'success',
-              conversionNote: '抖音图文笔记已保存链接（正文未获取）',
-              mediaResolutionDiagnostic: failureDiagnostic,
-            },
-          };
+          // A link placeholder does not fulfill the graphic-note request.
+          // Keep failure evidence and the handoff reason instead of reporting
+          // a successful write that prevents future delivery recovery.
+          throw attachFallbackDecision(Object.assign(new Error(message), {
+            code: 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED', diagnostic: failureDiagnostic,
+          }), noteFallbackDecision);
         }
         const targetIdentityUrl = isXiaohongshuUrl(url)
           ? resolveXiaohongshuIdentityUrl([redirectedUrl, url])
@@ -29297,6 +29318,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           });
         }
         if (isVideoIntent && isDouyinRecord) {
+          let fallbackDecision = null;
           let noMediaError = (douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === 'DOUYIN_NO_MEDIA'
               ? '插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。'
             : douyinDiagnostic.failureMessage(douyinFailureCode));
@@ -29313,6 +29335,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             });
             if (!fallbackGate.allowed) {
               noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join('；');
+              fallbackDecision = sanitizeFallbackDecision({ status: 'not_submitted', code: fallbackGate.code });
             } else {
             try {
               const job = await this.submitCloudFallbackJob({
@@ -29342,11 +29365,13 @@ class WechatObsidianInboxPlugin extends Plugin {
               }
               throw createCloudFallbackPendingError(job, noMediaError);
             } catch (cloudError) {
-              if (cloudError && cloudError.code === 'CLOUD_FALLBACK_QUEUED') throw cloudError;
-              // Preserve the existing link-saved failure state if the new
-              // optional endpoint is not available yet.
+              if (cloudError && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(cloudError.code)) throw cloudError;
+              fallbackDecision = sanitizeFallbackDecision({ status: 'not_submitted', code: 'CLOUD_FALLBACK_SUBMIT_FAILED' });
+              noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`].join('；');
             }
             }
+          } else {
+            fallbackDecision = sanitizeFallbackDecision({ status: 'not_submitted', code: this.settings.cloudFallbackEnabled !== true ? 'CLOUD_FALLBACK_DISABLED' : 'CLOUD_FALLBACK_BINDING_REQUIRED' });
           }
           return {
             ...record,
@@ -29361,7 +29386,7 @@ class WechatObsidianInboxPlugin extends Plugin {
               transcriptionError: noMediaError,
               transcriptionSource: 'video',
               conversionStatus: 'link_saved',
-              mediaResolutionDiagnostic: douyinResolutionDiagnostic,
+              mediaResolutionDiagnostic: { ...(douyinResolutionDiagnostic || {}), ...(fallbackDecision ? { cloudFallback: fallbackDecision } : {}) },
             },
           };
         }
@@ -30312,6 +30337,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
       if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
       // Content extraction failure must reach the handoff before the generic
+      if (error && error.code === 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED') throw error;
       // retryable-error exit. Only the original approved URL is sent; the
       // rejected redirect is never fetched locally or submitted to a worker.
       if (isXiaohongshuUrl(url) && isRetryableXiaohongshuContentError(error)) {
@@ -30650,6 +30676,10 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
         const matchesRecordId = hasRecordIdInFrontmatter(markdown, normalizedRecordId);
         if (matchesRecordId) {
+          if (fallbackDeliveryId(record)) {
+            if (hasFallbackDeliveryMarker(markdown, record)) return file.path || filePath;
+            continue;
+          }
           if (!isExistingLocalNoteDeliverable(record, markdown)) {
             continue;
           }
@@ -30822,7 +30852,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const retriedMetadata = recordForMarkdown.metadata || {};
       if (retriedMetadata.transcriptionStatus === 'success' && String(retriedMetadata.transcription || '').trim()) {
         throwIfAborted(signal);
-        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNote(current, formatTranscriptForReading(retriedMetadata.transcription)));
+        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => markFallbackDelivery(completeQualityPartialNote(current, formatTranscriptForReading(retriedMetadata.transcription)), record));
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
       if (isRecognizedNoSpeechMetadata(retriedMetadata)) {
@@ -30930,7 +30960,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     // file through the title sequencer, so nothing is ever overwritten.
     if (recordUrl && typeof adapter.exists === 'function' && await adapter.exists(filePath)) {
       const existingSource = await readNoteSourceIdentity(adapter, filePath);
-      if (existingSource && existingSource === normalizeNoteSourceIdentity(recordUrl)) {
+      const sameFallbackDelivery = !fallbackDeliveryId(record) || hasFallbackDeliveryMarker(await adapter.read(filePath), record);
+      if (existingSource && existingSource === normalizeNoteSourceIdentity(recordUrl) && sameFallbackDelivery) {
         return {
           recordId: getRecordId(record),
           filePath,
@@ -30956,6 +30987,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     }
     if (!qualityRejectedPartial) markdown = await this.appendAdvancedAi(markdown, recordForMarkdown, { signal });
+    if (!qualityRejectedPartial) markdown = markFallbackDelivery(markdown, record);
     const temporaryFilePath = normalizeVaultPath(
       `${targetNoteDir}/.wechat-inbox-sync-${crypto.randomBytes(12).toString('hex')}.tmp`,
     );
@@ -31067,6 +31099,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         recordId,
         bindingFingerprint,
         noteTitle: value.noteTitle,
+        fallbackDeliveryId: value.fallbackDeliveryId,
         completedAt: new Date().toISOString(),
       },
     ]);
@@ -31184,6 +31217,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           await this.rememberCompletedSyncReceiptBestEffort(binding, {
             recordId: item.recordId,
             noteTitle: item.noteTitle || '',
+            fallbackDeliveryId: this.findCompletedSyncReceipt(binding, item.recordId)?.fallbackDeliveryId,
           });
         } else {
           await this.reportSyncLifecycleStatus(item.recordId, {
@@ -31486,8 +31520,10 @@ class WechatObsidianInboxPlugin extends Plugin {
           throw Object.assign(new Error('部分笔记标记存在冲突，已保留原内容；请人工核对后重试'), { code: 'PARTIAL_NOTE_STATE_AMBIGUOUS' });
         }
         if (qualityPartialNote) processingProgress.partialQualityNotePath = qualityPartialNote.filePath;
-        const completedReceipt = qualityPartialNote ? null : this.findCompletedSyncReceipt(binding, recordId);
-        const mustValidateAttachment = String(record && record.type || '').trim().toLowerCase() === 'file';
+        const currentDeliveryId = fallbackDeliveryId(record);
+        const candidateReceipt = qualityPartialNote ? null : this.findCompletedSyncReceipt(binding, recordId);
+        const completedReceipt = candidateReceipt && (!currentDeliveryId || candidateReceipt.fallbackDeliveryId === currentDeliveryId) ? candidateReceipt : null;
+        const mustValidateAttachment = !currentDeliveryId && String(record && record.type || '').trim().toLowerCase() === 'file';
         let existingFilePath = '';
         if (!qualityPartialNote && (!completedReceipt || mustValidateAttachment)) {
           existingFilePath = await this.findExistingRecordNotePath(record);
@@ -31551,6 +31587,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           const receiptWarning = await this.rememberCompletedSyncReceiptBestEffort(binding, {
             recordId,
             noteTitle: existingNoteTitle,
+            fallbackDeliveryId: currentDeliveryId,
           });
           const completionWarning = await this.reportSyncRecordCompletionBestEffort(
             recordId,
@@ -31604,6 +31641,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         const receiptWarning = await this.rememberCompletedSyncReceiptBestEffort(binding, {
           recordId: item.recordId,
           noteTitle: item.title,
+          fallbackDeliveryId: currentDeliveryId,
         });
         this.showSyncProgress({ ...progress, stage: 'marking', title: item.title });
         const completionWarning = await this.reportSyncRecordCompletionBestEffort(

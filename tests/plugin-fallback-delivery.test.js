@@ -187,5 +187,97 @@ async function test(name, run) { await run(); count++; console.log(`PASS ${name}
     const { p, events } = flow('succeeded', { ackFails: true }); const result = await p.syncBinding(binding, false);
     assert.equal(result.written.length, 1); assert.equal(result.failed.length, 0); assert(events.includes('complete'));
   });
+  await test('old record receipt cannot acknowledge an unwritten fallback result', async () => {
+    const { p, events } = flow('succeeded');
+    await p.rememberCompletedSyncReceipt(binding, { recordId: record.id, noteTitle: 'old attachment only' });
+    await p.syncBinding(binding, false);
+    assert.deepEqual(events, ['claim', 'write', 'ack', 'complete']);
+    assert.match(p.settings.completedSyncReceipts[0].fallbackDeliveryId, /^[a-f0-9]{64}$/);
+    events.length = 0;
+    p.settings.cloudFallbackJobs[0].jobId = 'different-delivery';
+    await p.syncBinding(binding, false);
+    assert(events.includes('write'), 'a different job must not borrow the old receipt');
+  });
+  await test('only the same fallback delivery marker proves local recovery', async () => {
+    const { markFallbackDelivery, hasFallbackDeliveryMarker } = require(path.join(root, 'src/fallback-delivery-marker'));
+    const p = plugin();
+    const r = { ...record, type: 'file', metadata: { cloudFallbackStatus: 'succeeded', cloudFallbackJobId: 'job-new', cloudFallbackDeliveryKey: 'd'.repeat(64) } };
+    const old = `---\nid: ${record.id}\n---\n![[audio.mp3]]`;
+    let markdown = old;
+    p.settings.inboxDir = '';
+    p.app = { vault: { getMarkdownFiles: () => [{ path: 'fixture.md' }], cachedRead: async () => markdown, adapter: { exists: async () => true } } };
+    assert.equal(await Plugin.prototype.findExistingRecordNotePath.call(p, r), '');
+    markdown = markFallbackDelivery(`${old}\n\nComplete synthetic transcript.`, r);
+    assert.equal(await Plugin.prototype.findExistingRecordNotePath.call(p, r), 'fixture.md');
+    assert.equal(hasFallbackDeliveryMarker(markdown, { ...r, metadata: { ...r.metadata, cloudFallbackDeliveryKey: 'e'.repeat(64) } }), false);
+    assert.equal(hasFallbackDeliveryMarker(markdown, { ...r, id: 'other-record' }), false);
+    assert.equal(markFallbackDelivery(markdown, r), markdown);
+  });
+  for (const gateCode of ['DOUYIN_LOGIN_REQUIRED', 'LOCAL_COMPONENT_SETUP_REQUIRED']) await test(`media failure retains ${gateCode} for diagnostics`, async () => {
+    const p = plugin();
+    p.runConfiguredTranscription = async () => { throw Object.assign(Error('fixture local failure'), { code: 'MEDIA_DOWNLOAD_INTERRUPTED' }); };
+    p.evaluateCloudFallbackUserGate = async () => ({ allowed: false, code: gateCode, message: 'fixture gate guidance' });
+    const result = await p.buildTranscriptRecordFromMedia(record, { url: record.content, platform: '抖音', preparedMedia: true, binding, mediaUrls: ['https://fixture.test/a.mp4'] });
+    assert.equal(result.metadata.mediaResolutionDiagnostic.cloudFallback.code, gateCode);
+    assert.equal(result.metadata.mediaResolutionDiagnostic.cloudFallback.stage, 'eligibility');
+  });
+  await test('uncertain fallback submit stays pending through outer media catch', async () => {
+    const p = plugin();
+    p.runConfiguredTranscription = async () => { throw Error('fixture local failure'); };
+    p.evaluateCloudFallbackUserGate = async () => ({ allowed: true });
+    p.submitCloudFallbackJob = async () => { throw Object.assign(Error('fixture uncertain'), { code: 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN' }); };
+    await assert.rejects(p.buildTranscriptRecordFromMedia(record, { url: record.content, platform: '抖音', preparedMedia: true, binding, mediaUrls: ['https://fixture.test/a.mp4'] }), { code: 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN' });
+  });
+  for (const status of [0, 503, 403]) await test(`real submit entry retains correct state for HTTP ${status}`, async () => {
+    const p = plugin(); const ids = [];
+    p.requestJson = async (_url, _method, body) => { ids.push(body.clientRequestId); throw Object.assign(Error('fixture rejected'), { status }); };
+    const submit = () => p.submitCloudFallbackJob({ sourceType: 'douyin_url', sourceUrl: record.content, recordId: record.id, binding });
+    await assert.rejects(submit(), error => status === 403 ? error.status === 403 : error.code === 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN');
+    assert.equal(p.settings.cloudFallbackSubmissions.length, status === 403 ? 0 : 1);
+    if (status !== 403) { await assert.rejects(submit()); assert.equal(ids[0], ids[1]); }
+  });
+  await test('no media rejection retains the gate reason', async () => {
+    const p = plugin();
+    p.evaluateCloudFallbackUserGate = async () => ({ allowed: false, code: 'DOUYIN_LOGIN_REQUIRED', message: 'fixture login guidance' });
+    const result = await p.buildTranscriptRecordFromMedia(record, { url: record.content, platform: '抖音', binding });
+    assert.equal(result.metadata.mediaResolutionDiagnostic.cloudFallback.code, 'DOUYIN_LOGIN_REQUIRED');
+  });
+  await test('immediate success joins the scoped poll/write/ACK path', async () => {
+    const p = plugin();
+    p.currentProcessingContext = { recordId: record.id, recordSnapshot: record };
+    p.requestJson = async () => ({ data: job({ deliveryKey: 'd'.repeat(64) }) });
+    await assert.rejects(p.submitCloudFallbackJob({ sourceType: 'douyin_url', sourceUrl: record.content, recordId: record.id, binding }), { code: 'CLOUD_FALLBACK_QUEUED' });
+    assert.equal(p.settings.cloudFallbackJobs[0].status, 'succeeded');
+    p.requestJson = async () => { throw Error('unsupported'); };
+    const recovered = (await p.pollCloudFallbackJobs(binding, [])).records[0];
+    assert.equal(recovered.metadata.cloudFallbackDeliveryKey, 'd'.repeat(64));
+    assert.equal(recovered.metadata.cloudFallbackJobId, 'job-first');
+  });
+  await test('real write commits a delivery marker and restart recovers without audio', async () => {
+    const { hasFallbackDeliveryMarker } = require(path.join(root, 'src/fallback-delivery-marker'));
+    const p = plugin(); const files = new Map();
+    p.settings = { ...Plugin.__test.mergeSettings({ inboxDir: 'Inbox', noteSaveMode: 'root', aiProvider: 'off' }), ...p.settings };
+    p.ensureFolder = async () => {}; p.nextRecordTitle = async () => 'fixture';
+    p.saveSourceMediaAttachment = p.enrichRecordMetadataWithAi = async r => r;
+    p.appendAdvancedAi = async s => s;
+    p.app = { vault: { create: async (f, s) => { assert(!files.has(f)); files.set(f, s); }, getMarkdownFiles: () => [...files.keys()].filter(f => f.endsWith('.md')).map(path => ({ path })), cachedRead: async f => files.get(f.path), adapter: { exists: async f => files.has(f), read: async f => files.get(f), write: async (f, s) => files.set(f, s), remove: async f => files.delete(f) } } };
+    const r = { ...record, type: 'file', metadata: { title: 'fixture', cloudFallbackJobId: 'new-file-job', cloudFallbackStatus: 'succeeded', cloudFallbackDeliveryKey: 'd'.repeat(64), transcriptionStatus: 'success', transcription: 'This is the complete synthetic transcript.', transcriptionSource: 'cloud-fallback', cloudFallbackRecordRetryCount: 0 } };
+    const item = await p.writeRecord(r, new Date().toISOString(), binding, false);
+    assert.equal(item.committed, true);
+    assert(hasFallbackDeliveryMarker(files.get(item.filePath), r));
+    assert.equal(await Plugin.prototype.findExistingRecordNotePath.call(p, r), item.filePath);
+    assert.equal([...files.keys()].filter(f => f.endsWith('.tmp')).length, 0);
+  });
+  for (const submitCode of ['CLOUD_FALLBACK_SUBMISSION_UNCERTAIN', 'FIXTURE_REJECTED']) await test(`real Douyin graphic hydrate never masks ${submitCode} as saved content`, async () => {
+    const p = plugin(); p.checkDouyinLogin = async () => true;
+    p.evaluateCloudFallbackUserGate = async () => ({ allowed: true });
+    p.submitCloudFallbackJob = async () => { throw Object.assign(Error('fixture rejected'), { code: submitCode }); };
+    const url = 'https://www.douyin.com/note/1234567890123456';
+    const promise = p.hydrateWebpageMarkdown({ ...record, content: url, metadata: { url } }, 'Inbox', '2026-11-13', 'fixture', binding);
+    if (submitCode === 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN') await assert.rejects(promise, { code: submitCode });
+    else {
+      await assert.rejects(promise, error => error.code === 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED' && error.diagnostic.cloudFallback.code === 'CLOUD_FALLBACK_SUBMIT_FAILED');
+    }
+  });
   console.log(`plugin fallback delivery: ${count} behavioral cases passed`);
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

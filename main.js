@@ -6937,6 +6937,46 @@ var require_bilibili_diagnostic_utils = __commonJS({
   }
 });
 
+// src/fallback-delivery-marker.js
+var require_fallback_delivery_marker = __commonJS({
+  "src/fallback-delivery-marker.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("node:crypto");
+    function fallbackDeliveryId2(record) {
+      const metadata = record && record.metadata || {};
+      const recordId = String(record && (record._id || record.id || record.recordId) || "").trim();
+      const jobId = String(metadata.cloudFallbackJobId || "").trim();
+      if (!recordId || !jobId || metadata.cloudFallbackStatus !== "succeeded") return "";
+      return crypto2.createHash("sha256").update(JSON.stringify([
+        recordId,
+        jobId,
+        String(metadata.cloudFallbackDeliveryKey || "")
+      ])).digest("hex");
+    }
+    __name(fallbackDeliveryId2, "fallbackDeliveryId");
+    function fallbackDeliveryMarker(record) {
+      const digest = fallbackDeliveryId2(record);
+      return digest ? `<!-- wechat-inbox-fallback-delivery: ${digest} -->` : "";
+    }
+    __name(fallbackDeliveryMarker, "fallbackDeliveryMarker");
+    function hasFallbackDeliveryMarker2(markdown, record) {
+      const marker = fallbackDeliveryMarker(record);
+      return Boolean(marker && String(markdown || "").split(/\r?\n/).some((line) => line.trim() === marker));
+    }
+    __name(hasFallbackDeliveryMarker2, "hasFallbackDeliveryMarker");
+    function markFallbackDelivery2(markdown, record) {
+      const marker = fallbackDeliveryMarker(record);
+      if (!marker || hasFallbackDeliveryMarker2(markdown, record)) return markdown;
+      return `${String(markdown || "").trimEnd()}
+
+${marker}
+`;
+    }
+    __name(markFallbackDelivery2, "markFallbackDelivery");
+    module2.exports = { fallbackDeliveryId: fallbackDeliveryId2, fallbackDeliveryMarker, hasFallbackDeliveryMarker: hasFallbackDeliveryMarker2, markFallbackDelivery: markFallbackDelivery2 };
+  }
+});
+
 // src/feishu-image-display.js
 var require_feishu_image_display = __commonJS({
   "src/feishu-image-display.js"(exports2, module2) {
@@ -18895,6 +18935,7 @@ var require_sync_lifecycle_utils = __commonJS({
     var crypto2 = require("node:crypto");
     var channelsDiagnostic2 = require_wechat_channels_diagnostic_utils();
     var SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
+      DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED: "当前处理路径未能处理这条抖音图文。新版插件已支持抖音图文，请检查更新后重试；已是最新版仍失败时，保留任务编号排查图文识别路径。",
       CLOUD_FALLBACK_DISABLED: "本地提取失败，云端兜底未开启；请在插件设置中开启后重试。",
       CLOUD_FALLBACK_BINDING_REQUIRED: "云端兜底未提交，请先完成小程序与插件绑定。",
       LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
@@ -19006,6 +19047,9 @@ var require_sync_lifecycle_utils = __commonJS({
           noteTitle: sanitizeSyncNoteTitle2(source.noteTitle),
           completedAt: normalizeLifecycleTimestamp(source.completedAt)
         };
+        if (/^[a-f0-9]{64}$/.test(String(source.fallbackDeliveryId || ""))) {
+          normalized.fallbackDeliveryId = source.fallbackDeliveryId;
+        }
         if (!normalized.noteTitle) delete normalized.noteTitle;
         byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
       }
@@ -23718,6 +23762,7 @@ var {
 var channelsDiagnostic = require_wechat_channels_diagnostic_utils();
 var bilibiliDiagnostic = require_bilibili_diagnostic_utils();
 var { sanitizeFallbackDecision, attachFallbackDecision } = require_fallback_decision();
+var { fallbackDeliveryId, hasFallbackDeliveryMarker, markFallbackDelivery } = require_fallback_delivery_marker();
 function retainedSyncFailureDiagnostic(value, settings, preserveActiveDiagnostic = false) {
   const specific = channelsDiagnostic.sanitize(value, settings) || bilibiliDiagnostic.sanitize(value) || sanitizePlatformArticleDiagnostic(value);
   const cloudFallback = sanitizeFallbackDecision(value && value.cloudFallback);
@@ -24084,7 +24129,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.7";
+var PLUGIN_RUNTIME_VERSION = "1.4.8";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -40836,6 +40881,11 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     try {
       payload = await this.requestJson("/transcriptions/fallback/jobs", "POST", requestBody, binding);
     } catch (error) {
+      if (submission && isCloudFallbackSubmissionUncertain(error)) {
+        error.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
+        error.message = "云端兜底提交结果待确认，插件会继续查询，请勿重复上传。";
+        throw error;
+      }
       if (submission && !isCloudFallbackSubmissionUncertain(error)) {
         await this.clearCloudFallbackSubmission({
           bindingFingerprint,
@@ -40893,6 +40943,9 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         });
       }
       throw createAbortError();
+    }
+    if (job.status === "succeeded") {
+      throw createCloudFallbackPendingError(job, "", "云端结果已就绪，正在领取并保存到 Obsidian");
     }
     return job;
   }
@@ -45016,6 +45069,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       });
     } catch (error) {
       if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+      if (error.code === "CLOUD_FALLBACK_QUEUED") throw error;
       error.code = "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN";
       throw error;
     }
@@ -47228,6 +47282,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     const fallbackSourceType = isDouyinUrl(url) ? "douyin_url" : isXiaohongshuUrl(url) ? "xiaohongshu_url" : isWechatChannelsUrl(url) ? "wechat_channels_url" : isBilibiliUrl(url) ? "bilibili_url" : isXiaoyuzhouUrl(url) ? "xiaoyuzhou_url" : "";
     const fallbackGate = !candidates.length && this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding, requireDouyinLogin: true, requireDouyinResolver: true } : { binding }) : null;
     if (!candidates.length) {
+      let fallbackDecision = null;
       if (fallbackGate && fallbackGate.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
@@ -47266,11 +47321,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           throw createCloudFallbackPendingError(job, noMediaError);
         } catch (cloudError) {
-          if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
+          if (cloudError && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(cloudError.code)) throw cloudError;
+          fallbackDecision = sanitizeFallbackDecision({ status: "not_submitted", code: "CLOUD_FALLBACK_SUBMIT_FAILED" });
           noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`].filter(Boolean).join("；");
         }
       } else if (fallbackGate) {
         noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join("；");
+        fallbackDecision = sanitizeFallbackDecision({ status: "not_submitted", code: fallbackGate.code });
+      } else if (fallbackSourceType) {
+        fallbackDecision = sanitizeFallbackDecision({ status: "not_submitted", code: this.settings.cloudFallbackEnabled !== true ? "CLOUD_FALLBACK_DISABLED" : "CLOUD_FALLBACK_BINDING_REQUIRED" });
       }
       return {
         ...record,
@@ -47287,7 +47346,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           markdown,
           trailingMarkdown,
           sourceTitle: normalizedSourceTitle,
-          mediaResolutionDiagnostic: getMediaResolutionDiagnostic("no-media-candidate")
+          mediaResolutionDiagnostic: { ...getMediaResolutionDiagnostic("no-media-candidate") || {}, ...fallbackDecision ? { cloudFallback: fallbackDecision } : {} }
         })
       };
     }
@@ -47466,16 +47525,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           throw createCloudFallbackPendingError(job, error.message || String(error));
         } catch (cloudError) {
-          if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
-          finalError = new Error([
-            error.message || String(error),
-            `云端兜底未提交：${cloudError && cloudError.message || cloudError}`
-          ].filter(Boolean).join("；"));
-          finalError.code = error.code;
+          if (cloudError && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(cloudError.code)) throw cloudError;
+          finalError = attachFallbackDecision(error, {
+            gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED",
+            gateMessage: `云端兜底未提交：${cloudError && cloudError.message || cloudError}`
+          });
         }
       } else if (fallbackGate2) {
-        finalError = new Error([error.message || String(error), fallbackGate2.message].filter(Boolean).join("；"));
-        finalError.code = error.code;
+        finalError = attachFallbackDecision(error, { gateCode: fallbackGate2.code, gateMessage: fallbackGate2.message });
+      } else if (fallbackSourceType && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH") {
+        finalError = attachFallbackDecision(error, this.settings.cloudFallbackEnabled !== true ? { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "云端兜底未开启，请在插件设置中开启。" } : { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "尚未绑定，请先完成插件绑定。" });
       }
       const recoveryCandidate = platform === "视频号" && finalError.code === "TRANSCRIPTION_LOW_QUALITY" && finalError.qualityRecoveryCandidate && finalError.qualityRecoveryCandidate.fullAudioProcessed === true && getChannelsUnresolvedWindowCount(finalError.qualityRecoveryCandidate) > 0 && Number(finalError.qualityRecoveryCandidate.windowCount) > 0 ? String(finalError.qualityRecoveryCandidate.transcription || "").trim() : "";
       const candidateNote = recoveryCandidate ? [
@@ -47502,6 +47561,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         sourceTitle: normalizedSourceTitle,
         mediaResolutionDiagnostic: getMediaResolutionDiagnostic("transcription-failed")
       });
+      if (finalError.diagnostic && finalError.diagnostic.cloudFallback) {
+        failureMetadata.mediaResolutionDiagnostic = {
+          ...failureMetadata.mediaResolutionDiagnostic || {},
+          cloudFallback: finalError.diagnostic.cloudFallback
+        };
+      }
       const qualityRejectedChannels = platform === "视频号" && error.code === "TRANSCRIPTION_LOW_QUALITY";
       return {
         ...record,
@@ -48828,6 +48893,7 @@ ${finalized.markdown}
             throw loginError;
           }
           const message = douyinDiagnostic.failureMessage("DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED");
+          let noteFallbackDecision = null;
           if (this.settings.cloudFallbackEnabled === true && binding) {
             const noteFallbackGate = await this.evaluateCloudFallbackUserGate({
               binding,
@@ -48850,9 +48916,14 @@ ${finalized.markdown}
                 });
                 throw createCloudFallbackPendingError(noteJob, message);
               } catch (noteSubmitError) {
-                if (noteSubmitError && noteSubmitError.code === "CLOUD_FALLBACK_QUEUED") throw noteSubmitError;
+                if (noteSubmitError && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(noteSubmitError.code)) throw noteSubmitError;
+                noteFallbackDecision = { gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED", gateMessage: "云端兜底暂未接收任务，请保持插件联网后重试。" };
               }
+            } else {
+              noteFallbackDecision = { gateCode: noteFallbackGate.code, gateMessage: noteFallbackGate.message };
             }
+          } else {
+            noteFallbackDecision = this.settings.cloudFallbackEnabled !== true ? { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "云端兜底未开启，请在插件设置中开启。" } : { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "尚未绑定，请先完成插件绑定。" };
           }
           const failureDiagnostic = douyinDiagnostic.sanitize({
             attemptId: douyinAttemptId,
@@ -48877,20 +48948,10 @@ ${finalized.markdown}
             }]
           });
           douyinDiagnostic.save(this.getConfiguredLocalAsrInstallRoot(), failureDiagnostic);
-          return {
-            ...record,
-            metadata: {
-              ...metadata,
-              title: metadata.title || title || "抖音笔记",
-              url,
-              platform: "抖音",
-              contentCategory: "图文",
-              markdown: ["抖音图文笔记：页面未返回可读正文，已保存链接。", "", `原始链接：${url}`, "", `> ${message}`].join("\n"),
-              conversionStatus: "success",
-              conversionNote: "抖音图文笔记已保存链接（正文未获取）",
-              mediaResolutionDiagnostic: failureDiagnostic
-            }
-          };
+          throw attachFallbackDecision(Object.assign(new Error(message), {
+            code: "DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED",
+            diagnostic: failureDiagnostic
+          }), noteFallbackDecision);
         }
         const targetIdentityUrl = isXiaohongshuUrl(url) ? resolveXiaohongshuIdentityUrl([redirectedUrl, url]) : "";
         xiaohongshuResolvedUrl = redirectedUrl;
@@ -49780,6 +49841,7 @@ ${finalized.markdown}
           });
         }
         if (isVideoIntent && isDouyinRecord) {
+          let fallbackDecision = null;
           let noMediaError = douyinLocalResolverNotInstalled && hasPluginDouyinLogin && douyinFailureCode === "DOUYIN_NO_MEDIA" ? "插件内抖音已登录，但仍未获取到媒体地址。请在插件设置中点击“安装／更新本地组件”，补齐抖音解析组件后重试。" : douyinDiagnostic.failureMessage(douyinFailureCode);
           if (this.settings.cloudFallbackEnabled === true && binding) {
             const fallbackGate = await this.evaluateCloudFallbackUserGate({
@@ -49790,6 +49852,7 @@ ${finalized.markdown}
             });
             if (!fallbackGate.allowed) {
               noMediaError = [noMediaError, fallbackGate.message].filter(Boolean).join("；");
+              fallbackDecision = sanitizeFallbackDecision({ status: "not_submitted", code: fallbackGate.code });
             } else {
               try {
                 const job = await this.submitCloudFallbackJob({
@@ -49819,9 +49882,13 @@ ${finalized.markdown}
                 }
                 throw createCloudFallbackPendingError(job, noMediaError);
               } catch (cloudError) {
-                if (cloudError && cloudError.code === "CLOUD_FALLBACK_QUEUED") throw cloudError;
+                if (cloudError && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(cloudError.code)) throw cloudError;
+                fallbackDecision = sanitizeFallbackDecision({ status: "not_submitted", code: "CLOUD_FALLBACK_SUBMIT_FAILED" });
+                noMediaError = [noMediaError, `云端兜底未提交：${cloudError && cloudError.message || cloudError}`].join("；");
               }
             }
+          } else {
+            fallbackDecision = sanitizeFallbackDecision({ status: "not_submitted", code: this.settings.cloudFallbackEnabled !== true ? "CLOUD_FALLBACK_DISABLED" : "CLOUD_FALLBACK_BINDING_REQUIRED" });
           }
           return {
             ...record,
@@ -49836,7 +49903,7 @@ ${finalized.markdown}
               transcriptionError: noMediaError,
               transcriptionSource: "video",
               conversionStatus: "link_saved",
-              mediaResolutionDiagnostic: douyinResolutionDiagnostic
+              mediaResolutionDiagnostic: { ...douyinResolutionDiagnostic || {}, ...fallbackDecision ? { cloudFallback: fallbackDecision } : {} }
             }
           };
         }
@@ -50720,6 +50787,7 @@ ${finalized.markdown}
         throw error;
       }
       if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
+      if (error && error.code === "DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED") throw error;
       if (isXiaohongshuUrl(url) && isRetryableXiaohongshuContentError(error)) {
         if (options.operatorNode !== true) {
           const fallback = await this.maybeSubmitXiaohongshuCloudFallback(record, {
@@ -51079,6 +51147,10 @@ ${finalized.markdown}
         }
         const matchesRecordId = hasRecordIdInFrontmatter(markdown, normalizedRecordId);
         if (matchesRecordId) {
+          if (fallbackDeliveryId(record)) {
+            if (hasFallbackDeliveryMarker(markdown, record)) return file.path || filePath;
+            continue;
+          }
           if (!isExistingLocalNoteDeliverable(record, markdown)) {
             continue;
           }
@@ -51233,7 +51305,7 @@ ${finalized.markdown}
       const retriedMetadata = recordForMarkdown.metadata || {};
       if (retriedMetadata.transcriptionStatus === "success" && String(retriedMetadata.transcription || "").trim()) {
         throwIfAborted(signal);
-        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => completeQualityPartialNote(current, formatTranscriptForReading(retriedMetadata.transcription)));
+        await this.mutateQualityPartialNote(partialQualityNotePath, getRecordId(recordForMarkdown), (current) => markFallbackDelivery(completeQualityPartialNote(current, formatTranscriptForReading(retriedMetadata.transcription)), record));
         return { recordId: getRecordId(recordForMarkdown), filePath: partialQualityNotePath, title: getSyncNoteTitleFromPath(partialQualityNotePath), committed: true, transcriptionResumed: true, mediaResolutionDiagnostic: retriedMetadata.mediaResolutionDiagnostic || null };
       }
       if (isRecognizedNoSpeechMetadata(retriedMetadata)) {
@@ -51318,7 +51390,8 @@ ${finalized.markdown}
     const adapter = this.app.vault.adapter;
     if (recordUrl && typeof adapter.exists === "function" && await adapter.exists(filePath)) {
       const existingSource = await readNoteSourceIdentity(adapter, filePath);
-      if (existingSource && existingSource === normalizeNoteSourceIdentity(recordUrl)) {
+      const sameFallbackDelivery = !fallbackDeliveryId(record) || hasFallbackDeliveryMarker(await adapter.read(filePath), record);
+      if (existingSource && existingSource === normalizeNoteSourceIdentity(recordUrl) && sameFallbackDelivery) {
         return {
           recordId: getRecordId(record),
           filePath,
@@ -51336,6 +51409,7 @@ ${finalized.markdown}
       filePath = normalizeVaultPath(`${targetNoteDir}/${fileTitle}.md`);
     }
     if (!qualityRejectedPartial) markdown = await this.appendAdvancedAi(markdown, recordForMarkdown, { signal });
+    if (!qualityRejectedPartial) markdown = markFallbackDelivery(markdown, record);
     const temporaryFilePath = normalizeVaultPath(
       `${targetNoteDir}/.wechat-inbox-sync-${crypto.randomBytes(12).toString("hex")}.tmp`
     );
@@ -51428,6 +51502,7 @@ ${finalized.markdown}
         recordId,
         bindingFingerprint,
         noteTitle: value.noteTitle,
+        fallbackDeliveryId: value.fallbackDeliveryId,
         completedAt: (/* @__PURE__ */ new Date()).toISOString()
       }
     ]);
@@ -51505,6 +51580,7 @@ ${finalized.markdown}
     }
   }
   async replayPendingSyncLifecycleAttempts(binding) {
+    var _a;
     const bindingFingerprint = getSyncLifecycleBindingFingerprint(binding && binding.token);
     if (!bindingFingerprint) return { replayed: 0, retained: 0 };
     const attempts = normalizePendingSyncLifecycleAttempts(this.settings.pendingSyncLifecycleAttempts).filter((item) => item.bindingFingerprint === bindingFingerprint);
@@ -51524,7 +51600,8 @@ ${finalized.markdown}
           });
           await this.rememberCompletedSyncReceiptBestEffort(binding, {
             recordId: item.recordId,
-            noteTitle: item.noteTitle || ""
+            noteTitle: item.noteTitle || "",
+            fallbackDeliveryId: (_a = this.findCompletedSyncReceipt(binding, item.recordId)) == null ? void 0 : _a.fallbackDeliveryId
           });
         } else {
           await this.reportSyncLifecycleStatus(item.recordId, {
@@ -51784,8 +51861,10 @@ ${finalized.markdown}
           throw Object.assign(new Error("部分笔记标记存在冲突，已保留原内容；请人工核对后重试"), { code: "PARTIAL_NOTE_STATE_AMBIGUOUS" });
         }
         if (qualityPartialNote) processingProgress.partialQualityNotePath = qualityPartialNote.filePath;
-        const completedReceipt = qualityPartialNote ? null : this.findCompletedSyncReceipt(binding, recordId);
-        const mustValidateAttachment = String(record && record.type || "").trim().toLowerCase() === "file";
+        const currentDeliveryId = fallbackDeliveryId(record);
+        const candidateReceipt = qualityPartialNote ? null : this.findCompletedSyncReceipt(binding, recordId);
+        const completedReceipt = candidateReceipt && (!currentDeliveryId || candidateReceipt.fallbackDeliveryId === currentDeliveryId) ? candidateReceipt : null;
+        const mustValidateAttachment = !currentDeliveryId && String(record && record.type || "").trim().toLowerCase() === "file";
         let existingFilePath = "";
         if (!qualityPartialNote && (!completedReceipt || mustValidateAttachment)) {
           existingFilePath = await this.findExistingRecordNotePath(record);
@@ -51849,7 +51928,8 @@ ${finalized.markdown}
           }
           const receiptWarning2 = await this.rememberCompletedSyncReceiptBestEffort(binding, {
             recordId,
-            noteTitle: existingNoteTitle
+            noteTitle: existingNoteTitle,
+            fallbackDeliveryId: currentDeliveryId
           });
           const completionWarning2 = await this.reportSyncRecordCompletionBestEffort(
             recordId,
@@ -51902,7 +51982,8 @@ ${finalized.markdown}
         }
         const receiptWarning = await this.rememberCompletedSyncReceiptBestEffort(binding, {
           recordId: item.recordId,
-          noteTitle: item.title
+          noteTitle: item.title,
+          fallbackDeliveryId: currentDeliveryId
         });
         this.showSyncProgress({ ...progress, stage: "marking", title: item.title });
         const completionWarning = await this.reportSyncRecordCompletionBestEffort(
