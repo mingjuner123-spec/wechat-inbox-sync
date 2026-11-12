@@ -41,6 +41,7 @@ const expectedModules = [
   'failure-diagnostic-scope',
   'failure-technical-report',
   'fallback-decision',
+  'fallback-delivery-marker',
   'failure-reason-utils',
   'input-normalization-utils',
   'local-asr-quality-retry',

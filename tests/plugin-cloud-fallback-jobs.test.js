@@ -1182,14 +1182,14 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
       transcription: '按原链接恢复的结果',
     } };
   };
-  const replayed = await replayPlugin.runConfiguredTranscription('https://cdn.example.test/expired.mp4', {
+  await assert.rejects(replayPlugin.runConfiguredTranscription('https://cdn.example.test/expired.mp4', {
     sourceUrl: 'https://www.douyin.com/video/idempotent',
     recordId: 'record-idempotent',
     retryCount: 1,
     binding: replayPlugin.settings.bindings[0],
     preserveLocalMediaForCloudFallback: true,
-  });
-  assert.strictEqual(replayed.transcription, '按原链接恢复的结果');
+  }), error => error.code === 'CLOUD_FALLBACK_QUEUED' && error.cloudFallbackJob.transcription === '按原链接恢复的结果');
+  assert.strictEqual(replayPlugin.settings.cloudFallbackJobs[0].status, 'succeeded', 'reused result is durable and delivered by the normal claim/write/ACK path');
   assert.strictEqual(replayLocalCalled, false, 'a durable uncertain URL request is recovered before another local transcription attempt');
   assert.strictEqual(replayBody.sourceType, 'douyin_url');
   assert.strictEqual(replayBody.recordRetryCount, 1, 'the replay is fenced to the current record generation');

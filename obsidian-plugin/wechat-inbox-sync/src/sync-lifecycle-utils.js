@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const channelsDiagnostic = require('./wechat-channels-diagnostic-utils');
 
 const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
+  DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED: '当前处理路径未能处理这条抖音图文。新版插件已支持抖音图文，请检查更新后重试；已是最新版仍失败时，保留任务编号排查图文识别路径。',
   CLOUD_FALLBACK_DISABLED: "本地提取失败，云端兜底未开启；请在插件设置中开启后重试。",
   CLOUD_FALLBACK_BINDING_REQUIRED: "云端兜底未提交，请先完成小程序与插件绑定。",
   LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
@@ -134,6 +135,9 @@ function normalizeCompletedSyncReceipts(value) {
       noteTitle: sanitizeSyncNoteTitle(source.noteTitle),
       completedAt: normalizeLifecycleTimestamp(source.completedAt),
     };
+    if (/^[a-f0-9]{64}$/.test(String(source.fallbackDeliveryId || ''))) {
+      normalized.fallbackDeliveryId = source.fallbackDeliveryId;
+    }
     if (!normalized.noteTitle) delete normalized.noteTitle;
     byIdentity.set(`${bindingFingerprint}:${recordId}`, normalized);
   }

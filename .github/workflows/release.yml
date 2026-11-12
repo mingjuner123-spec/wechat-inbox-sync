@@ -74,6 +74,7 @@ jobs:
       - name: Run release governance and plugin regressions
         run: |
           node tests/plugin-cloud-fallback-jobs.test.js
+          node tests/plugin-fallback-delivery.test.js
           node tests/plugin-operator-capability-negotiation.test.js
           node tests/plugin-operator-lanes.test.js
           node tests/plugin-operator-linux-asr.test.js
