@@ -76,6 +76,7 @@ jobs:
           node tests/plugin-cloud-fallback-jobs.test.js
           node tests/plugin-operator-capability-negotiation.test.js
           node tests/plugin-operator-lanes.test.js
+          node tests/plugin-operator-linux-asr.test.js
           node tests/plugin-operator-doubao-task.test.js
           node tests/plugin-ai-metadata-error-utils.test.js
           node tests/plugin-component-cloudbase.test.js

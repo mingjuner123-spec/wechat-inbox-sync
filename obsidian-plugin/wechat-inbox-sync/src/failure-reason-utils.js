@@ -15,6 +15,7 @@ const FAILURE_DETAILS = Object.freeze({
   DOUYIN_BROWSER_COOLDOWN: ['抖音浏览器处理处于冷却状态。', '请等待冷却结束后再试，避免连续重复提交；这不等于未登录。'],
   DOUYIN_NO_MEDIA: ['未获得与这条抖音内容匹配的媒体。', '请确认原内容仍可打开；若可以，保留任务编号排查提取路径，不要仅因此重装转写组件。'],
   XIAOHONGSHU_CONTENT_UNAVAILABLE: ['未取得这条小红书内容。', '请确认原内容仍可打开；可正常打开时保留任务编号排查提取路径。'],
+  XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED: ['小红书短链接跳到了非小红书网站，已停止访问该地址。', '这不代表原笔记已删除；请保留任务编号排查，勿反复上传。'],
   WECHAT_ARTICLE_BODY_MISSING: ['未取得公众号文章正文。', '请确认原文可打开，并在插件中检查公众号访问验证；仍失败时保留任务编号。'],
   CHANNELS_OPERATION_FAILED: ['视频号处理操作未完成。', '请保留任务编号排查具体操作环节，不要反复重新提交。'],
   CLOUD_FALLBACK_FAILED: ['本次云端兜底处理失败，尚未交付结果。', '请保留任务编号查看后续处理；无需因此重装自己电脑的转写组件。'],
@@ -55,7 +56,8 @@ function failureGuidance(code) {
 }
 function failureMessage(error) {
   const guidance = failureGuidance(selectFailureDetail(error));
-  return guidance ? `${guidance.reason}${guidance.nextStep}` : '';
+  const gateMessage = error && typeof error.cloudFallbackGateMessage === 'string' ? error.cloudFallbackGateMessage : '';
+  return guidance ? `${guidance.reason}${gateMessage || guidance.nextStep}` : '';
 }
 
 // Legacy clients already attach this report. Read only its documented failure

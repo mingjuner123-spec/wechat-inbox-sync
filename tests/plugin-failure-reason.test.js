@@ -18,6 +18,10 @@ function queue(error) { return plugin.queueSyncDiagnosticFailure({ error, record
 const nested = code => ({ code: 'EXTRACTION_FAILED', diagnostic: { source: 'douyin-resolution',
   failureCode: code, failure: { code, stage: 'prepare' }, outcome: 'failed' } });
 const pro = queue(nested('PRO_REQUIRED'));
+const redirect = { code: 'XIAOHONGSHU_EXTERNAL_REDIRECT_BLOCKED' };
+assert.equal(queue(redirect).errorCode, redirect.code);
+assert.match(failureMessage(redirect), /非小红书网站/);
+assert.doesNotMatch(failureMessage(redirect), /未取得这条/);
 assert.equal(pro.errorCode, 'PRO_REQUIRED'); assert.equal(pro.errorType, 'EXTRACTION_FAILED'); assert.equal(pro.stage, 'fetch');
 assert.match(failureMessage(nested('PRO_REQUIRED')), /不要重复购买/);
 assert.doesNotMatch(failureMessage(nested('PRO_REQUIRED')), /已过期|未开通/);

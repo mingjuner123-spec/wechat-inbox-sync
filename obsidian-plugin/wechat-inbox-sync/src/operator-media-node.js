@@ -407,8 +407,7 @@ function createSingleOperatorMediaNode({
   const complete = async (job, body) => {
     return await callApi('/transcriptions/fallback/worker/complete', { ...baseForJob(job), ...body }, { signal: null });
   };
-  const transcribeCapturedMedia = async (job, inputPath) => {
-    if (getCapabilities().includes('media_handoff')) {
+  const handoffCapturedMedia = async (job, inputPath) => {
       activeJob.stage = 'acquiring';
       activeJob.progress = 55;
       const uploaded = await plugin.uploadWorkerMediaForJob(inputPath, job, {
@@ -417,12 +416,19 @@ function createSingleOperatorMediaNode({
       });
       stopHeartbeat();
       return uploaded.completion;
+  };
+  const transcribeCapturedMedia = async (job, inputPath) => {
+    // Idle operator ASR handles the file on this computer. Upload only when
+    // local capacity is unavailable; never require a round-trip for idle ASR.
+    if (getCapabilities().includes('media_handoff') && !getCapabilities().includes('local_asr')) {
+      return await handoffCapturedMedia(job, inputPath);
     }
     if (!plugin || typeof plugin.transcodeCloudFallbackMediaToMp3 !== 'function'
       || (typeof plugin.runOperatorLocalTranscription !== 'function' && typeof plugin.runLocalTranscription !== 'function')) {
       throw nodeError('OPERATOR_ASR_HANDLER_UNAVAILABLE', '运营节点本地转写能力未就绪', { retryable: true });
     }
     if (typeof plugin.isOperatorLocalAsrAvailable === 'function' && !plugin.isOperatorLocalAsrAvailable()) {
+      if (getCapabilities().includes('media_handoff')) return await handoffCapturedMedia(job, inputPath);
       throw nodeError('OPERATOR_ASR_BUSY', '运营节点本地转写正忙', { retryable: true });
     }
     const prepared = await plugin.transcodeCloudFallbackMediaToMp3(inputPath, { signal: activeController.signal });
@@ -434,16 +440,32 @@ function createSingleOperatorMediaNode({
       const runLocalAsr = typeof plugin.runOperatorLocalTranscription === 'function'
         ? plugin.runOperatorLocalTranscription.bind(plugin)
         : plugin.runLocalTranscription.bind(plugin);
-      const result = await runLocalAsr(asrPath, {
+      let result;
+      try { result = await runLocalAsr(asrPath, {
         inputPath: asrPath,
         signal: activeController.signal,
         includeQualityDetails: true,
         recordId: '',
         sourceUrl: String(job && job.sourceUrl || ''),
         operatorNode: true,
-      });
+      }); } catch (error) {
+        if (error && ((error.code === 'TRANSCRIPTION_NO_SPEECH'
+          && ['full-decode-and-vad-no-speech-segments', 'non-speech-markers'].includes(error.noSpeechEvidence))
+          || (error.code === 'LOCAL_ASR_NO_SPEECH' && error.noSpeech === true && error.retryable === false))) {
+          stopHeartbeat();
+          return await complete(job, { phase: 'media', backend: 'local_whisper_cpp', outcome: 'no_speech' });
+        }
+        // Capacity may be acquired by the foreground or another ASR lane
+        // during capture. Keep the captured file and hand it off in this job.
+        if (error && error.name !== 'AbortError' && !activeController.signal.aborted
+          && getCapabilities().includes('media_handoff')) return await handoffCapturedMedia(job, asrPath);
+        throw error;
+      }
       const transcription = String(result && typeof result === 'object' ? result.transcription : result || '').trim();
-      if (!transcription) throw nodeError('OPERATOR_ASR_EMPTY', '运营节点本地转写结果为空', { retryable: true });
+      if (!transcription) {
+        if (getCapabilities().includes('media_handoff') && !activeController.signal.aborted) return await handoffCapturedMedia(job, asrPath);
+        throw nodeError('OPERATOR_ASR_EMPTY', '运营节点本地转写结果为空', { retryable: true });
+      }
       activeJob.progress = 100;
       stopHeartbeat();
       // URL jobs are completed by the Obsidian plugin node itself. The media
@@ -453,6 +475,8 @@ function createSingleOperatorMediaNode({
         backend: 'local_whisper_cpp',
         outcome: 'succeeded',
         transcription,
+        ...(Array.isArray(result && result.transcriptionSegments) && result.transcriptionSegments.length
+          ? { transcriptionSegments: result.transcriptionSegments } : {}),
       });
     } finally {
       if (prepared && prepared.owned === true && asrPath !== inputPath) {
@@ -513,7 +537,8 @@ function createSingleOperatorMediaNode({
     try {
       if (!rejectedCapabilities.has('local_asr')
         && plugin && typeof plugin.getLocalAsrInstallStatus === 'function'
-        && plugin.getLocalAsrInstallStatus().ready === true
+        && (typeof plugin.getOperatorLocalAsrInstallStatus === 'function'
+          ? plugin.getOperatorLocalAsrInstallStatus() : plugin.getLocalAsrInstallStatus()).ready === true
         && (typeof plugin.isOperatorLocalAsrAvailable !== 'function' || plugin.isOperatorLocalAsrAvailable())) capabilities.push('local_asr');
     } catch (_) { /* A missing local component is not advertised as capable. */ }
     return capabilities;

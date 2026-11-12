@@ -1228,6 +1228,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   const mediaCompletions = [];
   const genericCompletions = [];
   let operatorUpload = null;
+  let operatorLocalBusy = false;
   const operatorUploadServer = http.createServer((request, response) => {
     const chunks = [];
     request.on('data', (chunk) => chunks.push(chunk));
@@ -1261,7 +1262,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
       return operatorMediaPath;
     },
     getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'fixture-ffmpeg' }),
-    isOperatorLocalAsrAvailable: () => true,
+    isOperatorLocalAsrAvailable: () => !operatorLocalBusy,
     transcodeCloudFallbackMediaToMp3: async inputPath => ({ path: inputPath, owned: false }),
     runOperatorLocalTranscription: async (inputPath, options) => {
       assert.strictEqual(inputPath, operatorMediaPath);
@@ -1283,7 +1284,10 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
         capacityBodies.push(body);
         return { success: true, data: { workerId: body.workerId, availableCapabilities: body.runtimeCapabilities } };
       }
-      if (requestPath.endsWith('/claim')) return { jobs: body.phases?.[0] === 'media' ? [operatorJob] : [] };
+      if (requestPath.endsWith('/claim')) {
+        if (body.phases?.[0] === 'media') operatorLocalBusy = true;
+        return { jobs: body.phases?.[0] === 'media' ? [operatorJob] : [] };
+      }
       if (requestPath.endsWith('/heartbeat')) {
         heartbeatBodies.push(body);
         return { success: true, data: body };
