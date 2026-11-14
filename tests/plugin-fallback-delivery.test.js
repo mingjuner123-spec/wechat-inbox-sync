@@ -279,5 +279,53 @@ async function test(name, run) { await run(); count++; console.log(`PASS ${name}
       await assert.rejects(promise, error => error.code === 'DOUYIN_NOTE_TRANSCRIPTION_UNSUPPORTED' && error.diagnostic.cloudFallback.code === 'CLOUD_FALLBACK_SUBMIT_FAILED');
     }
   });
+
+  for (const initial of ['empty','throw']) await test('operator WeChat continues browser after '+initial, async () => {
+    const p=plugin();let calls=0;
+    p.downloadWebpageHtmlViaNode=async()=>{if(initial==='throw')throw Object.assign(Error('fixture'),{code:'ECONNRESET'});return '';};
+    p.renderWechatArticleWithElectron=async()=>{calls++;return {markdown:'Synthetic recovered article',title:'fixture'};};
+    const result=await p.acquireOperatorWechatArticleContent('https://mp.weixin.qq.com/s/fixture');
+    assert.equal(result.content.markdown,'Synthetic recovered article');assert.equal(calls,1);
+  });
+  await test('operator WeChat preserves bounded failures, captcha and cancellation',async()=>{
+    const p=plugin();p.downloadWebpageHtmlViaNode=async()=>{throw Object.assign(Error('private url never returned'),{code:'ECONNRESET'});};
+    p.renderWechatArticleWithElectron=async()=>{throw Object.assign(Error('private browser data'),{wechatArticleDiagnostic:{verificationMarker:true}});};
+    await assert.rejects(p.acquireOperatorWechatArticleContent('https://mp.weixin.qq.com/s/fixture'),e=>e.code==='OPERATOR_WECHAT_ARTICLE_CAPTCHA'&&e.nodeFailure==='request_failed'&&e.browserFailure==='captcha'&&!JSON.stringify(e).includes('private'));
+    for(const diagnostic of [{captchaRedirect:true},{finalPageKind:'captcha'}]) {p.renderWechatArticleWithElectron=async()=>{throw Object.assign(Error('private'),{wechatArticleDiagnostic:diagnostic});}; await assert.rejects(p.acquireOperatorWechatArticleContent('https://mp.weixin.qq.com/s/fixture'),{code:'OPERATOR_WECHAT_ARTICLE_CAPTCHA',browserFailure:'captcha'});}
+    let renders=0;p.downloadWebpageHtmlViaNode=async()=>{throw Object.assign(Error('stop'),{name:'AbortError'});};p.renderWechatArticleWithElectron=async()=>{renders++;};
+    await assert.rejects(p.acquireOperatorWechatArticleContent('https://mp.weixin.qq.com/s/fixture'),{name:'AbortError'});assert.equal(renders,0);
+    await assert.rejects(p.acquireOperatorWechatArticleContent('https://evil.example/s/fixture'),{code:'OPERATOR_MEDIA_SOURCE_INVALID'});
+  });
+  await test('same audio upload has bounded recovery and completion-only retry',async()=>{
+    const {recoverMediaUpload}=require('../obsidian-plugin/wechat-inbox-sync/src/operator-recovery');
+    let now=0,uploads=0,completes=0,renewals=0;const budgets=[];
+    const result=await recoverMediaUpload({expiresAt:new Date(900000).toISOString(),clock:()=>now,renew:async()=>{renewals++;},upload:async budget=>{budgets.push(budget);if(++uploads===1){now=480001;throw Object.assign(Error('fixture'),{code:'CLOUD_MEDIA_UPLOAD_TIMEOUT'});}},complete:async()=>{if(++completes===1)throw Object.assign(Error('lost response'),{code:'OPERATOR_NODE_REQUEST_TIMEOUT'});return 'done';}});
+    assert.equal(result,'done');assert.deepEqual(budgets,[480000,389999]);assert.equal(uploads,2);assert.equal(completes,2);assert.equal(renewals,3);
+    for(const statusCode of [401,403,409]){let n=0;await assert.rejects(recoverMediaUpload({upload:async()=>{n++;throw Object.assign(Error('denied'),{code:'CLOUD_MEDIA_UPLOAD_FAILED',statusCode});},complete:async()=>{throw Error('must not complete');}}));assert.equal(n,1);}
+    let n=0;await assert.rejects(recoverMediaUpload({expiresAt:new Date(900000).toISOString(),clock:()=>0,renew:async()=>{throw Object.assign(Error('lease'),{code:'LEASE_LOST'});},upload:async()=>{n++;}}),{code:'LEASE_LOST'});assert.equal(n,0);
+    const controller=new AbortController();controller.abort();await assert.rejects(recoverMediaUpload({signal:controller.signal,upload:async()=>{throw Error('must not run');}}),{name:'AbortError'});
+    await assert.rejects(recoverMediaUpload({expiresAt:new Date(20000).toISOString(),clock:()=>0,upload:async()=>{throw Error('must not run');}}),{code:'CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED'});
+    n=0;await assert.rejects(recoverMediaUpload({expiresAt:new Date(900000).toISOString(),clock:()=>0,upload:async()=>{n++;throw Object.assign(Error('fixture'),{code:'CLOUD_MEDIA_UPLOAD_TIMEOUT'});}}),{uploadAttempts:2});assert.equal(n,2);
+  });
+  await test('terminal fallback detail survives safe report and cannot relabel cancellation',async()=>{
+    const {sanitizeFallbackDecision}=require('../obsidian-plugin/wechat-inbox-sync/src/fallback-decision');
+    const {selectFailureDetail}=require('../obsidian-plugin/wechat-inbox-sync/src/failure-reason-utils');
+    const cloudFallback=sanitizeFallbackDecision({status:'failed',code:'OPERATOR_WECHAT_ARTICLE_EMPTY',stage:'acquiring',secret:'never'});
+    assert.deepEqual(cloudFallback,{status:'failed',code:'OPERATOR_WECHAT_ARTICLE_EMPTY',stage:'acquiring'});
+    assert.equal(selectFailureDetail({code:'CLOUD_FALLBACK_FAILED',diagnostic:{cloudFallback}}),'OPERATOR_WECHAT_ARTICLE_EMPTY');
+    assert.notEqual(selectFailureDetail({code:'CLOUD_FALLBACK_CANCELLED',diagnostic:{cloudFallback}}),'OPERATOR_WECHAT_ARTICLE_EMPTY');
+    assert.equal(sanitizeFallbackDecision({status:'failed',code:'private text',stage:'path'}),null);
+  });
+
+
+  await test('worker upload integration reuses file/hash/upload identity and cleans once', async()=>{
+    const source=fs.readFileSync(require('path').join(root,'src/main.js'),'utf8');let from=source.indexOf('  async uploadWorkerMediaForJob('),to=source.indexOf('\n  isOperatorLocalAsrAvailable(',from);
+    const method=source.slice(from,to);const removed=[];let hashes=0,transcodes=0,prepares=0,uploads=0,completes=0;const used=[];
+    const X=new Function('require','process','fs','hashFileSha256','uploadMultipartFile','getOperatorMediaNodeModule','throwIfAborted','isControlledCloudFallbackFileId','MAX_CLOUD_FALLBACK_MEDIA_BYTES','OPERATOR_NODE_TOKEN_ENV','OPERATOR_NODE_ID_ENV','OPERATOR_NODE_API_BASE_ENV','OPERATOR_NODE_ENABLED_ENV','recoverMediaUpload','return class X {'+method+'}')(name=>require(require('path').join(root,'src',name)),{env:{}},{existsSync:()=>true,unlinkSync:p=>removed.push(p)},async p=>{hashes++;return{size:4,sha256:'a'.repeat(64)};},async(url,fields,p,opts)=>{used.push(p);if(++uploads===1)throw Object.assign(Error('reset'),{code:'CLOUD_MEDIA_UPLOAD_FAILED',cause:{code:'ECONNRESET'}});},()=>({WORKER_PROTOCOL_VERSION:1}),()=>{},x=>x==='cloud://fixture/audio',1e8,'TOKEN','ID','API','ENABLED',require('../obsidian-plugin/wechat-inbox-sync/src/operator-recovery').recoverMediaUpload);
+    const p=new X();p.settings={};p.transcodeCloudFallbackMediaToMp3=async()=>{transcodes++;return {path:'synthetic-owned.mp3',owned:true};};
+    const result=await p.uploadWorkerMediaForJob('synthetic-input', {jobId:'job',attemptId:'attempt',fencingVersion:3,leaseToken:'fixture'}, {workerConfig:{enabled:true,workerToken:'fixture',workerId:'worker',apiBase:'https://fixture.invalid'},beforeComplete:async()=>{},request:async(route,body)=>{assert.equal(body.attemptId,'attempt');if(route.endsWith('/prepare')){prepares++;return {uploadId:'same-upload',uploadUrl:'https://fixture.invalid/upload',expiresAt:new Date(Date.now()+900000).toISOString()};}completes++;assert.equal(body.uploadId,'same-upload');if(completes===1)throw Object.assign(Error('response lost'),{code:'OPERATOR_NODE_REQUEST_TIMEOUT'});return {fileID:'cloud://fixture/audio'};}});
+    assert.equal(result.uploadId,'same-upload');assert.deepEqual([transcodes,hashes,prepares,uploads,completes],[1,1,1,2,2]);assert.deepEqual(used,['synthetic-owned.mp3','synthetic-owned.mp3']);assert.deepEqual(removed,['synthetic-owned.mp3']);
+  });
+
   console.log(`plugin fallback delivery: ${count} behavioral cases passed`);
 })().catch(error => { console.error(error.stack); process.exitCode = 1; });

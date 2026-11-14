@@ -50,6 +50,7 @@ const expectedModules = [
   'media-file-utils',
   'note-output-plan-utils',
   'operator-media-node',
+  'operator-recovery',
   'operator-linux-asr',
   'operator-doubao-task',
   'platform-article-utils',

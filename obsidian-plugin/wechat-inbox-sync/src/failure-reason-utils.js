@@ -3,6 +3,13 @@
 // Only existing machine codes are promoted. Never index raw messages, paths,
 // URLs or arbitrary nested data. Categories and business decisions stay intact.
 const FAILURE_DETAILS = Object.freeze({
+  OPERATOR_WECHAT_ARTICLE_EMPTY: ['云端节点未取得公众号正文。', '请确认原文可打开，保留任务编号；无需重装本地组件。'],
+  OPERATOR_WECHAT_ARTICLE_CAPTCHA: ['公众号要求云端节点完成访问验证。', '我们需要处理节点访问验证，请保留任务编号；无需调整你的本地组件。'],
+  OPERATOR_MEDIA_ACQUIRE_EMPTY: ['云端节点未提取到可用音频。', '请确认原内容可打开，保留任务编号排查云端提取。'],
+  OPERATOR_MEDIA_RESOLUTION_EMPTY: ['云端节点未取得可下载的媒体。', '请保留任务编号排查云端提取，无需重装本地组件。'],
+  CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED: ['云端节点上传音频未在有效时间内完成。', '请保留任务编号排查节点上传连接，无需重装本地组件。'],
+  OPERATOR_DOUBAO_ACCESS_DENIED: ['云端语音服务权限校验失败。', '需要我们恢复云端服务配置，无需你重新购买Pro或重装组件。'],
+  OPERATOR_ASR_EMPTY: ['云端节点未生成有效转写文本。', '请保留任务编号排查云端转写结果。'],
   PRO_REQUIRED: ['本次处理未通过 Pro 权益校验。', '请核对当前绑定对应的 Pro 权益；已开通请检查绑定和权益状态，不要重复购买。'],
   XIAOHONGSHU_PRO_REQUIRED: ['本次小红书处理未通过 Pro 权益校验。', '请核对当前绑定对应的 Pro 权益；已开通请检查绑定和权益状态，不要重复购买。'],
   LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: ['本地转写未通过会员权益校验。', '请在插件设置中检查当前绑定和权益状态；已开通不要重复购买。'],
@@ -30,6 +37,9 @@ function selectFailureDetail(error = {}) {
   const diagnostic = object(error.diagnostic);
   const media = object(error.mediaResolutionDiagnostic || diagnostic.mediaResolutionDiagnostic || diagnostic);
   const top = codeOf(error.code);
+  const terminal = object(diagnostic.cloudFallback || error.cloudFallback);
+  if (top === 'CLOUD_FALLBACK_FAILED' && terminal.status === 'failed'
+    && /^(OPERATOR_|CLOUD_MEDIA_)/.test(codeOf(terminal.code)) && DETAIL_CODES.has(codeOf(terminal.code))) return codeOf(terminal.code);
   // A cloud failure must not be relabelled as the end user's local failure.
   if (VERSION_CODES.has(top) || /^CLOUD_/.test(top) && DETAIL_CODES.has(top)) return top;
   const candidates = [top, codeOf(diagnostic.errorCode), codeOf(diagnostic.failureCode),
@@ -65,14 +75,16 @@ function failureMessage(error) {
 function reportedFailureDetail(event = {}) {
   if (event.outcome === 'succeeded') return '';
   const top = codeOf(event.errorCode);
-  if (VERSION_CODES.has(top) || DETAIL_CODES.has(top)) return top;
+  if (VERSION_CODES.has(top) || (DETAIL_CODES.has(top) && top !== 'CLOUD_FALLBACK_FAILED')) return top;
+  const fallbackDetail = top === 'CLOUD_FALLBACK_FAILED' ? top : '';
   const report = object(event.technicalReport);
   if (report.kind !== 'sync_failure' || report.truncated === true || typeof report.text !== 'string'
-    || Buffer.byteLength(report.text, 'utf8') > 128 * 1024) return '';
+    || Buffer.byteLength(report.text, 'utf8') > 128 * 1024) return fallbackDetail;
   try {
     const parsed = JSON.parse(report.text);
-    if (parsed.kind !== 'sync_failure' || parsed.schemaVersion !== 1) return '';
-    return selectFailureDetail(object(parsed.failure));
-  } catch (_) { return ''; }
+    if (parsed.kind !== 'sync_failure' || parsed.schemaVersion !== 1) return fallbackDetail;
+    const failure = object(parsed.failure);
+    return selectFailureDetail(top === 'CLOUD_FALLBACK_FAILED' ? { ...failure, code: top } : failure);
+  } catch (_) { return fallbackDetail; }
 }
 module.exports = { DETAIL_CODES, selectFailureDetail, observedFailureStage, failureGuidance, failureMessage, reportedFailureDetail };

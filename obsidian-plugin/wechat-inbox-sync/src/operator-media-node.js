@@ -66,6 +66,9 @@ function redactError(error) {
   const elapsedMs = safeInteger(error && error.elapsedMs);
   return {
     code,
+    ...(['body_empty', 'captcha', 'unavailable', 'timeout', 'request_failed'].includes(error && error.nodeFailure) ? { nodeFailure: error.nodeFailure } : {}),
+    ...(['body_empty', 'captcha', 'unavailable', 'timeout', 'request_failed'].includes(error && error.browserFailure) ? { browserFailure: error.browserFailure } : {}),
+    ...(Number.isInteger(error && error.uploadAttempts) && error.uploadAttempts >= 0 && error.uploadAttempts <= 2 ? { uploadAttempts: error.uploadAttempts } : {}),
     ...(bytesSent !== null ? { bytesSent } : {}),
     ...(totalBytes !== null ? { totalBytes } : {}),
     ...(elapsedMs !== null ? { elapsedMs } : {}),
