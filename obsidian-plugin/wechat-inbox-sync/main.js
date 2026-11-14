@@ -290,6 +290,66 @@ var __commonJS = (cb, mod) => function __require() {
   }
 };
 
+// src/operator-recovery.js
+var require_operator_recovery = __commonJS({
+  "src/operator-recovery.js"(exports2, module2) {
+    "use strict";
+    var TRANSIENT_CODES = /* @__PURE__ */ new Set(["CLOUD_MEDIA_UPLOAD_TIMEOUT", "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "EPIPE", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "OPERATOR_NODE_REQUEST_TIMEOUT"]);
+    function retryableTransport(error) {
+      if (!error || error.name === "AbortError" || error.retryable === false) return false;
+      const status = Number(error.statusCode || error.status);
+      if (status) return status === 408 || status === 429 || status >= 500 && status <= 599;
+      return TRANSIENT_CODES.has(error.code) || ["CLOUD_MEDIA_UPLOAD_FAILED", "OPERATOR_NODE_REQUEST_FAILED"].includes(error.code) && TRANSIENT_CODES.has(error.cause && error.cause.code);
+    }
+    __name(retryableTransport, "retryableTransport");
+    function checkAbort(signal) {
+      if (signal && signal.aborted) throw Object.assign(new Error("媒体交接已取消"), { name: "AbortError", code: "CLOUD_MEDIA_UPLOAD_ABORTED" });
+    }
+    __name(checkAbort, "checkAbort");
+    async function recoverMediaUpload2({ expiresAt, upload, complete, renew, signal, clock = Date.now }) {
+      let attempts = 0;
+      for (; ; ) {
+        checkAbort(signal);
+        if (renew) await renew();
+        checkAbort(signal);
+        const expiry = Date.parse(expiresAt || "");
+        const remaining = Number.isFinite(expiry) ? expiry - clock() - 3e4 : attempts ? 0 : 48e4;
+        if (remaining < 1e3) throw Object.assign(new Error("媒体上传凭据有效期不足"), { code: "CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED", uploadAttempts: attempts, retryable: true });
+        attempts++;
+        try {
+          await upload(Math.min(48e4, remaining));
+          break;
+        } catch (error) {
+          error.uploadAttempts = attempts;
+          if (attempts >= 2 || !retryableTransport(error)) throw error;
+        }
+      }
+      checkAbort(signal);
+      if (renew) await renew();
+      checkAbort(signal);
+      try {
+        return await complete();
+      } catch (error) {
+        if (!retryableTransport(error)) throw error;
+        checkAbort(signal);
+        return await complete();
+      }
+    }
+    __name(recoverMediaUpload2, "recoverMediaUpload");
+    function articleFailureKind2(error) {
+      const diagnostic = error && error.wechatArticleDiagnostic || {};
+      if (diagnostic.verificationMarker === true || diagnostic.captchaRedirect === true || diagnostic.finalPageKind === "captcha") return "captcha";
+      if (diagnostic.unavailableMarker === true) return "unavailable";
+      if (error && (error.code === "WECHAT_ACCESS_PAUSED" || error.code === "WECHAT_VERIFICATION_REQUIRED")) return "captcha";
+      if (["ETIMEDOUT", "NODE_HTTP_TIMEOUT", "OPERATOR_NODE_REQUEST_TIMEOUT"].includes(error && error.code) || /timeout|timed out/i.test(String(error && error.message || ""))) return "timeout";
+      if (diagnostic.hasJsContent === false) return "body_empty";
+      return "request_failed";
+    }
+    __name(articleFailureKind2, "articleFailureKind");
+    module2.exports = { recoverMediaUpload: recoverMediaUpload2, retryableTransport, articleFailureKind: articleFailureKind2 };
+  }
+});
+
 // src/readable-content-utils.js
 var require_readable_content_utils = __commonJS({
   "src/readable-content-utils.js"(exports2, module2) {
@@ -3151,6 +3211,13 @@ var require_failure_reason_utils = __commonJS({
   "src/failure-reason-utils.js"(exports2, module2) {
     "use strict";
     var FAILURE_DETAILS = Object.freeze({
+      OPERATOR_WECHAT_ARTICLE_EMPTY: ["云端节点未取得公众号正文。", "请确认原文可打开，保留任务编号；无需重装本地组件。"],
+      OPERATOR_WECHAT_ARTICLE_CAPTCHA: ["公众号要求云端节点完成访问验证。", "我们需要处理节点访问验证，请保留任务编号；无需调整你的本地组件。"],
+      OPERATOR_MEDIA_ACQUIRE_EMPTY: ["云端节点未提取到可用音频。", "请确认原内容可打开，保留任务编号排查云端提取。"],
+      OPERATOR_MEDIA_RESOLUTION_EMPTY: ["云端节点未取得可下载的媒体。", "请保留任务编号排查云端提取，无需重装本地组件。"],
+      CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED: ["云端节点上传音频未在有效时间内完成。", "请保留任务编号排查节点上传连接，无需重装本地组件。"],
+      OPERATOR_DOUBAO_ACCESS_DENIED: ["云端语音服务权限校验失败。", "需要我们恢复云端服务配置，无需你重新购买Pro或重装组件。"],
+      OPERATOR_ASR_EMPTY: ["云端节点未生成有效转写文本。", "请保留任务编号排查云端转写结果。"],
       PRO_REQUIRED: ["本次处理未通过 Pro 权益校验。", "请核对当前绑定对应的 Pro 权益；已开通请检查绑定和权益状态，不要重复购买。"],
       XIAOHONGSHU_PRO_REQUIRED: ["本次小红书处理未通过 Pro 权益校验。", "请核对当前绑定对应的 Pro 权益；已开通请检查绑定和权益状态，不要重复购买。"],
       LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: ["本地转写未通过会员权益校验。", "请在插件设置中检查当前绑定和权益状态；已开通不要重复购买。"],
@@ -3177,6 +3244,8 @@ var require_failure_reason_utils = __commonJS({
       const diagnostic = object(error.diagnostic);
       const media = object(error.mediaResolutionDiagnostic || diagnostic.mediaResolutionDiagnostic || diagnostic);
       const top = codeOf(error.code);
+      const terminal = object(diagnostic.cloudFallback || error.cloudFallback);
+      if (top === "CLOUD_FALLBACK_FAILED" && terminal.status === "failed" && /^(OPERATOR_|CLOUD_MEDIA_)/.test(codeOf(terminal.code)) && DETAIL_CODES.has(codeOf(terminal.code))) return codeOf(terminal.code);
       if (VERSION_CODES.has(top) || /^CLOUD_/.test(top) && DETAIL_CODES.has(top)) return top;
       const candidates = [
         top,
@@ -3229,15 +3298,17 @@ var require_failure_reason_utils = __commonJS({
     function reportedFailureDetail(event = {}) {
       if (event.outcome === "succeeded") return "";
       const top = codeOf(event.errorCode);
-      if (VERSION_CODES.has(top) || DETAIL_CODES.has(top)) return top;
+      if (VERSION_CODES.has(top) || DETAIL_CODES.has(top) && top !== "CLOUD_FALLBACK_FAILED") return top;
+      const fallbackDetail = top === "CLOUD_FALLBACK_FAILED" ? top : "";
       const report = object(event.technicalReport);
-      if (report.kind !== "sync_failure" || report.truncated === true || typeof report.text !== "string" || Buffer.byteLength(report.text, "utf8") > 128 * 1024) return "";
+      if (report.kind !== "sync_failure" || report.truncated === true || typeof report.text !== "string" || Buffer.byteLength(report.text, "utf8") > 128 * 1024) return fallbackDetail;
       try {
         const parsed = JSON.parse(report.text);
-        if (parsed.kind !== "sync_failure" || parsed.schemaVersion !== 1) return "";
-        return selectFailureDetail2(object(parsed.failure));
+        if (parsed.kind !== "sync_failure" || parsed.schemaVersion !== 1) return fallbackDetail;
+        const failure = object(parsed.failure);
+        return selectFailureDetail2(top === "CLOUD_FALLBACK_FAILED" ? { ...failure, code: top } : failure);
       } catch (_) {
-        return "";
+        return fallbackDetail;
       }
     }
     __name(reportedFailureDetail, "reportedFailureDetail");
@@ -4799,6 +4870,10 @@ var require_fallback_decision = __commonJS({
       "SOURCE_UNAVAILABLE"
     ]);
     function sanitizeFallbackDecision2(value) {
+      const terminalCodes = /* @__PURE__ */ new Set(["OPERATOR_WECHAT_ARTICLE_EMPTY", "OPERATOR_WECHAT_ARTICLE_CAPTCHA", "OPERATOR_MEDIA_ACQUIRE_EMPTY", "OPERATOR_MEDIA_RESOLUTION_EMPTY", "CLOUD_MEDIA_UPLOAD_TIMEOUT", "CLOUD_MEDIA_UPLOAD_FAILED", "CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED", "OPERATOR_DOUBAO_ACCESS_DENIED", "OPERATOR_ASR_EMPTY", "OPERATOR_NODE_FAILED"]);
+      if (value && value.status === "failed" && terminalCodes.has(value.code)) {
+        return { status: "failed", code: value.code, stage: ["acquiring", "upload", "transcribing"].includes(value.stage) ? value.stage : "unknown" };
+      }
       if (!value || value.status !== "not_submitted") return null;
       const code = GATE_CODES.has(value.code) ? value.code : "CLOUD_FALLBACK_SUBMIT_FAILED";
       return { status: "not_submitted", code, stage: code === "CLOUD_FALLBACK_SUBMIT_FAILED" ? "submission" : "eligibility" };
@@ -16027,6 +16102,9 @@ var require_operator_media_node = __commonJS({
       const elapsedMs = safeInteger(error && error.elapsedMs);
       return {
         code,
+        ...["body_empty", "captcha", "unavailable", "timeout", "request_failed"].includes(error && error.nodeFailure) ? { nodeFailure: error.nodeFailure } : {},
+        ...["body_empty", "captcha", "unavailable", "timeout", "request_failed"].includes(error && error.browserFailure) ? { browserFailure: error.browserFailure } : {},
+        ...Number.isInteger(error && error.uploadAttempts) && error.uploadAttempts >= 0 && error.uploadAttempts <= 2 ? { uploadAttempts: error.uploadAttempts } : {},
         ...bytesSent !== null ? { bytesSent } : {},
         ...totalBytes !== null ? { totalBytes } : {},
         ...elapsedMs !== null ? { elapsedMs } : {}
@@ -23742,6 +23820,7 @@ var require_transcription_note_title_utils = __commonJS({
 });
 
 // src/main.js
+var { articleFailureKind, recoverMediaUpload } = require_operator_recovery();
 var { runOperatorDoubaoTask, parseOperatorDoubaoState } = require_operator_doubao_task();
 var operatorLinuxAsr = require_operator_linux_asr();
 var { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require_readable_content_utils();
@@ -24129,7 +24208,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.8";
+var PLUGIN_RUNTIME_VERSION = "1.4.9";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -41179,6 +41258,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         cloudFallbackSyncAttemptId: job.syncAttemptId || metadata.cloudFallbackSyncAttemptId || "",
         cloudFallbackSyncLeaseUntil: job.syncLeaseUntil || metadata.cloudFallbackSyncLeaseUntil || "",
         cloudFallbackUpdatedAt: job.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+        cloudFallbackError: job.error ? { code: job.error.code, stage: job.error.stage, retryable: job.error.retryable } : null,
         ...isContentJob ? {
           cloudFallbackResultKind: "content",
           contentCategory: "图文",
@@ -44453,18 +44533,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "zh-CN,zh;q=0.9"
     };
+    let nodeFailure = "", browserFailure = "";
     let html = "";
     try {
       html = String(await this.downloadWebpageHtmlViaNode(pageUrl, headers) || "");
     } catch (error2) {
       if (isAbortError(error2) || signal && signal.aborted) throw createAbortError();
+      nodeFailure = articleFailureKind(error2);
     }
-    if (!html) {
-      const error2 = new Error("运营节点未能获取公众号页面");
-      error2.code = "OPERATOR_WECHAT_ARTICLE_EMPTY";
-      error2.retryable = true;
-      throw error2;
-    }
+    if (!html && !nodeFailure) nodeFailure = "body_empty";
     const diagnosis = html ? diagnoseWechatArticleHtml(html) : { pageKind: "unknown" };
     if (diagnosis.pageKind === "article") {
       const markdown = String(htmlToMarkdown(html) || "").trim();
@@ -44500,11 +44577,16 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
       } catch (renderError) {
         if (isAbortError(renderError) || signal && signal.aborted) throw createAbortError();
+        browserFailure = articleFailureKind(renderError);
       }
     }
-    const error = new Error(diagnosis.pageKind === "captcha" ? "公众号要求安全验证，云端节点同样被拦截" : "公众号页面未返回正文");
-    error.code = diagnosis.pageKind === "captcha" ? "OPERATOR_WECHAT_ARTICLE_CAPTCHA" : "OPERATOR_WECHAT_ARTICLE_EMPTY";
+    if (!browserFailure) browserFailure = typeof this.renderWechatArticleWithElectron === "function" ? "body_empty" : "unavailable";
+    const captcha = diagnosis.pageKind === "captcha" || browserFailure === "captcha";
+    const error = new Error(captcha ? "公众号要求安全验证，云端节点同样被拦截" : "公众号页面未返回正文");
+    error.code = captcha ? "OPERATOR_WECHAT_ARTICLE_CAPTCHA" : "OPERATOR_WECHAT_ARTICLE_EMPTY";
     error.retryable = true;
+    error.nodeFailure = nodeFailure || "body_empty";
+    error.browserFailure = browserFailure;
     throw error;
   }
   async acquireOperatorToutiaoArticleContent(sourceUrl, { signal = null } = {}) {
@@ -44985,20 +45067,24 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         error.code = "OPERATOR_MEDIA_PREPARE_INVALID";
         throw error;
       }
-      await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+      const completedPayload = await recoverMediaUpload({
+        expiresAt: preparedData.expiresAt,
         signal,
-        timeoutMs: 8 * 60 * 1e3,
-        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
-        fileName: "audio.mp3",
-        contentType: "audio/mpeg",
-        method: preparedData && preparedData.method ? preparedData.method : "",
-        headers: uploadHeaders
+        renew: beforeComplete,
+        upload: /* @__PURE__ */ __name((timeoutMs) => uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+          signal,
+          timeoutMs,
+          maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+          fileName: "audio.mp3",
+          contentType: "audio/mpeg",
+          method: preparedData && preparedData.method ? preparedData.method : "",
+          headers: uploadHeaders
+        }), "upload"),
+        complete: /* @__PURE__ */ __name(() => requestWorker("/transcriptions/fallback/worker/media/complete", {
+          ...lease,
+          uploadId
+        }, { signal, timeoutMs: 3e4 }), "complete")
       });
-      if (typeof beforeComplete === "function") await beforeComplete();
-      const completedPayload = await requestWorker("/transcriptions/fallback/worker/media/complete", {
-        ...lease,
-        uploadId
-      }, { signal, timeoutMs: 3e4 });
       const completedData = completedPayload && completedPayload.data ? completedPayload.data : completedPayload;
       const fileID = String(completedData && (completedData.fileID || completedData.audioFileID || completedData.fileId || preparedData.fileID) || "").trim();
       if (!isControlledCloudFallbackFileId(fileID)) {
@@ -51717,7 +51803,7 @@ ${finalized.markdown}
     }, binding);
   }
   async syncBinding(binding, shouldPrefixTitle) {
-    var _a;
+    var _a, _b, _c;
     this.ensureSerializedSaveData();
     clearXiaohongshuRestriction();
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
@@ -51954,7 +52040,8 @@ ${finalized.markdown}
           const messages = { no_speech: "云端未检测到语音", cancelled: "云端兜底已取消", needs_action: "云端兜底需要处理", failed: "云端兜底处理失败" };
           throw Object.assign(new Error(record.metadata.transcriptionError || messages[status] || messages.failed), {
             code: `CLOUD_FALLBACK_${status.toUpperCase()}`,
-            fallbackStatus: status
+            fallbackStatus: status,
+            diagnostic: { cloudFallback: { status, code: ((_b = record.metadata.cloudFallbackError) == null ? void 0 : _b.code) || "", stage: ((_c = record.metadata.cloudFallbackError) == null ? void 0 : _c.stage) || "" } }
           });
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);

@@ -1,3 +1,4 @@
+const { articleFailureKind, recoverMediaUpload } = require('./operator-recovery');
 const { runOperatorDoubaoTask, parseOperatorDoubaoState } = require('./operator-doubao-task');
 const operatorLinuxAsr = require('./operator-linux-asr');
 const { cleanTranscriptionTail, formatTranscriptForReading, preserveHtmlReadingStructure, prepareBrowserArticleImages } = require('./readable-content-utils');
@@ -398,7 +399,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.8';
+const PLUGIN_RUNTIME_VERSION = '1.4.9';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -19807,6 +19808,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         cloudFallbackSyncAttemptId: job.syncAttemptId || metadata.cloudFallbackSyncAttemptId || '',
         cloudFallbackSyncLeaseUntil: job.syncLeaseUntil || metadata.cloudFallbackSyncLeaseUntil || '',
         cloudFallbackUpdatedAt: job.updatedAt || new Date().toISOString(),
+        cloudFallbackError: job.error ? { code: job.error.code, stage: job.error.stage, retryable: job.error.retryable } : null,
         ...(isContentJob ? {
           cloudFallbackResultKind: 'content',
           contentCategory: '图文',
@@ -23281,18 +23283,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'zh-CN,zh;q=0.9',
     };
+    let nodeFailure = '', browserFailure = '';
     let html = '';
     try {
       html = String(await this.downloadWebpageHtmlViaNode(pageUrl, headers) || '');
     } catch (error) {
       if (isAbortError(error) || (signal && signal.aborted)) throw createAbortError();
+      nodeFailure = articleFailureKind(error);
     }
-    if (!html) {
-      const error = new Error('运营节点未能获取公众号页面');
-      error.code = 'OPERATOR_WECHAT_ARTICLE_EMPTY';
-      error.retryable = true;
-      throw error;
-    }
+    if (!html && !nodeFailure) nodeFailure = 'body_empty';
     const diagnosis = html ? diagnoseWechatArticleHtml(html) : { pageKind: 'unknown' };
     if (diagnosis.pageKind === 'article') {
       const markdown = String(htmlToMarkdown(html) || '').trim();
@@ -23331,15 +23330,20 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       } catch (renderError) {
         if (isAbortError(renderError) || (signal && signal.aborted)) throw createAbortError();
+        browserFailure = articleFailureKind(renderError);
       }
     }
-    const error = new Error(diagnosis.pageKind === 'captcha'
+    if (!browserFailure) browserFailure = typeof this.renderWechatArticleWithElectron === 'function' ? 'body_empty' : 'unavailable';
+    const captcha = diagnosis.pageKind === 'captcha' || browserFailure === 'captcha';
+    const error = new Error(captcha
       ? '公众号要求安全验证，云端节点同样被拦截'
       : '公众号页面未返回正文');
-    error.code = diagnosis.pageKind === 'captcha'
+    error.code = captcha
       ? 'OPERATOR_WECHAT_ARTICLE_CAPTCHA'
       : 'OPERATOR_WECHAT_ARTICLE_EMPTY';
     error.retryable = true;
+    error.nodeFailure = nodeFailure || 'body_empty';
+    error.browserFailure = browserFailure;
     throw error;
   }
 
@@ -23842,20 +23846,17 @@ class WechatObsidianInboxPlugin extends Plugin {
         error.code = 'OPERATOR_MEDIA_PREPARE_INVALID';
         throw error;
       }
-      await uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
-        signal,
-        timeoutMs: 8 * 60 * 1000,
-        maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
-        fileName: 'audio.mp3',
-        contentType: 'audio/mpeg',
-        method: preparedData && preparedData.method ? preparedData.method : '',
-        headers: uploadHeaders,
+      const completedPayload = await recoverMediaUpload({
+        expiresAt: preparedData.expiresAt, signal, renew: beforeComplete,
+        upload: timeoutMs => uploadMultipartFile(uploadUrl, fields, preparedMedia.path, {
+          signal, timeoutMs, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES,
+          fileName: 'audio.mp3', contentType: 'audio/mpeg',
+          method: preparedData && preparedData.method ? preparedData.method : '', headers: uploadHeaders,
+        }),
+        complete: () => requestWorker('/transcriptions/fallback/worker/media/complete', {
+          ...lease, uploadId,
+        }, { signal, timeoutMs: 30000 }),
       });
-      if (typeof beforeComplete === 'function') await beforeComplete();
-      const completedPayload = await requestWorker('/transcriptions/fallback/worker/media/complete', {
-        ...lease,
-        uploadId,
-      }, { signal, timeoutMs: 30000 });
       const completedData = completedPayload && completedPayload.data ? completedPayload.data : completedPayload;
       const fileID = String(completedData && (completedData.fileID || completedData.audioFileID || completedData.fileId || preparedData.fileID) || '').trim();
       if (!isControlledCloudFallbackFileId(fileID)) {
@@ -31612,6 +31613,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           const messages = { no_speech: '云端未检测到语音', cancelled: '云端兜底已取消', needs_action: '云端兜底需要处理', failed: '云端兜底处理失败' };
           throw Object.assign(new Error(record.metadata.transcriptionError || messages[status] || messages.failed), {
             code: `CLOUD_FALLBACK_${status.toUpperCase()}`, fallbackStatus: status,
+            diagnostic: { cloudFallback: { status, code: record.metadata.cloudFallbackError?.code || '', stage: record.metadata.cloudFallbackError?.stage || '' } },
           });
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
