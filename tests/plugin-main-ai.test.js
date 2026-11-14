@@ -414,7 +414,7 @@ function runConfiguredNoteOutputPlanParityTests() {
   assert.strictEqual((markedPlan.markdown.match(/wechat-inbox-record-id/g) || []).length, 1);
   assert.strictEqual((markedPlan.markdown.match(/wechat-inbox-ai-metadata-error/g) || []).length, 1);
   assert.strictEqual((markedPlan.markdown.match(/^title:/gm) || []).length, 1);
-  assert.strictEqual((markedPlan.markdown.match(/^url:/gm) || []).length, 1);
+  assert.doesNotMatch(markedPlan.markdown, /^url:/m);
   assert.strictEqual((markedPlan.markdown.match(/^synced_at:/gm) || []).length, 1);
 }
 
@@ -6427,6 +6427,28 @@ const proAiXiaohongshuMarkdown = helpers.buildMarkdownForRecord({
 });
 assert.match(proAiXiaohongshuMarkdown, /^description: 这是 Pro AI 总结/m);
 assert.match(proAiXiaohongshuMarkdown, /^keywords: AI关键词, 小红书评论/m);
+
+{
+  const content = '今天记录一个想法，稍后再整理。\n\n第二段：保留换行。';
+  for (const metadata of [{}, { url: content }, { url: 'file:///local/note.md' }]) {
+    const { markdown } = helpers.buildNoteOutputPlan({
+      record: { type: 'text', content, metadata },
+      title: '速记', noteDir: '收集', syncedAt: '2026-11-14', propertyFields: 'type,url,source',
+    });
+    assert.match(markdown, /^type: text$/m);
+    assert.match(markdown, /^source: 文本$/m);
+    assert.doesNotMatch(markdown, /^url:/m);
+    assert.ok(markdown.includes(content));
+  }
+  const url = 'https://example.org/article';
+  for (const record of [
+    { type: 'link', content: url },
+    { type: 'webpage', content: '分享文案', metadata: { url: '错误的旧值', originalUrl: url } },
+  ]) {
+    const markdown = helpers.buildMarkdownForRecord({ record, title: '链接', syncedAt: '2026-11-14' });
+    assert.ok(markdown.includes('\nurl: ' + url + '\n'));
+  }
+}
 
 const frontmatterMarkdown = helpers.buildMarkdownForRecord({
   record: {
@@ -15120,6 +15142,10 @@ async function runCanonicalVaultFolderTests() {
     metadata: {},
   }, '2026-07-25T04:00:00.000Z');
   assert.strictEqual(datedResult.filePath, 'raw/wechatmd/2026-07-25/日期笔记.md');
+  const savedText = canonicalWrites.find(write => write.filePath === datedResult.filePath).markdown;
+  assert.match(savedText, /^source: 文本$/m);
+  assert.doesNotMatch(savedText, /^url:/m);
+  assert.match(savedText, /^普通日期笔记$/m);
   pathPlugin.settings.socialArticleImageStorageMode = 'local';
   pathPlugin.nextRecordTitle = async () => 'wechat-article-folder';
   pathPlugin.hydrateWebpageMarkdown = async (record) => ({

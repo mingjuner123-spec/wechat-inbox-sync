@@ -24208,7 +24208,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.9";
+var PLUGIN_RUNTIME_VERSION = "1.4.10";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -38726,14 +38726,20 @@ function replaceFeishuImageTokenPlaceholders(markdown, assets, docUrl, tokenUrlM
 }
 __name(replaceFeishuImageTokenPlaceholders, "replaceFeishuImageTokenPlaceholders");
 function getRecordUrl(record, metadata = record && record.metadata || {}) {
-  return cleanDisplayUrl(metadata.url || metadata.originalUrl || record.content || "");
+  const candidates = [metadata.url, metadata.originalUrl, record && record.content];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+    const value = candidate.trim();
+    if (/^https?:\/\/[^\s]+$/i.test(value) && getHttpUrlHostname(value)) return cleanDisplayUrl(value);
+  }
+  return "";
 }
 __name(getRecordUrl, "getRecordUrl");
 function getRecordSourceLabel(record, metadata = {}) {
   const type = String(record && record.type || "").toLowerCase();
   const url = getRecordUrl(record, metadata);
   let platform = metadata.platform || metadata.platformName || "";
-  if (!platform) platform = getWebpageSourcePrefix(url);
+  if (!platform && url) platform = getWebpageSourcePrefix(url);
   if (!platform && type === "voice") platform = "录音";
   if (!platform && type === "file") platform = "文件";
   if (!platform && type === "text") platform = "文本";
