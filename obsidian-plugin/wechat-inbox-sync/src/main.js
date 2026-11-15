@@ -399,7 +399,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.11';
+const PLUGIN_RUNTIME_VERSION = '1.4.12';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -3234,6 +3234,14 @@ function buildXiaohongshuFailureDiagnostic({
 // private) resolves to a generic landing page: no note payload, no title, no
 // images. Retrying that exact link can never succeed, so it must not be
 // reported as a transient extraction failure the user should retry.
+function isXiaohongshuPageTransportFailure(error) {
+  if (!error || isAbortError(error) || isXiaohongshuRateLimitError(error)) return false;
+  const { code, message, status } = getTransportErrorDiagnostic(error);
+  if (status) return false; // An HTTP response is evidence about the target, not a missing response.
+  return /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code)
+    || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message)
+    || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
+}
 function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
   const source = diagnostic && typeof diagnostic === 'object' ? diagnostic : {};
   const request = source.request && typeof source.request === 'object' ? source.request : {};
@@ -3253,6 +3261,7 @@ function describeXiaohongshuContentFailure(diagnostic = {}) {
   if (request.loginLanding === true) {
     return '小红书要求登录后才能查看这条笔记，正文没有读到。请在小红书 App 里确认该笔记可以公开访问，重新“分享 → 复制链接”后再同步。';
   }
+  if (request.pageType === 'transport-failed') return '本机网络未能打开这条小红书笔记，尚未取得正文。';
   if (isExpiredXiaohongshuLinkDiagnostic(source)) {
     return '小红书链接已失效或笔记不可见（分享链接过期、笔记被删除或设为私密）。请在手机上重新打开该笔记，点“分享 → 复制链接”后重新同步；重试原链接不会成功。';
   }
@@ -28352,6 +28361,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           // A platform wall detected by the static request must not be retried
           // through hidden-browser candidates.
           if (isXiaohongshuRateLimitError(requestError)) throw requestError;
+          let onlyTransportFailures = isXiaohongshuPageTransportFailure(requestError);
           for (const candidate of xiaohongshuBrowserCandidates) {
             throwIfAborted(signal);
             try {
@@ -28376,10 +28386,24 @@ class WechatObsidianInboxPlugin extends Plugin {
               break;
             } catch (renderError) {
               if (isAbortError(renderError)) throw renderError;
+              onlyTransportFailures = onlyTransportFailures && isXiaohongshuPageTransportFailure(renderError);
               renderedXiaohongshuError = renderError;
             }
           }
-          if (!response) throw renderedXiaohongshuError || requestError;
+          if (!response) {
+            throwIfAborted(signal);
+            const refused = redirectResult.diagnostic?.attempts?.some(a => [401,403,404,410,429].includes(Number(a.status)));
+            if (onlyTransportFailures && !refused && this.isNewPreMediaHandoff(record, binding, options)
+              && !isXiaohongshuLoginLandingUrl(resolvedUrl)) {
+              const diag = buildXiaohongshuFailureDiagnostic({ manifestVersion: this.manifest?.version, sourceUrl: url,
+                resolvedUrl, requestError, renderError: renderedXiaohongshuError, redirectDiagnostic: redirectResult.diagnostic });
+              // No page was returned. Empty extraction fields cannot establish that the note expired.
+              diag.request.pageType = 'transport-failed';
+              diag.extraction.genericLanding = false;
+              throw createRetryableXiaohongshuContentError(diag);
+            }
+            throw renderedXiaohongshuError || requestError;
+          }
         }
         if (isXiaohongshuUrl(url)) {
           const responseFinalUrl = String(response && response.url || '').trim();

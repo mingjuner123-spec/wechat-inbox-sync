@@ -24208,7 +24208,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.11";
+var PLUGIN_RUNTIME_VERSION = "1.4.12";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -26481,6 +26481,13 @@ function buildXiaohongshuFailureDiagnostic({
   };
 }
 __name(buildXiaohongshuFailureDiagnostic, "buildXiaohongshuFailureDiagnostic");
+function isXiaohongshuPageTransportFailure(error) {
+  if (!error || isAbortError(error) || isXiaohongshuRateLimitError(error)) return false;
+  const { code, message, status } = getTransportErrorDiagnostic(error);
+  if (status) return false;
+  return /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code) || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message) || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
+}
+__name(isXiaohongshuPageTransportFailure, "isXiaohongshuPageTransportFailure");
 function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
   const source = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
   const request = source.request && typeof source.request === "object" ? source.request : {};
@@ -26497,6 +26504,7 @@ function describeXiaohongshuContentFailure(diagnostic = {}) {
   if (request.loginLanding === true) {
     return "小红书要求登录后才能查看这条笔记，正文没有读到。请在小红书 App 里确认该笔记可以公开访问，重新“分享 → 复制链接”后再同步。";
   }
+  if (request.pageType === "transport-failed") return "本机网络未能打开这条小红书笔记，尚未取得正文。";
   if (isExpiredXiaohongshuLinkDiagnostic(source)) {
     return "小红书链接已失效或笔记不可见（分享链接过期、笔记被删除或设为私密）。请在手机上重新打开该笔记，点“分享 → 复制链接”后重新同步；重试原链接不会成功。";
   }
@@ -48400,7 +48408,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     } };
   }
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null, options = {}) {
-    var _a;
+    var _a, _b, _c, _d;
     const signal = options.signal || null;
     throwIfAborted(signal);
     const metadata = record.metadata || {};
@@ -49130,6 +49138,7 @@ ${finalized.markdown}
         } catch (requestError) {
           if (!isXiaohongshuUrl(url)) throw requestError;
           if (isXiaohongshuRateLimitError(requestError)) throw requestError;
+          let onlyTransportFailures = isXiaohongshuPageTransportFailure(requestError);
           for (const candidate of xiaohongshuBrowserCandidates) {
             throwIfAborted(signal);
             try {
@@ -49154,10 +49163,28 @@ ${finalized.markdown}
               break;
             } catch (renderError) {
               if (isAbortError(renderError)) throw renderError;
+              onlyTransportFailures = onlyTransportFailures && isXiaohongshuPageTransportFailure(renderError);
               renderedXiaohongshuError = renderError;
             }
           }
-          if (!response) throw renderedXiaohongshuError || requestError;
+          if (!response) {
+            throwIfAborted(signal);
+            const refused = (_b = (_a = redirectResult.diagnostic) == null ? void 0 : _a.attempts) == null ? void 0 : _b.some((a) => [401, 403, 404, 410, 429].includes(Number(a.status)));
+            if (onlyTransportFailures && !refused && this.isNewPreMediaHandoff(record, binding, options) && !isXiaohongshuLoginLandingUrl(resolvedUrl)) {
+              const diag = buildXiaohongshuFailureDiagnostic({
+                manifestVersion: (_c = this.manifest) == null ? void 0 : _c.version,
+                sourceUrl: url,
+                resolvedUrl,
+                requestError,
+                renderError: renderedXiaohongshuError,
+                redirectDiagnostic: redirectResult.diagnostic
+              });
+              diag.request.pageType = "transport-failed";
+              diag.extraction.genericLanding = false;
+              throw createRetryableXiaohongshuContentError(diag);
+            }
+            throw renderedXiaohongshuError || requestError;
+          }
         }
         if (isXiaohongshuUrl(url)) {
           const responseFinalUrl = String(response && response.url || "").trim();
@@ -50373,7 +50400,7 @@ ${finalized.markdown}
         const requestGate = this.wechatArticleRequestGate || sharedWechatArticleGate;
         const sourceFingerprint = crypto.createHash("sha256").update(articleIdentity(url) || normalizeWechatArticleUrl(url)).digest("hex").slice(0, 24);
         throwIfAborted(options.signal);
-        const verifiedArticle = (_a = this.wechatVerifiedArticleCache) == null ? void 0 : _a.peek(url);
+        const verifiedArticle = (_d = this.wechatVerifiedArticleCache) == null ? void 0 : _d.peek(url);
         const runWechatTransport = /* @__PURE__ */ __name(async (stage, operation) => {
           try {
             return await requestGate.run(operation, { signal: options.signal, context: { stage, sourceFingerprint } });
@@ -50441,7 +50468,7 @@ ${finalized.markdown}
           preferVerifiedBrowser: Boolean(verifiedArticle),
           requiresTranscription: metadata.webpageMediaType === "audio_video" || metadata.transcriptOnly === true || metadata.transcriptionStatus === "failed",
           fetchStatic: /* @__PURE__ */ __name(async (targetUrl, profile = {}) => {
-            var _a2, _b, _c, _d;
+            var _a2, _b2, _c2, _d2;
             currentWechatProfileDetails = {
               profile: String(profile.id || ""),
               inputKind: String(profile.inputKind || ""),
@@ -50526,7 +50553,7 @@ ${finalized.markdown}
                 return await tryWechatSession() || staticHtml;
               }
             } catch (requestError) {
-              if (isAbortError(requestError) || ((_b = options.signal) == null ? void 0 : _b.aborted)) throw createAbortError();
+              if (isAbortError(requestError) || ((_b2 = options.signal) == null ? void 0 : _b2.aborted)) throw createAbortError();
               if (isWechatAccessPaused(requestError)) throw requestError;
               addWechatArticleStage("obsidian-request", {
                 outcome: "error",
@@ -50548,7 +50575,7 @@ ${finalized.markdown}
                 });
                 if (nodeState === "article") return nodeHtml;
               } catch (nodeError) {
-                if (isAbortError(nodeError) || ((_c = options.signal) == null ? void 0 : _c.aborted)) throw createAbortError();
+                if (isAbortError(nodeError) || ((_c2 = options.signal) == null ? void 0 : _c2.aborted)) throw createAbortError();
                 if (isWechatAccessPaused(nodeError)) throw nodeError;
                 addWechatArticleStage("node-fallback", {
                   outcome: "error",
@@ -50572,7 +50599,7 @@ ${finalized.markdown}
                   return sessionHtml;
                 }
               } catch (sessionError) {
-                if (isAbortError(sessionError) || ((_d = options.signal) == null ? void 0 : _d.aborted)) throw createAbortError();
+                if (isAbortError(sessionError) || ((_d2 = options.signal) == null ? void 0 : _d2.aborted)) throw createAbortError();
                 if (isWechatAccessPaused(sessionError)) throw sessionError;
                 addWechatArticleStage("wechat-session", {
                   outcome: "error",
