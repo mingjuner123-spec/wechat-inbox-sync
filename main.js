@@ -48008,7 +48008,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       } catch (error) {
         const text = `${error && error.code || ""} ${error && error.message || ""}`;
         const status = getTransportErrorDiagnostic(error).status || Number((_b = /^HTTP_(\d{3})$/.exec(error == null ? void 0 : error.code)) == null ? void 0 : _b[1]);
-        const transient = status ? status >= 500 && status <= 599 : /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
+        const transient = status && this.isNewPreMediaHandoff(record, binding, options) ? status >= 500 && status <= 599 : /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
         if (!transient || attempt === 1 || options.signal && options.signal.aborted) throw error;
         await new Promise((resolve) => setTimeout(resolve, 800));
       }

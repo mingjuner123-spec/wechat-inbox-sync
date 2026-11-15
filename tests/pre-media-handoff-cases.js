@@ -104,7 +104,7 @@ async function runCase(bundle, item) {
     outcome = error.code || error.name;
   }
   const expectedInputs = platform === 'podcast' ? [['GET', url]] : [['POST', '/media/prepare', url]];
-  const repeated = ['500','503','503-text','503-recovered'].includes(response);
+  const repeated = ['500','503','503-text','503-recovered'].includes(response) && item.createdAt !== oldCreatedAt;
   assert.deepEqual(observedInputs, storedResult ? [] : repeated ? [...expectedInputs,...expectedInputs] : expectedInputs);
   assert.equal(committedNotes.length, Number(storedResult));
   if (storedResult) {
