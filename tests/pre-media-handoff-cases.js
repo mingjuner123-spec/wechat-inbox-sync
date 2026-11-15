@@ -53,6 +53,9 @@ async function runCase(bundle, item) {
       controller.abort();
       throw Object.assign(new Error('simulated connection error'), { code: 'ECONNRESET' });
     }
+    if (response === '503-recovered' && counters.reads === 1) throw Object.assign(new Error('服务未就绪'), {status:503, code:'MEDIA_RESOLVE_FAILED'});
+    if (['500','503','403'].includes(response)) throw Object.assign(new Error('解析服务错误'), {status:Number(response), code:'MEDIA_RESOLVE_FAILED'});
+    if (response === '503-text') throw new Error('Request failed, status 503');
     if (response === '404') throw Object.assign(new Error('HTTP 404'), { status: 404, statusCode: 404 });
     if (response === 'transport') throw Object.assign(new Error('simulated connection reset'), { code: 'ECONNRESET' });
     return platform === 'podcast' ? { status: 200, text: '<html></html>' } : { success: true, data: {} };
@@ -101,7 +104,8 @@ async function runCase(bundle, item) {
     outcome = error.code || error.name;
   }
   const expectedInputs = platform === 'podcast' ? [['GET', url]] : [['POST', '/media/prepare', url]];
-  assert.deepEqual(observedInputs, storedResult ? [] : expectedInputs);
+  const repeated = ['500','503','503-text','503-recovered'].includes(response);
+  assert.deepEqual(observedInputs, storedResult ? [] : repeated ? [...expectedInputs,...expectedInputs] : expectedInputs);
   assert.equal(committedNotes.length, Number(storedResult));
   if (storedResult) {
     assert.equal(result?.committed, true);
@@ -119,7 +123,7 @@ async function runCase(bundle, item) {
     if (item.checkSignal) assert.equal(payload.signal, controller.signal);
   }
   assert.deepEqual({ outcome, ...counters }, {
-    outcome: item.outcome, reads: storedResult ? 0 : 1, gates: item.gates, submits: item.submits, writes: Number(storedResult),
+    outcome: item.outcome, reads: storedResult ? 0 : repeated ? 2 : 1, gates: item.gates, submits: item.submits, writes: Number(storedResult),
   });
 }
 
@@ -144,6 +148,9 @@ function cases() {
   add('podcast','empty','deny',true,failed);
   add('podcast','empty','uncertain',true,uncertain);
   add('podcast','empty','allow',true,queued,oldCreatedAt);
+  for (const status of ['500','503','503-text','503-recovered']) add('channels', status, 'allow', true, queued);
+  add('channels','403','allow',false,failed);
+  add('channels','500','allow',false,failed, oldCreatedAt);
   return list;
 }
 module.exports = async function verifyPreMediaHandoff() {

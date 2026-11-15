@@ -47993,7 +47993,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     });
   }
   async prepareWechatChannelsMedia(record, url, binding = null, title = "", options = {}) {
-    var _a;
+    var _a, _b;
     throwIfAborted(options.signal);
     let response = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -48007,7 +48007,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         break;
       } catch (error) {
         const text = `${error && error.code || ""} ${error && error.message || ""}`;
-        const transient = /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
+        const status = getTransportErrorDiagnostic(error).status || Number((_b = /^HTTP_(\d{3})$/.exec(error == null ? void 0 : error.code)) == null ? void 0 : _b[1]);
+        const transient = status ? status >= 500 && status <= 599 : /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
         if (!transient || attempt === 1 || options.signal && options.signal.aborted) throw error;
         await new Promise((resolve) => setTimeout(resolve, 800));
       }
@@ -48064,7 +48065,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     return normalizeWechatChannelsFeedPayload(body);
   }
   async hydrateWechatChannelsTranscript(record, url, binding = null, title = "", options = {}) {
-    var _a;
+    var _a, _b;
     throwIfAborted(options.signal);
     const metadata = { ...record.metadata || {}, conversionError: "" };
     record = { ...record, metadata };
@@ -48089,7 +48090,9 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
       const diagnostic = channelsDiagnostic.noteFailure(trace, error, "prepare");
       resolutionError = channelsDiagnostic.outcome(diagnostic).message;
-      if (error.code === "MEDIA_PREPARE_EMPTY" && this.isNewPreMediaHandoff(record, binding, options)) {
+      const status = getTransportErrorDiagnostic(error).status || Number((_b = /^HTTP_(\d{3})$/.exec(error == null ? void 0 : error.code)) == null ? void 0 : _b[1]);
+      const unavailable = (error == null ? void 0 : error.code) === "MEDIA_PREPARE_EMPTY" || status >= 500 && status <= 599;
+      if (unavailable && this.isNewPreMediaHandoff(record, binding, options)) {
         return this.buildTranscriptRecordFromMedia(record, {
           url,
           platform: "视频号",
@@ -48098,7 +48101,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           title,
           signal: options.signal || null,
           mediaResolutionDiagnostic: trace,
-          noMediaError: resolutionError
+          noMediaError: status ? "视频号媒体解析服务暂不可用" : "视频号解析未返回媒体地址"
         });
       }
     }

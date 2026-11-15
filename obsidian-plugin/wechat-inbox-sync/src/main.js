@@ -27116,7 +27116,9 @@ class WechatObsidianInboxPlugin extends Plugin {
         break;
       } catch (error) {
         const text = `${error && error.code || ''} ${error && error.message || ''}`;
-        const transient = /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
+        const status = getTransportErrorDiagnostic(error).status || Number(/^HTTP_(\d{3})$/.exec(error?.code)?.[1]);
+        const transient = status ? status >= 500 && status <= 599
+          : /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
         if (!transient || attempt === 1 || (options.signal && options.signal.aborted)) throw error;
         await new Promise((resolve) => setTimeout(resolve, 800));
       }
@@ -27204,10 +27206,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
       const diagnostic = channelsDiagnostic.noteFailure(trace, error, 'prepare');
       resolutionError = channelsDiagnostic.outcome(diagnostic).message;
-      if (error.code === 'MEDIA_PREPARE_EMPTY' && this.isNewPreMediaHandoff(record, binding, options)) {
+      const status = getTransportErrorDiagnostic(error).status || Number(/^HTTP_(\d{3})$/.exec(error?.code)?.[1]);
+      const unavailable = error?.code === 'MEDIA_PREPARE_EMPTY' || (status >= 500 && status <= 599);
+      if (unavailable && this.isNewPreMediaHandoff(record, binding, options)) {
         return this.buildTranscriptRecordFromMedia(record, {
           url, platform: '视频号', source: 'wechat-channels-media-prepare', binding, title,
-          signal: options.signal || null, mediaResolutionDiagnostic: trace, noMediaError: resolutionError,
+          signal: options.signal || null, mediaResolutionDiagnostic: trace, noMediaError: status ? '视频号媒体解析服务暂不可用' : '视频号解析未返回媒体地址',
         });
       }
     }
