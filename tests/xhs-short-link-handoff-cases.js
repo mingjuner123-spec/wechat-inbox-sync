@@ -1,18 +1,17 @@
 'use strict';
 
-// Exercise the published writeRecord entry with synthetic public links.
-
 const assert = require('node:assert/strict');
 
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
-const cwd=path.resolve(__dirname,'..'); const mode='after'; const filename=path.resolve(__dirname,'../main.js'); const code=fs.readFileSync(filename,'utf8');
+const cwd=path.resolve(__dirname,'..'); const mode='after'; const filename=path.join(cwd,'main.js'); const code=fs.readFileSync(filename,'utf8');
 const canonical = 'https://www.xiaohongshu.com/explore/abcdef0123456789abcdef01';
 const external = 'https://outside.invalid/synthetic';
 const recent = '2026-11-16T01:00:00Z';
 const old = '2026-11-14T01:00:00Z';
+const cutoff = '2026-11-15T19:00:00Z';
 const unavailable = 'XIAOHONGSHU_CONTENT_UNAVAILABLE';
 const queued = 'CLOUD_FALLBACK_QUEUED';
 const uncertain = 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN';
@@ -25,9 +24,14 @@ function fixtureClass(item, calls) {
     const uri = new URL(target);
     calls.redirect.push({ method: options.method, host: uri.hostname });
     const req = new EventEmitter();
-    req.setTimeout = () => req;
-    req.destroy = () => {};
+    let timeoutMs, onTimeout;
+    req.setTimeout = (ms, callback) => { timeoutMs = ms; onTimeout = callback; return req; };
+    req.destroy = error => { if (error) req.emit('error', error); };
     req.end = () => queueMicrotask(() => {
+      if (item.realStatic && timeoutMs === 10000) {
+        if (item.localTimeout) return onTimeout();
+        return req.emit('error', networkFailure());
+      }
       if (item.redirect === 'offline') return req.emit('error', networkFailure());
       const location = uri.hostname === 'xhslink.cn' ? (item.redirect === 'external' ? external : canonical) : '';
       callback({ statusCode: location ? 302 : 200, headers: location ? { location } : {}, resume() {} });
@@ -55,7 +59,7 @@ function fixtureClass(item, calls) {
 }
 
 async function runCase(item) {
-  const calls = { redirect: [], statics: [], browser: [], gates: 0, submissions: [], writes: 0 };
+  const calls = { redirect: [], statics: [], browser: [], gates: 0, submissions: [], posts: [], writes: 0 };
   const Plugin = fixtureClass(item, calls);
   const plugin = new Plugin();
   const controller = new AbortController();
@@ -63,6 +67,8 @@ async function runCase(item) {
   const uri = (item.scheme || 'http') + '://xhslink.cn/o/syntheticReview123';
   const record = { _id: 'fixture-record', retryCount: 2, type: 'text', createdAt: item.date || recent, content: 'Share ' + uri + ' ' };
   plugin.settings = Plugin.__test.mergeSettings({ aiProvider: 'local', cloudFallbackEnabled: true, xiaohongshuCommentsEnabled: false });
+  plugin.settings.clientId = 'synthetic-fingerprint-client';
+  plugin.saveData = async () => {};
   plugin.showSyncProgress = () => {};
   plugin.ensureFolder = async () => {};
   plugin.nextRecordTitle = async () => 'fixture';
@@ -70,7 +76,7 @@ async function runCase(item) {
   plugin.hasProFeatureAccess = async () => true;
   plugin.collectXiaohongshuMediaUrlsWithSession = async () => [];
   plugin.probeXiaohongshuMediaUrls = async () => [];
-  plugin.requestXiaohongshuStaticPage = async (url) => {
+  if (!item.realStatic) plugin.requestXiaohongshuStaticPage = async (url) => {
     calls.statics.push(new URL(url).hostname);
     if (item.cancel) {
       controller.abort();
@@ -95,10 +101,15 @@ async function runCase(item) {
     calls.gates++;
     return item.deny ? { allowed: false, code: 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', message: 'Synthetic eligibility denial' } : { allowed: true };
   };
-  plugin.submitCloudFallbackJob = async (payload) => {
+  const submit = plugin.submitCloudFallbackJob?.bind(plugin);
+  if (submit) plugin.submitCloudFallbackJob = async (payload) => {
     calls.submissions.push(payload);
-    if (item.uncertain) throw Object.assign(new Error('Synthetic uncertain response'), { code: uncertain });
-    return { jobId: 'fixture-job', status: 'queued' };
+    return submit(payload);
+  };
+  plugin.requestJson = async (route, method, body, requestBinding) => {
+    calls.posts.push({ route, method, body, binding: requestBinding });
+    if (item.uncertain) throw networkFailure();
+    return { success: true, data: { jobId: 'fixture-job', status: 'queued' } };
   };
   plugin.app = { vault: { adapter: { write: async () => { calls.writes++; } } } };
   assert.equal(Plugin.__test.selectAutomaticWebpageUrlFromText(record.content), uri);
@@ -120,9 +131,21 @@ async function runCase(item) {
     assert.equal(payload.binding, binding);
     assert.equal(payload.signal, controller.signal);
   }
-  const handoff = item.redirect === 'external' ? mode !== 'old' : mode === 'after' && !item.date && !item.page && !item.status && !item.cancel;
+  const recentRecord = Date.parse(record.createdAt) >= Date.parse(cutoff);
+  const handoff = item.redirect === 'external' ? mode !== 'old' : mode === 'after' && recentRecord && !item.page && !item.status && !item.cancel;
   const submissions = Number(handoff && !item.deny);
   const expected = item.cancel ? 'AbortError' : submissions ? (item.uncertain ? uncertain : queued) : unavailable;
+  assert.equal(calls.posts.length, submissions);
+  for (const post of calls.posts) {
+    assert.equal(post.route, '/transcriptions/fallback/jobs');
+    assert.equal(post.method, 'POST');
+    assert.equal(post.body.sourceType, 'xiaohongshu_url');
+    assert.equal(post.body.sourceUrl, uri);
+    assert.equal(post.body.recordId, record._id);
+    assert.equal(post.body.recordRetryCount, record.retryCount);
+    assert.ok(post.body.clientRequestId);
+    assert.equal(post.binding, binding);
+  }
   assert.deepEqual({ outcome, gates: calls.gates, submissions: calls.submissions.length, writes: calls.writes },
     { outcome: expected, gates: Number(handoff), submissions, writes: 0 });
 }
@@ -133,6 +156,8 @@ const cases = [
   { name: 'official redirect followed by page network failure', redirect: 'canonical' },
   { name: 'existing external redirect handoff', redirect: 'external' },
   { name: 'old record receives no new handoff', redirect: 'offline', date: old },
+  { name: 'one millisecond before cutoff', redirect: 'offline', scheme: 'https', date: new Date(Date.parse(cutoff) - 1).toISOString() },
+  { name: 'exact cutoff', redirect: 'offline', scheme: 'https', date: cutoff },
   { name: 'denied eligibility', redirect: 'offline', deny: true },
   { name: 'uncertain create', redirect: 'offline', uncertain: true },
   { name: 'user cancelled', redirect: 'offline', cancel: true },
@@ -140,5 +165,9 @@ const cases = [
   { name: 'gone static response followed by browser reset', redirect: 'canonical', status: 410 },
   { name: 'empty official landing page', redirect: 'canonical', page: 'landing' },
   { name: 'deleted official note page', redirect: 'canonical', page: 'deleted' },
+  { name: 'HTTP shortlink uses actual static transport', redirect: 'offline', realStatic: true },
+  { name: 'HTTPS actual static transport reset', redirect: 'offline', scheme: 'https', realStatic: true },
+  { name: 'HTTPS built-in static request timeout', redirect: 'offline', scheme: 'https', realStatic: true, localTimeout: true },
+  { name: 'canonical built-in static request timeout', redirect: 'canonical', realStatic: true, localTimeout: true },
 ];
 module.exports=async function verifyXhsTransportHandoff(){for(const item of cases) await runCase(item);};
