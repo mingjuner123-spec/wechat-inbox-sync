@@ -399,7 +399,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.10';
+const PLUGIN_RUNTIME_VERSION = '1.4.11';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -26749,8 +26749,33 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  // Apply the two new pre-media handoffs only to newly collected records.
+  // Missing creation time must never turn an old failure into a new job.
+  isNewPreMediaHandoff(record, binding, options) {
+    const createdAt = Date.parse(record?.createdAt);
+    return !!binding && this.settings.cloudFallbackEnabled === true
+      && !options.operatorNode && !options.forceLocal
+      && Number.isFinite(createdAt) && createdAt >= Date.UTC(2026, 10, 15, 19);
+  }
+
   async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = '', options = {}) {
-    const response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
+    throwIfAborted(options.signal);
+    let response;
+    try {
+      response = await requestUrl({ url, method: 'GET', headers: getSocialRequestHeaders(url) });
+    } catch (error) {
+      if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
+      const { status, code, message } = getTransportErrorDiagnostic(error);
+      const retryable = status ? (status === 408 || status === 429 || (status >= 500 && status <= 599))
+        : /^(?:ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT)$/.test(code)
+          || isRequestUrlTransportError(message);
+      if (!retryable || !this.isNewPreMediaHandoff(record, binding, options)) throw error;
+      return this.buildTranscriptRecordFromMedia(record, {
+        url, platform: '小宇宙', source: 'audio', binding, title, signal: options.signal || null,
+        noMediaError: '小宇宙节目页请求失败，未取得音频地址',
+      });
+    }
+    throwIfAborted(options.signal);
     const html = response.text || '';
     const markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, url);
     const pageMetadata = extractWebpageMetadataFromHtml(html, url);
@@ -27179,6 +27204,12 @@ class WechatObsidianInboxPlugin extends Plugin {
       if (isAbortError(error) || options.signal?.aborted) throw createAbortError();
       const diagnostic = channelsDiagnostic.noteFailure(trace, error, 'prepare');
       resolutionError = channelsDiagnostic.outcome(diagnostic).message;
+      if (error.code === 'MEDIA_PREPARE_EMPTY' && this.isNewPreMediaHandoff(record, binding, options)) {
+        return this.buildTranscriptRecordFromMedia(record, {
+          url, platform: '视频号', source: 'wechat-channels-media-prepare', binding, title,
+          signal: options.signal || null, mediaResolutionDiagnostic: trace, noMediaError: resolutionError,
+        });
+      }
     }
 
     const mediaUrl = preparedMedia?.mediaUrl || '';
@@ -28098,7 +28129,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
 
       if (isXiaoyuzhouUrl(url)) {
-        return await this.hydrateXiaoyuzhouTranscript(record, url, binding, title);
+        return await this.hydrateXiaoyuzhouTranscript(record, url, binding, title, { signal });
       }
 
       if (isBilibiliUrl(url)) {
