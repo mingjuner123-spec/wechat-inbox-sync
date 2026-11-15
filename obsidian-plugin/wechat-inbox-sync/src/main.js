@@ -3238,7 +3238,7 @@ function isXiaohongshuPageTransportFailure(error) {
   if (!error || isAbortError(error) || isXiaohongshuRateLimitError(error)) return false;
   const { code, message, status } = getTransportErrorDiagnostic(error);
   if (status) return false; // An HTTP response is evidence about the target, not a missing response.
-  return /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code)
+  return message === '网页抓取超时' || /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code)
     || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message)
     || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
 }
@@ -28349,10 +28349,18 @@ class WechatObsidianInboxPlugin extends Plugin {
         let renderedXiaohongshuIncludesComments = false;
         let renderedXiaohongshuError = null;
         const xiaohongshuBrowserAttempts = [];
+        let staticSourceUrl = resolvedUrl;
+        const redirects = redirectResult.diagnostic?.attempts;
+        if (this.isNewPreMediaHandoff(record, binding, options) && isXiaohongshuShortLinkUrl(url)
+          && resolvedUrl === url && /^http:\/\//i.test(url) && Array.isArray(redirects) && redirects.length
+          && redirects.every(a => Number(a.status) === 0 && ['request-error','timeout'].includes(a.outcome))) {
+          const secure = url.replace(/^http:/i, 'https:');
+          if (isTrustedXiaohongshuTransportUrl(secure)) staticSourceUrl = secure;
+        }
         let response;
         try {
           response = isXiaohongshuUrl(url)
-            ? await this.requestXiaohongshuStaticPage(resolvedUrl, xiaohongshuBrowserOptions)
+            ? await this.requestXiaohongshuStaticPage(staticSourceUrl, xiaohongshuBrowserOptions)
             : (metadata.automaticWebpageExtraction
               ? await requestPublicWebpageText(resolvedUrl, { headers })
               : await requestUrl({ url: resolvedUrl, method: 'GET', headers }));

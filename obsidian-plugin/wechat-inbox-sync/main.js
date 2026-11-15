@@ -26485,7 +26485,7 @@ function isXiaohongshuPageTransportFailure(error) {
   if (!error || isAbortError(error) || isXiaohongshuRateLimitError(error)) return false;
   const { code, message, status } = getTransportErrorDiagnostic(error);
   if (status) return false;
-  return /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code) || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message) || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
+  return message === "网页抓取超时" || /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code) || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message) || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
 }
 __name(isXiaohongshuPageTransportFailure, "isXiaohongshuPageTransportFailure");
 function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
@@ -48408,7 +48408,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     } };
   }
   async hydrateWebpageMarkdown(record, rootDir, dateFolder, title, binding = null, options = {}) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     const signal = options.signal || null;
     throwIfAborted(signal);
     const metadata = record.metadata || {};
@@ -49132,9 +49132,15 @@ ${finalized.markdown}
         let renderedXiaohongshuIncludesComments = false;
         let renderedXiaohongshuError = null;
         const xiaohongshuBrowserAttempts = [];
+        let staticSourceUrl = resolvedUrl;
+        const redirects = (_a = redirectResult.diagnostic) == null ? void 0 : _a.attempts;
+        if (this.isNewPreMediaHandoff(record, binding, options) && isXiaohongshuShortLinkUrl(url) && resolvedUrl === url && /^http:\/\//i.test(url) && Array.isArray(redirects) && redirects.length && redirects.every((a) => Number(a.status) === 0 && ["request-error", "timeout"].includes(a.outcome))) {
+          const secure = url.replace(/^http:/i, "https:");
+          if (isTrustedXiaohongshuTransportUrl(secure)) staticSourceUrl = secure;
+        }
         let response;
         try {
-          response = isXiaohongshuUrl(url) ? await this.requestXiaohongshuStaticPage(resolvedUrl, xiaohongshuBrowserOptions) : metadata.automaticWebpageExtraction ? await requestPublicWebpageText(resolvedUrl, { headers }) : await requestUrl({ url: resolvedUrl, method: "GET", headers });
+          response = isXiaohongshuUrl(url) ? await this.requestXiaohongshuStaticPage(staticSourceUrl, xiaohongshuBrowserOptions) : metadata.automaticWebpageExtraction ? await requestPublicWebpageText(resolvedUrl, { headers }) : await requestUrl({ url: resolvedUrl, method: "GET", headers });
         } catch (requestError) {
           if (!isXiaohongshuUrl(url)) throw requestError;
           if (isXiaohongshuRateLimitError(requestError)) throw requestError;
@@ -49169,10 +49175,10 @@ ${finalized.markdown}
           }
           if (!response) {
             throwIfAborted(signal);
-            const refused = (_b = (_a = redirectResult.diagnostic) == null ? void 0 : _a.attempts) == null ? void 0 : _b.some((a) => [401, 403, 404, 410, 429].includes(Number(a.status)));
+            const refused = (_c = (_b = redirectResult.diagnostic) == null ? void 0 : _b.attempts) == null ? void 0 : _c.some((a) => [401, 403, 404, 410, 429].includes(Number(a.status)));
             if (onlyTransportFailures && !refused && this.isNewPreMediaHandoff(record, binding, options) && !isXiaohongshuLoginLandingUrl(resolvedUrl)) {
               const diag = buildXiaohongshuFailureDiagnostic({
-                manifestVersion: (_c = this.manifest) == null ? void 0 : _c.version,
+                manifestVersion: (_d = this.manifest) == null ? void 0 : _d.version,
                 sourceUrl: url,
                 resolvedUrl,
                 requestError,
@@ -50400,7 +50406,7 @@ ${finalized.markdown}
         const requestGate = this.wechatArticleRequestGate || sharedWechatArticleGate;
         const sourceFingerprint = crypto.createHash("sha256").update(articleIdentity(url) || normalizeWechatArticleUrl(url)).digest("hex").slice(0, 24);
         throwIfAborted(options.signal);
-        const verifiedArticle = (_d = this.wechatVerifiedArticleCache) == null ? void 0 : _d.peek(url);
+        const verifiedArticle = (_e = this.wechatVerifiedArticleCache) == null ? void 0 : _e.peek(url);
         const runWechatTransport = /* @__PURE__ */ __name(async (stage, operation) => {
           try {
             return await requestGate.run(operation, { signal: options.signal, context: { stage, sourceFingerprint } });
