@@ -24208,7 +24208,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.10";
+var PLUGIN_RUNTIME_VERSION = "1.4.11";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -47672,8 +47672,34 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       };
     }
   }
+  // Apply the two new pre-media handoffs only to newly collected records.
+  // Missing creation time must never turn an old failure into a new job.
+  isNewPreMediaHandoff(record, binding, options) {
+    const createdAt = Date.parse(record == null ? void 0 : record.createdAt);
+    return !!binding && this.settings.cloudFallbackEnabled === true && !options.operatorNode && !options.forceLocal && Number.isFinite(createdAt) && createdAt >= Date.UTC(2026, 10, 15, 19);
+  }
   async hydrateXiaoyuzhouTranscript(record, url, binding = null, title = "", options = {}) {
-    const response = await requestUrl({ url, method: "GET", headers: getSocialRequestHeaders(url) });
+    var _a;
+    throwIfAborted(options.signal);
+    let response;
+    try {
+      response = await requestUrl({ url, method: "GET", headers: getSocialRequestHeaders(url) });
+    } catch (error) {
+      if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
+      const { status, code, message } = getTransportErrorDiagnostic(error);
+      const retryable = status ? status === 408 || status === 429 || status >= 500 && status <= 599 : /^(?:ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT)$/.test(code) || isRequestUrlTransportError(message);
+      if (!retryable || !this.isNewPreMediaHandoff(record, binding, options)) throw error;
+      return this.buildTranscriptRecordFromMedia(record, {
+        url,
+        platform: "小宇宙",
+        source: "audio",
+        binding,
+        title,
+        signal: options.signal || null,
+        noMediaError: "小宇宙节目页请求失败，未取得音频地址"
+      });
+    }
+    throwIfAborted(options.signal);
     const html = response.text || "";
     const markdown = buildSocialMediaSupplementalMarkdownFromHtml(html, url);
     const pageMetadata = extractWebpageMetadataFromHtml(html, url);
@@ -47967,7 +47993,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     });
   }
   async prepareWechatChannelsMedia(record, url, binding = null, title = "", options = {}) {
-    var _a;
+    var _a, _b;
     throwIfAborted(options.signal);
     let response = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -47981,7 +48007,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         break;
       } catch (error) {
         const text = `${error && error.code || ""} ${error && error.message || ""}`;
-        const transient = /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
+        const status = getTransportErrorDiagnostic(error).status || Number((_b = /^HTTP_(\d{3})$/.exec(error == null ? void 0 : error.code)) == null ? void 0 : _b[1]);
+        const transient = status && this.isNewPreMediaHandoff(record, binding, options) ? status >= 500 && status <= 599 : /NODE_HTTP_TIMEOUT|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|timeout|HTTP_5\d\d|status 5\d\d|502|503|504/i.test(text);
         if (!transient || attempt === 1 || options.signal && options.signal.aborted) throw error;
         await new Promise((resolve) => setTimeout(resolve, 800));
       }
@@ -48038,7 +48065,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     return normalizeWechatChannelsFeedPayload(body);
   }
   async hydrateWechatChannelsTranscript(record, url, binding = null, title = "", options = {}) {
-    var _a;
+    var _a, _b;
     throwIfAborted(options.signal);
     const metadata = { ...record.metadata || {}, conversionError: "" };
     record = { ...record, metadata };
@@ -48063,6 +48090,20 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       if (isAbortError(error) || ((_a = options.signal) == null ? void 0 : _a.aborted)) throw createAbortError();
       const diagnostic = channelsDiagnostic.noteFailure(trace, error, "prepare");
       resolutionError = channelsDiagnostic.outcome(diagnostic).message;
+      const status = getTransportErrorDiagnostic(error).status || Number((_b = /^HTTP_(\d{3})$/.exec(error == null ? void 0 : error.code)) == null ? void 0 : _b[1]);
+      const unavailable = (error == null ? void 0 : error.code) === "MEDIA_PREPARE_EMPTY" || status >= 500 && status <= 599;
+      if (unavailable && this.isNewPreMediaHandoff(record, binding, options)) {
+        return this.buildTranscriptRecordFromMedia(record, {
+          url,
+          platform: "视频号",
+          source: "wechat-channels-media-prepare",
+          binding,
+          title,
+          signal: options.signal || null,
+          mediaResolutionDiagnostic: trace,
+          noMediaError: status ? "视频号媒体解析服务暂不可用" : "视频号解析未返回媒体地址"
+        });
+      }
     }
     const mediaUrl = (preparedMedia == null ? void 0 : preparedMedia.mediaUrl) || "";
     if (mediaUrl) {
@@ -48905,7 +48946,7 @@ ${finalized.markdown}
         }
       }
       if (isXiaoyuzhouUrl(url)) {
-        return await this.hydrateXiaoyuzhouTranscript(record, url, binding, title);
+        return await this.hydrateXiaoyuzhouTranscript(record, url, binding, title, { signal });
       }
       if (isBilibiliUrl(url)) {
         return await this.hydrateBilibiliTranscript(record, url, binding, title);
