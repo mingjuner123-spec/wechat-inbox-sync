@@ -257,6 +257,7 @@ async function run() {
 
 run()
   .then(() => require('./pre-media-handoff-cases')())
+  .then(() => require('./xhs-short-link-handoff-cases')())
   .then(() => console.log('plugin-wechat-channels-media-prepare.test.js passed'))
   .catch((error) => {
     console.error(error);
