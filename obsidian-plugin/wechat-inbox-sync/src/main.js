@@ -182,6 +182,7 @@ const {
   buildSyncNotice,
   buildSyncProgressMessage,
   buildSyncResultNotice,
+  hasPendingCloudResult,
   formatProgressElapsed,
   isProgressHeartbeatStale,
   normalizeProgressPercent,
@@ -400,7 +401,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.14';
+const PLUGIN_RUNTIME_VERSION = '1.4.15';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -17932,6 +17933,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const controller = this.autoSyncController;
     this.register(() => {
       this.autoSyncDisposed = true;
+      for (const waiter of [...(this.localAsrWaiters || [])]) waiter.cancel();
       controller.dispose();
       if (this.currentTranscriptionAbortRequest) this.currentTranscriptionAbortRequest('plugin_unload');
       else if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
@@ -20348,7 +20350,9 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async stopCurrentTranscription({ trigger = 'programmatic_or_unknown', trustedEvent = null } = {}) {
     let stopped = false;
-    const activeContext = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === 'object'
+    const stoppingWaiter = this.currentProcessingAbortController && Array.from(this.localAsrWaiters || [])
+      .some(waiter => waiter.signal === this.currentProcessingAbortController.signal);
+    const activeContext = !stoppingWaiter && this.currentTranscriptionContext && typeof this.currentTranscriptionContext === 'object'
       ? this.currentTranscriptionContext
       : this.currentProcessingContext;
     const context = activeContext && typeof activeContext === 'object'
@@ -20359,10 +20363,10 @@ class WechatObsidianInboxPlugin extends Plugin {
           : null,
       }
       : null;
-    if (this.currentTranscriptionAbortRequest) {
+    if (!stoppingWaiter && this.currentTranscriptionAbortRequest) {
       this.currentTranscriptionAbortRequest('user_stop', { trigger: ['stop_command', 'stop_button', 'programmatic_or_unknown'].includes(trigger) ? trigger : 'programmatic_or_unknown', trustedEvent: typeof trustedEvent === 'boolean' ? trustedEvent : null });
       stopped = true;
-    } else if (this.currentTranscriptionAbortController) {
+    } else if (!stoppingWaiter && this.currentTranscriptionAbortController) {
       this.currentTranscriptionAbortController.abort();
       stopped = true;
     }
@@ -20370,7 +20374,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       this.currentProcessingAbortController.abort();
       stopped = true;
     }
-    if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
+    if (!stoppingWaiter && this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
       try {
         const child = this.currentTranscriptionProcess;
         if (process.platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0) {
@@ -20384,7 +20388,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         // Ignore process cleanup failures.
       }
     }
-    if (closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
+    if (!stoppingWaiter && closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
       stopped = true;
     }
     if (!stopped) {
@@ -23968,8 +23972,8 @@ class WechatObsidianInboxPlugin extends Plugin {
         _localAsrMutexToken: mutexToken,
       });
     } finally {
-      if (this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
       this.operatorLocalAsrActive = false;
+      this.releaseLocalAsrSlot(mutexToken);
     }
   }
 
@@ -24352,22 +24356,57 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw new Error('未配置可用的音频转写方案');
   }
 
+  waitForLocalAsrSlot(token, signal) {
+    if (!this.localAsrWaiters) this.localAsrWaiters = new Set();
+    return new Promise((resolve, reject) => {
+      const remove = () => {
+        this.localAsrWaiters.delete(waiter);
+        signal?.removeEventListener('abort', waiter.cancel);
+      };
+      const waiter = {
+        signal,
+        start: () => {
+          remove();
+          this.localAsrMutexOwner = token;
+          resolve();
+        },
+        cancel: () => {
+          remove();
+          reject(createAbortError());
+        },
+      };
+      this.localAsrWaiters.add(waiter);
+      signal?.addEventListener('abort', waiter.cancel, { once: true });
+      if (this.autoSyncDisposed || signal?.aborted) waiter.cancel();
+    });
+  }
+
+  releaseLocalAsrSlot(token) {
+    if (this.localAsrMutexOwner !== token) return;
+    this.localAsrMutexOwner = null;
+    const next = this.localAsrWaiters?.values().next().value;
+    if (next) next.start();
+  }
+
   async runLocalTranscription(audioUrl, options = {}) {
     const requestedOwner = options.operatorNode === true ? 'operator' : 'foreground';
     const inheritedToken = options._localAsrMutexToken || null;
     const currentOwner = this.localAsrMutexOwner || null;
-    if (currentOwner && currentOwner !== inheritedToken) {
-      const error = new Error(requestedOwner === 'operator'
-        ? '负责人前台正在进行本地转写，运营节点暂不领取本地转写任务'
-        : '本机运营节点正在进行本地转写，请稍后重试');
-      error.code = 'LOCAL_ASR_BUSY';
-      error.retryable = true;
-      throw error;
-    }
-    const acquiredHere = !currentOwner;
     const mutexToken = inheritedToken || { kind: requestedOwner };
-    if (acquiredHere) this.localAsrMutexOwner = mutexToken;
+    throwIfAborted(options.signal);
+    if (this.autoSyncDisposed) throw createAbortError();
+    if (currentOwner && currentOwner !== inheritedToken) {
+      if (requestedOwner === 'operator') {
+        throw Object.assign(new Error('本地转写正在使用中，运营节点暂不领取任务'), { code: 'LOCAL_ASR_BUSY', retryable: true });
+      }
+      this.showSyncProgress({ stage: 'waiting-local-asr', title: options.title || '' });
+      await this.waitForLocalAsrSlot(mutexToken, options.signal);
+    } else if (!currentOwner) {
+      this.localAsrMutexOwner = mutexToken;
+    }
     try {
+      if (this.autoSyncDisposed) throw createAbortError();
+      throwIfAborted(options.signal);
       try {
         return await this.runLocalTranscriptionCore(audioUrl, { ...options, _localAsrMutexToken: mutexToken });
       } catch (error) {
@@ -24386,7 +24425,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         throw normalizeLocalAsrFailure(error);
       }
     } finally {
-      if (acquiredHere && this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
+      if (currentOwner !== mutexToken) this.releaseLocalAsrSlot(mutexToken);
     }
   }
 
@@ -24618,6 +24657,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       return text.startsWith(baseline) ? text.slice(baseline.length) : text;
     };
     const emitLocalProgress = (fallbackPercent = null) => {
+      if (options.operatorNode && this.localAsrWaiters?.size) return;
       const activeAttempt = activeAttemptNumber;
       const runLog = activeAttempt === null ? '' : readLocalAsrRunLog(installRoot);
       const logFreshness = activeAttempt === null
@@ -25682,6 +25722,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         this.showSyncProgress({ ...progress, stage: 'transcribing', title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
+          signal: progress.signal || null,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
           retryCount: record.retryCount,
@@ -25732,6 +25773,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         this.showSyncProgress({ ...progress, stage: 'transcribing', title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
+          signal: progress.signal || null,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
           retryCount: record.retryCount,
@@ -25871,6 +25913,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           this.showSyncProgress({ ...progress, stage: 'transcribing', title: fileName });
           const result = await this.runConfiguredTranscription(tempFileURL, {
             binding,
+            signal: progress.signal || null,
             fileID: metadata.fileID,
             recordId: getRecordId(record),
             retryCount: record.retryCount,
@@ -31570,6 +31613,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recordId,
           reason: 'cloud-fallback-processing',
           jobId: record.metadata && record.metadata.cloudFallbackJobId,
+          status: record.metadata?.cloudFallbackStatus,
         });
         if (!this.backgroundSyncActive) {
           this.showSyncProgress({ ...progress, stage: 'processing', title: `${buildRecordTitleBase(record)} 云端兜底中` });
@@ -31817,6 +31861,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             recordId,
             reason: 'cloud-fallback-processing',
             jobId: queuedJob && queuedJob.jobId || '',
+            status: queuedJob?.status,
           });
           if (!this.backgroundSyncActive) {
             this.showSyncProgress({ ...progress, stage: 'processing', title: `${processingTitle} 云端兜底中` });
@@ -32167,6 +32212,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       ));
       const pendingSetupEntries = outstandingFailures.filter(item => item.setupRequired);
       const displayedFailures = failed.filter((item) => !item.partialSaved);
+      const waitingForCloud = hasPendingCloudResult(skipped);
       if (showNotice && displayedFailures.length) {
         // Offer an update when one exists, without asserting that the current
         // failure was caused by the plugin version.
@@ -32184,14 +32230,14 @@ class WechatObsidianInboxPlugin extends Plugin {
         else finalMessage += '；' + partialSavedMessage;
       }
       const pendingReviewNotice = buildPendingReviewNotice(mergePendingReviewSummaries(pendingReviews));
-      if (!written.length && !displayedFailures.length && !partialSavedNotes.length && pendingReviewNotice) {
+      if (!written.length && !displayedFailures.length && !partialSavedNotes.length && !waitingForCloud && pendingReviewNotice) {
         finalMessage = pendingReviewNotice;
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
       if (pendingSetupEntries.length && !failed.some(item => item.setupRequired)) {
         const pendingMessage = pendingSetupEntries.length + ' 条内容待准备：' + pendingSetupEntries[0].message;
-        finalMessage = !written.length && !displayedFailures.length ? pendingMessage : finalMessage + '；' + pendingMessage;
+        finalMessage = !written.length && !displayedFailures.length && !waitingForCloud ? pendingMessage : finalMessage + '；' + pendingMessage;
       }
       if (completionWarnings.length) {
         finalMessage += this.backgroundSyncActive

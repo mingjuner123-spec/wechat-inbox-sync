@@ -17915,16 +17915,21 @@ var require_progress_notice_utils = __commonJS({
       return count ? `已同步 ${count} 条内容到 Obsidian` : "没有需要同步的新内容";
     }
     __name(buildSyncNotice2, "buildSyncNotice");
+    function hasPendingCloudResult2(skipped) {
+      return Array.isArray(skipped) && skipped.some((item) => item && (item.reason === "cloud-fallback-processing" || item.reason === "cloud-transcription-processing"));
+    }
+    __name(hasPendingCloudResult2, "hasPendingCloudResult");
     function buildSyncResultNotice2(written = [], skipped = [], conversionWarnings = [], failed = []) {
       const writtenCount = Array.isArray(written) ? written.length : 0;
       const pendingSetup = (Array.isArray(failed) ? failed : []).filter((item) => item.setupRequired);
       const currentFailedItems = (Array.isArray(failed) ? failed : []).filter((item) => !item.setupRequired);
-      let message = buildSyncNotice2(writtenCount);
+      const cloudPending = hasPendingCloudResult2(skipped);
+      let message = !writtenCount && cloudPending ? "" : buildSyncNotice2(writtenCount);
       if (!writtenCount && currentFailedItems.length) {
         message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
       }
       if (Array.isArray(skipped) && skipped.length) {
-        message += buildSkippedSyncNotice2(skipped);
+        message += buildSkippedSyncNotice2(skipped, message ? "，" : "");
       }
       message += buildConversionWarningsNotice2(
         Array.isArray(conversionWarnings) ? conversionWarnings : []
@@ -17934,18 +17939,22 @@ var require_progress_notice_utils = __commonJS({
       }
       if (pendingSetup.length) {
         const setupMessage = pendingSetup.length + " 条内容待准备：" + pendingSetup[0].message;
-        message = !writtenCount && !currentFailedItems.length ? setupMessage : message + "；" + setupMessage;
+        message = !writtenCount && !currentFailedItems.length && !cloudPending ? setupMessage : message + "；" + setupMessage;
       }
       return message;
     }
     __name(buildSyncResultNotice2, "buildSyncResultNotice");
-    function buildSkippedSyncNotice2(skipped = []) {
+    function buildSkippedSyncNotice2(skipped = [], prefix = "，") {
+      const fallbackCount = skipped.filter((item) => item && item.reason === "cloud-fallback-processing").length;
+      const queuedCount = skipped.filter((item) => (item == null ? void 0 : item.reason) === "cloud-fallback-processing" && item.status === "queued").length;
       const cloudProcessingCount = skipped.filter((item) => item && item.reason === "cloud-transcription-processing").length;
       const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === "locally-quarantined-unrecoverable").length;
       const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === "deleted-expired-xhs-shortlink").length;
       const xiaohongshuRateLimitedCount = skipped.filter((item) => item && item.reason === "xiaohongshu-rate-limited").length;
-      const otherSkippedCount = skipped.filter((item) => item && item.reason !== "already-synced-local" && item.reason !== "failed-awaiting-manual-retry" && item.reason !== "failure-report-pending" && item.reason !== "cloud-transcription-processing" && item.reason !== "locally-quarantined-unrecoverable" && item.reason !== "deleted-expired-xhs-shortlink" && item.reason !== "xiaohongshu-rate-limited").length;
+      const otherSkippedCount = skipped.filter((item) => item && item.reason !== "already-synced-local" && item.reason !== "failed-awaiting-manual-retry" && item.reason !== "failure-report-pending" && item.reason !== "cloud-transcription-processing" && item.reason !== "cloud-fallback-processing" && item.reason !== "locally-quarantined-unrecoverable" && item.reason !== "deleted-expired-xhs-shortlink" && item.reason !== "xiaohongshu-rate-limited").length;
       const parts = [];
+      if (queuedCount) parts.push(`${queuedCount} 条在云端排队，等待处理`);
+      if (fallbackCount > queuedCount) parts.push(`${fallbackCount - queuedCount} 条等待云端结果`);
       if (cloudProcessingCount) {
         parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
       }
@@ -17961,7 +17970,7 @@ var require_progress_notice_utils = __commonJS({
       if (otherSkippedCount) {
         parts.push(`${otherSkippedCount} 条已跳过`);
       }
-      return parts.length ? `，${parts.join("，")}` : "";
+      return parts.length ? prefix + parts.join("，") : "";
     }
     __name(buildSkippedSyncNotice2, "buildSkippedSyncNotice");
     function normalizeProgressPercent2(value) {
@@ -18035,6 +18044,7 @@ var require_progress_notice_utils = __commonJS({
       const suffix = title ? `：${title}` : "";
       if (stage === "fetching") return `${label}正在同步，正在获取待同步内容`;
       if (stage === "empty") return `${label}没有需要同步的新内容`;
+      if (stage === "waiting-local-asr") return `${label}本地转写正在排队，空闲后自动开始${suffix}`;
       if (stage === "failed") return `${label}同步失败：仍有 ${Math.max(1, Number(total) || 0)} 条内容未同步成功`;
       if (stage === "processing") return `${label}正在处理 ${countText}${suffix}`;
       if (stage === "downloading") return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
@@ -18064,6 +18074,7 @@ var require_progress_notice_utils = __commonJS({
     }
     __name(buildConversionWarningsNotice2, "buildConversionWarningsNotice");
     module2.exports = {
+      hasPendingCloudResult: hasPendingCloudResult2,
       buildConversionWarningsNotice: buildConversionWarningsNotice2,
       buildLocalAsrProgressKey: buildLocalAsrProgressKey2,
       buildSkippedSyncNotice: buildSkippedSyncNotice2,
@@ -24042,6 +24053,7 @@ var {
   buildSyncNotice,
   buildSyncProgressMessage,
   buildSyncResultNotice,
+  hasPendingCloudResult,
   formatProgressElapsed,
   isProgressHeartbeatStale,
   normalizeProgressPercent,
@@ -24246,7 +24258,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.14";
+var PLUGIN_RUNTIME_VERSION = "1.4.15";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -39632,6 +39644,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const controller = this.autoSyncController;
     this.register(() => {
       this.autoSyncDisposed = true;
+      for (const waiter of [...this.localAsrWaiters || []]) waiter.cancel();
       controller.dispose();
       if (this.currentTranscriptionAbortRequest) this.currentTranscriptionAbortRequest("plugin_unload");
       else if (this.currentTranscriptionAbortController) this.currentTranscriptionAbortController.abort();
@@ -41764,15 +41777,16 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
   }
   async stopCurrentTranscription({ trigger = "programmatic_or_unknown", trustedEvent = null } = {}) {
     let stopped = false;
-    const activeContext = this.currentTranscriptionContext && typeof this.currentTranscriptionContext === "object" ? this.currentTranscriptionContext : this.currentProcessingContext;
+    const stoppingWaiter = this.currentProcessingAbortController && Array.from(this.localAsrWaiters || []).some((waiter) => waiter.signal === this.currentProcessingAbortController.signal);
+    const activeContext = !stoppingWaiter && this.currentTranscriptionContext && typeof this.currentTranscriptionContext === "object" ? this.currentTranscriptionContext : this.currentProcessingContext;
     const context = activeContext && typeof activeContext === "object" ? {
       ...activeContext,
       binding: activeContext.binding ? { ...activeContext.binding } : null
     } : null;
-    if (this.currentTranscriptionAbortRequest) {
+    if (!stoppingWaiter && this.currentTranscriptionAbortRequest) {
       this.currentTranscriptionAbortRequest("user_stop", { trigger: ["stop_command", "stop_button", "programmatic_or_unknown"].includes(trigger) ? trigger : "programmatic_or_unknown", trustedEvent: typeof trustedEvent === "boolean" ? trustedEvent : null });
       stopped = true;
-    } else if (this.currentTranscriptionAbortController) {
+    } else if (!stoppingWaiter && this.currentTranscriptionAbortController) {
       this.currentTranscriptionAbortController.abort();
       stopped = true;
     }
@@ -41780,7 +41794,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       this.currentProcessingAbortController.abort();
       stopped = true;
     }
-    if (this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
+    if (!stoppingWaiter && this.currentTranscriptionProcess && !this.currentTranscriptionProcess.killed) {
       try {
         const child = this.currentTranscriptionProcess;
         if (process.platform === "win32" && Number.isInteger(child.pid) && child.pid > 0) {
@@ -41793,7 +41807,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
       } catch (error) {
       }
     }
-    if (closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
+    if (!stoppingWaiter && closeActiveXiaohongshuBrowserWindows() + closeActiveDouyinBrowserWindows() > 0) {
       stopped = true;
     }
     if (!stopped) {
@@ -45222,8 +45236,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         _localAsrMutexToken: mutexToken
       });
     } finally {
-      if (this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
       this.operatorLocalAsrActive = false;
+      this.releaseLocalAsrSlot(mutexToken);
     }
   }
   async resumePendingCloudFallbackSubmission(options = {}) {
@@ -45528,20 +45542,56 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     }
     throw new Error("未配置可用的音频转写方案");
   }
+  waitForLocalAsrSlot(token, signal) {
+    if (!this.localAsrWaiters) this.localAsrWaiters = /* @__PURE__ */ new Set();
+    return new Promise((resolve, reject) => {
+      const remove = /* @__PURE__ */ __name(() => {
+        this.localAsrWaiters.delete(waiter);
+        signal == null ? void 0 : signal.removeEventListener("abort", waiter.cancel);
+      }, "remove");
+      const waiter = {
+        signal,
+        start: /* @__PURE__ */ __name(() => {
+          remove();
+          this.localAsrMutexOwner = token;
+          resolve();
+        }, "start"),
+        cancel: /* @__PURE__ */ __name(() => {
+          remove();
+          reject(createAbortError());
+        }, "cancel")
+      };
+      this.localAsrWaiters.add(waiter);
+      signal == null ? void 0 : signal.addEventListener("abort", waiter.cancel, { once: true });
+      if (this.autoSyncDisposed || (signal == null ? void 0 : signal.aborted)) waiter.cancel();
+    });
+  }
+  releaseLocalAsrSlot(token) {
+    var _a;
+    if (this.localAsrMutexOwner !== token) return;
+    this.localAsrMutexOwner = null;
+    const next = (_a = this.localAsrWaiters) == null ? void 0 : _a.values().next().value;
+    if (next) next.start();
+  }
   async runLocalTranscription(audioUrl, options = {}) {
     const requestedOwner = options.operatorNode === true ? "operator" : "foreground";
     const inheritedToken = options._localAsrMutexToken || null;
     const currentOwner = this.localAsrMutexOwner || null;
-    if (currentOwner && currentOwner !== inheritedToken) {
-      const error = new Error(requestedOwner === "operator" ? "负责人前台正在进行本地转写，运营节点暂不领取本地转写任务" : "本机运营节点正在进行本地转写，请稍后重试");
-      error.code = "LOCAL_ASR_BUSY";
-      error.retryable = true;
-      throw error;
-    }
-    const acquiredHere = !currentOwner;
     const mutexToken = inheritedToken || { kind: requestedOwner };
-    if (acquiredHere) this.localAsrMutexOwner = mutexToken;
+    throwIfAborted(options.signal);
+    if (this.autoSyncDisposed) throw createAbortError();
+    if (currentOwner && currentOwner !== inheritedToken) {
+      if (requestedOwner === "operator") {
+        throw Object.assign(new Error("本地转写正在使用中，运营节点暂不领取任务"), { code: "LOCAL_ASR_BUSY", retryable: true });
+      }
+      this.showSyncProgress({ stage: "waiting-local-asr", title: options.title || "" });
+      await this.waitForLocalAsrSlot(mutexToken, options.signal);
+    } else if (!currentOwner) {
+      this.localAsrMutexOwner = mutexToken;
+    }
     try {
+      if (this.autoSyncDisposed) throw createAbortError();
+      throwIfAborted(options.signal);
       try {
         return await this.runLocalTranscriptionCore(audioUrl, { ...options, _localAsrMutexToken: mutexToken });
       } catch (error) {
@@ -45556,7 +45606,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw normalizeLocalAsrFailure(error);
       }
     } finally {
-      if (acquiredHere && this.localAsrMutexOwner === mutexToken) this.localAsrMutexOwner = null;
+      if (currentOwner !== mutexToken) this.releaseLocalAsrSlot(mutexToken);
     }
   }
   async runLocalTranscriptionCore(audioUrl, options = {}) {
@@ -45776,6 +45826,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       return text.startsWith(baseline) ? text.slice(baseline.length) : text;
     }, "getFreshAttemptLog");
     const emitLocalProgress = /* @__PURE__ */ __name((fallbackPercent = null) => {
+      var _a2;
+      if (options.operatorNode && ((_a2 = this.localAsrWaiters) == null ? void 0 : _a2.size)) return;
       const activeAttempt = activeAttemptNumber;
       const runLog = activeAttempt === null ? "" : readLocalAsrRunLog(installRoot);
       const logFreshness = activeAttempt === null ? "unavailable" : asrRecovery.diagnosticLogFreshness(
@@ -46801,6 +46853,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         this.showSyncProgress({ ...progress, stage: "transcribing", title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
+          signal: progress.signal || null,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
           retryCount: record.retryCount,
@@ -46845,6 +46898,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         this.showSyncProgress({ ...progress, stage: "transcribing", title });
         const result = await this.runConfiguredTranscription(tempFileURL, {
           binding,
+          signal: progress.signal || null,
           fileID: metadata.audioFileID,
           recordId: getRecordId(record),
           retryCount: record.retryCount,
@@ -46970,6 +47024,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           this.showSyncProgress({ ...progress, stage: "transcribing", title: fileName });
           const result = await this.runConfiguredTranscription(tempFileURL, {
             binding,
+            signal: progress.signal || null,
             fileID: metadata.fileID,
             recordId: getRecordId(record),
             retryCount: record.retryCount,
@@ -51965,7 +52020,7 @@ ${finalized.markdown}
     }, binding);
   }
   async syncBinding(binding, shouldPrefixTitle) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     this.ensureSerializedSaveData();
     clearXiaohongshuRestriction();
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
@@ -52041,7 +52096,8 @@ ${finalized.markdown}
         skipped.push({
           recordId,
           reason: "cloud-fallback-processing",
-          jobId: record.metadata && record.metadata.cloudFallbackJobId
+          jobId: record.metadata && record.metadata.cloudFallbackJobId,
+          status: (_a = record.metadata) == null ? void 0 : _a.cloudFallbackStatus
         });
         if (!this.backgroundSyncActive) {
           this.showSyncProgress({ ...progress, stage: "processing", title: `${buildRecordTitleBase(record)} 云端兜底中` });
@@ -52083,7 +52139,7 @@ ${finalized.markdown}
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
-        lifecycle = ((_a = record.metadata) == null ? void 0 : _a.cloudFallbackDeliveryKey) ? await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised, record) : getActiveCloudFallbackLifecycle(record) || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        lifecycle = ((_b = record.metadata) == null ? void 0 : _b.cloudFallbackDeliveryKey) ? await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised, record) : getActiveCloudFallbackLifecycle(record) || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
         if (lifecycle.conflict) {
           skipped.push({ recordId, reason: "record-busy" });
           continue;
@@ -52203,7 +52259,7 @@ ${finalized.markdown}
           throw Object.assign(new Error(record.metadata.transcriptionError || messages[status] || messages.failed), {
             code: `CLOUD_FALLBACK_${status.toUpperCase()}`,
             fallbackStatus: status,
-            diagnostic: { cloudFallback: { status, code: ((_b = record.metadata.cloudFallbackError) == null ? void 0 : _b.code) || "", stage: ((_c = record.metadata.cloudFallbackError) == null ? void 0 : _c.stage) || "" } }
+            diagnostic: { cloudFallback: { status, code: ((_c = record.metadata.cloudFallbackError) == null ? void 0 : _c.code) || "", stage: ((_d = record.metadata.cloudFallbackError) == null ? void 0 : _d.stage) || "" } }
           });
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -52277,7 +52333,8 @@ ${finalized.markdown}
           skipped.push({
             recordId,
             reason: "cloud-fallback-processing",
-            jobId: queuedJob && queuedJob.jobId || ""
+            jobId: queuedJob && queuedJob.jobId || "",
+            status: queuedJob == null ? void 0 : queuedJob.status
           });
           if (!this.backgroundSyncActive) {
             this.showSyncProgress({ ...progress, stage: "processing", title: `${processingTitle} 云端兜底中` });
@@ -52589,6 +52646,7 @@ ${finalized.markdown}
       ));
       const pendingSetupEntries = outstandingFailures.filter((item) => item.setupRequired);
       const displayedFailures = failed.filter((item) => !item.partialSaved);
+      const waitingForCloud = hasPendingCloudResult(skipped);
       if (showNotice && displayedFailures.length) {
         void this.maybeCheckPluginUpdate({ failureContext: true }).catch(() => {
         });
@@ -52605,14 +52663,14 @@ ${finalized.markdown}
         else finalMessage += "；" + partialSavedMessage;
       }
       const pendingReviewNotice = buildPendingReviewNotice(mergePendingReviewSummaries(pendingReviews));
-      if (!written.length && !displayedFailures.length && !partialSavedNotes.length && pendingReviewNotice) {
+      if (!written.length && !displayedFailures.length && !partialSavedNotes.length && !waitingForCloud && pendingReviewNotice) {
         finalMessage = pendingReviewNotice;
       } else if (pendingReviewNotice) {
         finalMessage += `；${pendingReviewNotice}`;
       }
       if (pendingSetupEntries.length && !failed.some((item) => item.setupRequired)) {
         const pendingMessage = pendingSetupEntries.length + " 条内容待准备：" + pendingSetupEntries[0].message;
-        finalMessage = !written.length && !displayedFailures.length ? pendingMessage : finalMessage + "；" + pendingMessage;
+        finalMessage = !written.length && !displayedFailures.length && !waitingForCloud ? pendingMessage : finalMessage + "；" + pendingMessage;
       }
       if (completionWarnings.length) {
         finalMessage += this.backgroundSyncActive ? `；本地笔记已保存，${completionWarnings.length} 条状态回报暂未成功，将自动补报` : `；本地笔记已保存，但 ${completionWarnings.length} 条同步状态回报失败，请稍后再次点击同步补报状态`;

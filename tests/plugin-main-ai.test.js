@@ -13655,9 +13655,10 @@ async function runCloudFailedVoiceLocalFallbackTests() {
     assert.strictEqual(url, 'https://temp.example.com/cloud-failed.mp3');
     return Buffer.from('audio-bytes');
   };
+  const voiceSignal = new AbortController().signal;
   const transcriptionCalls = [];
   plugin.runConfiguredTranscription = async (audioUrl, options) => {
-    transcriptionCalls.push([audioUrl, options.fileID, options.forceLocal, options.cloudFallbackReason]);
+    transcriptionCalls.push([audioUrl, options.fileID, options.forceLocal, options.cloudFallbackReason, options.signal]);
     return {
       transcription: '本地兜底转写成功',
       source: 'local',
@@ -13679,13 +13680,14 @@ async function runCloudFailedVoiceLocalFallbackTests() {
     },
   }, 'raw\\wechatmd', '2026-06-13', '录音-001', {
     token: 'ABC-123',
-  });
+  }, { signal: voiceSignal });
 
   assert.deepStrictEqual(transcriptionCalls, [[
     'https://temp.example.com/cloud-failed.mp3',
     'cloud://voices/cloud-failed.mp3',
     true,
     'cloud-pretranscription-failed',
+    voiceSignal,
   ]]);
   assert.deepStrictEqual(writtenBinaries, [[
     'raw/wechatmd/语音附件/2026-06-13/录音-001.mp3',
@@ -13779,9 +13781,10 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
     assert.strictEqual(url, 'https://temp.example.com/wechat-channels.mp4');
     return Buffer.from('video-bytes');
   };
+  const fileSignal = new AbortController().signal;
   const transcriptionCalls = [];
   plugin.runConfiguredTranscription = async (audioUrl, options = {}) => {
-    transcriptionCalls.push([audioUrl, options.fileID, options.source, options.title]);
+    transcriptionCalls.push([audioUrl, options.fileID, options.source, options.title, options.signal]);
     return {
       transcription: '评论区才是最好的选题库，因为用户会把真实问题直接写出来。',
       source: 'local',
@@ -13802,13 +13805,14 @@ async function runAudioVideoFileAttachmentTranscriptionTests() {
     },
   }, 'raw\\wechatmd', '2026-06-30', '视频号-本地视频', {
     token: 'PRO-123',
-  });
+  }, { signal: fileSignal });
 
   assert.deepStrictEqual(transcriptionCalls, [[
     'https://temp.example.com/wechat-channels.mp4',
     'cloud://files/wechat-channels.mp4',
     'file-attachment',
     '视频号-本地视频',
+    fileSignal,
   ]]);
   assert.deepStrictEqual(writtenBinaries, [[
     'raw/wechatmd/文件附件/2026-06-30/视频号-本地视频-wechat-channels.mp4',
