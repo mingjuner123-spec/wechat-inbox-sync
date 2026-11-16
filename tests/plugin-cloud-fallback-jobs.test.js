@@ -375,6 +375,37 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
       await assert.rejects(fixtureNode.acquireOperatorWechatChannelsMediaToTempFile(channelSource), error => error.code === 'OPERATOR_CHANNELS_MEDIA_EMPTY');
     }
     assert.equal(downloads.length, 2);
+    const feedInfo = { description: 'public clip', coverUrl: 'https://mpvideo.qpic.cn/cover.jpg', picInfo: [] };
+    feedBody = { errCode: 0, data: { errMsg: { type: 0 }, feedInfo } };
+    const resolvePublicPreview = async () => mediaUrl;
+    assert.equal(await fixtureNode.acquireOperatorWechatChannelsMediaToTempFile(channelSource, { resolvePublicPreview }), '/tmp/fixture-channel.mp4');
+    assert.equal(downloads.at(-1).url, mediaUrl);
+    const https = require('node:https');
+    const originalRequest = https.request;
+    const redirectNode = Object.create(PluginClass.prototype);
+    const requestedHosts = [];
+    https.request = (url, _options, receive) => {
+      requestedHosts.push(url.hostname);
+      const req = new (require('node:events').EventEmitter)();
+      req.end = () => receive({ statusCode: 302, headers: { location: 'https://unrelated.example/file.mp4' }, resume() {} });
+      return req;
+    };
+    try {
+      await assert.rejects(redirectNode.downloadMediaToTempFile(mediaUrl, { channelsProviderMedia: true }), /重定向地址不受信任/);
+      assert.deepEqual(requestedHosts, ['finder.video.qq.com']);
+    } finally { https.request = originalRequest; }
+    await assert.rejects(fixtureNode.acquireOperatorWechatChannelsMediaToTempFile(channelSource, {
+      resolvePublicPreview: async () => 'https://unrelated.example/file.mp4',
+    }), error => error.code === 'OPERATOR_CHANNELS_PROVIDER_URL_REJECTED');
+    for (const data of [
+      { errMsg: { type: 1 }, feedInfo },
+      { errMsg: { type: 0 }, feedInfo: { ...feedInfo, picInfo: [{}] } },
+    ]) {
+      feedBody = { errCode: 0, data };
+      await assert.rejects(fixtureNode.acquireOperatorWechatChannelsMediaToTempFile(channelSource, {
+        resolvePublicPreview: () => assert.fail('access errors and image posts must not use video resolution'),
+      }), error => error.code === 'OPERATOR_CHANNELS_MEDIA_EMPTY');
+    }
   } finally {
     feedRequest = undefined;
   }
@@ -1388,8 +1419,9 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   const channelsOperatorPlugin = Object.create(PluginClass.prototype);
   channelsOperatorPlugin.uploadWorkerMediaForJob = undefined; // Preserve the legacy direct-ASR runtime contract.
   Object.assign(channelsOperatorPlugin, {
-    acquireOperatorWechatChannelsMediaToTempFile: async sourceUrl => {
+    acquireOperatorWechatChannelsMediaToTempFile: async (sourceUrl, options) => {
       assert.equal(sourceUrl, channelsOperatorJob.sourceUrl);
+      assert.equal(await options.resolvePublicPreview(), 'https://finder.video.qq.com/operator-fixture.mp4');
       return operatorMediaPath;
     },
     getLocalAsrInstallStatus: () => ({ ready: true, ffmpegPath: 'ffmpeg' }),
@@ -1407,6 +1439,14 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     },
     request: async (requestPath, body) => {
       if (requestPath.endsWith('/claim')) return { jobs: [channelsOperatorJob] };
+      if (requestPath.endsWith('/media/resolve')) {
+        assert.equal(body.jobId, channelsOperatorJob.jobId);
+        assert.equal(body.attemptId, channelsOperatorJob.attemptId);
+        assert.equal(body.fencingVersion, channelsOperatorJob.fencingVersion);
+        assert.equal(body.leaseToken, channelsOperatorJob.leaseToken);
+        assert.deepEqual(Object.keys(body).sort(), ['attemptId','fencingVersion','jobId','leaseToken','protocolVersion','workerId']);
+        return { success: true, data: { mediaUrl: 'https://finder.video.qq.com/operator-fixture.mp4' } };
+      }
       if (requestPath.endsWith('/complete')) { channelsOperatorCompletions.push(body); return { success: true, data: body }; }
       return { success: true, data: body };
     },

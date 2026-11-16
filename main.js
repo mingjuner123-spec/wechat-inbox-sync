@@ -16734,7 +16734,30 @@ var require_operator_media_node = __commonJS({
             if (!plugin || typeof plugin.acquireOperatorWechatChannelsMediaToTempFile !== "function") {
               throw nodeError("OPERATOR_MEDIA_HANDLER_UNAVAILABLE", "运营节点视频号原生提取能力未就绪", { retryable: true });
             }
-            tempPath = await plugin.acquireOperatorWechatChannelsMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
+            const signal = activeController.signal;
+            tempPath = await plugin.acquireOperatorWechatChannelsMediaToTempFile(job.sourceUrl, {
+              signal,
+              resolvePublicPreview: /* @__PURE__ */ __name(async () => {
+                var _a;
+                try {
+                  const response = await callApi("/transcriptions/fallback/worker/media/resolve", baseForJob(job), { signal, timeoutMs: 45e3 });
+                  return (_a = response == null ? void 0 : response.data) == null ? void 0 : _a.mediaUrl;
+                } catch (error) {
+                  if ([
+                    "PRO_REQUIRED",
+                    "RECORD_GENERATION_CONFLICT",
+                    "CHANNELS_RESOLVE_INELIGIBLE",
+                    "JOB_NOT_FOUND",
+                    "LEASE_LOST",
+                    "MEDIA_LEASE_REQUIRED",
+                    "WORKER_CAPABILITY_FORBIDDEN"
+                  ].includes(error == null ? void 0 : error.code)) {
+                    error.retryable = false;
+                  }
+                  throw error;
+                }
+              }, "resolvePublicPreview")
+            });
             if (!tempPath) throw nodeError("OPERATOR_MEDIA_ACQUIRE_EMPTY", "运营节点未能从视频号原链接获取媒体", { retryable: true });
             activeJob.progress = 45;
             return await transcribeCapturedMedia(job, tempPath);
@@ -24223,7 +24246,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.13";
+var PLUGIN_RUNTIME_VERSION = "1.4.14";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -32373,6 +32396,15 @@ function buildWechatChannelsTitle(description, fallback = "视频号文案") {
   return sanitizeNoteTitlePart(truncateByChars(firstLine, 32), fallback);
 }
 __name(buildWechatChannelsTitle, "buildWechatChannelsTitle");
+function isChannelsProviderMediaUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && (url.hostname.endsWith(".video.qq.com") || url.hostname.endsWith(".qpic.cn") || url.hostname.endsWith(".gtimg.com"));
+  } catch {
+    return false;
+  }
+}
+__name(isChannelsProviderMediaUrl, "isChannelsProviderMediaUrl");
 function normalizeWechatChannelsFeedPayload(payload) {
   const root = payload && typeof payload === "object" ? payload : {};
   const data = root.data && typeof root.data === "object" ? root.data : {};
@@ -32420,6 +32452,7 @@ function normalizeWechatChannelsFeedPayload(payload) {
     videoUrl,
     mediaUrls,
     mediaItems: mediaCandidates,
+    publicPreviewOnly: !videoUrl && root.errCode === 0 && errMsg.type === 0 && Boolean(feedInfo.description && feedInfo.coverUrl) && Array.isArray(feedInfo.picInfo) && feedInfo.picInfo.length === 0,
     socialMetrics,
     decodeKey,
     dynamicExportId: String(sceneInfo.dynamicExportId || sceneInfo.dynamic_export_id || objectInfo.id || objectInfo.exportId || ""),
@@ -41407,7 +41440,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     return actionMessage;
   }
   async downloadArrayBuffer(url, headers = {}, options = {}) {
-    if (options.signal || typeof options.onProgress === "function") {
+    if (options.allowRedirect || options.signal || typeof options.onProgress === "function") {
       return downloadArrayBufferViaNode(url, headers, options);
     }
     try {
@@ -44821,7 +44854,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
     });
     throw error;
   }
-  async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null } = {}) {
+  async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null, resolvePublicPreview } = {}) {
     const pageUrl = String(sourceUrl || "").trim();
     if (!isWechatChannelsUrl(pageUrl)) {
       const error2 = new Error("运营节点只接受视频号分享链接");
@@ -44841,6 +44874,15 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       addCandidate(item && item.url, item && (item.decryptKey || item.decodeKey) || feed.decodeKey);
     });
     addCandidate(feed && feed.videoUrl, feed && feed.decodeKey);
+    if (!candidates.length && (feed == null ? void 0 : feed.publicPreviewOnly) && typeof resolvePublicPreview === "function") {
+      throwIfAborted(signal);
+      const mediaUrl = await resolvePublicPreview();
+      throwIfAborted(signal);
+      if (!isChannelsProviderMediaUrl(mediaUrl)) {
+        throw Object.assign(new Error("视频号解析服务未返回可信媒体地址"), { code: "OPERATOR_CHANNELS_PROVIDER_URL_REJECTED" });
+      }
+      return this.downloadMediaToTempFile(mediaUrl, { signal, channelsProviderMedia: true, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES });
+    }
     let lastError = null;
     for (const candidate of candidates.slice(0, 5)) {
       throwIfAborted(signal);
@@ -46277,13 +46319,14 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   }
   async downloadMediaToTempFile(audioUrl, options = {}) {
     var _a, _b;
-    const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl) ? await resolveRedirectUrl(audioUrl, 5, "GET") : audioUrl;
+    const resolvedUrl = !options.channelsProviderMedia && shouldResolveMediaDownloadUrl(audioUrl) ? await resolveRedirectUrl(audioUrl, 5, "GET") : audioUrl;
     throwIfAborted(options.signal);
     const mediaDownloadDeadlineAt = Date.now() + 15 * 60 * 1e3;
     const getMediaDownloadRequestOptions = /* @__PURE__ */ __name(() => {
       const remainingMs = mediaDownloadDeadlineAt - Date.now();
       if (remainingMs <= 0) throw createMediaDownloadTimeoutError("total");
       return {
+        ...options.channelsProviderMedia ? { allowRedirect: isChannelsProviderMediaUrl } : {},
         signal: options.signal,
         onProgress: options.onProgress,
         idleTimeoutMs: 9e4,
@@ -46332,7 +46375,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       }
     }, "refreshXiaohongshuMediaUrlsWithinBudget");
     const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
-    const canRecoverDouyin = isDouyinUrl(sourceUrl) || isDouyinUrl(audioUrl) || isDouyinMediaUrl(resolvedUrl);
+    const canRecoverDouyin = !options.channelsProviderMedia && (isDouyinUrl(sourceUrl) || isDouyinUrl(audioUrl) || isDouyinMediaUrl(resolvedUrl));
     const canRecoverXiaohongshu = Boolean(sourceUrl) && (isXiaohongshuUrl(sourceUrl) || isXiaohongshuMediaUrl(resolvedUrl) || isXiaohongshuMediaUrl(audioUrl));
     let downloadedUrl = resolvedUrl;
     let downloadedArrayBuffer;
