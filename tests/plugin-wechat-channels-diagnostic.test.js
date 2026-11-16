@@ -74,6 +74,17 @@ async function run(){
   await testLocalParentCancellation(scratch);cases+=2;
   await testActualSyncFailurePropagation(scratch);cases++;
   fs.mkdirSync(path.join(scratch,'bin'));fs.writeFileSync(path.join(scratch,'bin/main.exe'),'native-fixture');fs.writeFileSync(path.join(scratch,'transcribe.ps1'),'ps1-fixture');const identity=asr.runtimeIdentity(scratch,'win32');assert.equal(identity.scriptSha256,crypto.createHash('sha256').update('ps1-fixture').digest('hex'));assert.equal(identity.binarySha256,crypto.createHash('sha256').update('native-fixture').digest('hex'));assert.ok(identity.binary.endsWith('main.exe'));cases++;
+  p=make();const prepareUrls=[];p.requestJson=async(_path,_method,body)=>{prepareUrls.push(String(body&&body.url||''));return media(1);};p.runConfiguredTranscription=async()=>success();
+  const previewUrl='https://channels.weixin.qq.com/finder-preview/pages/sph?id=AlzG6Ssxh4';
+  const previewRecord={...record(),content:previewUrl,metadata:{...record().metadata,url:previewUrl}};
+  const normalizedRecord=await p.hydrateWechatChannelsTranscript(previewRecord,previewUrl);
+  assert.equal(prepareUrls[0],'https://weixin.qq.com/sph/AlzG6Ssxh4');
+  assert.equal(normalizedRecord.metadata.transcriptionStatus,'success');
+  assert.equal(normalizedRecord.metadata.url,'https://weixin.qq.com/sph/AlzG6Ssxh4');
+  assert.equal(h.normalizeWechatChannelsShareUrl('https://weixin.qq.com/sph/Ar5IBoKjoY'),'https://weixin.qq.com/sph/Ar5IBoKjoY');
+  assert.equal(h.normalizeWechatChannelsShareUrl('https://channels.weixin.qq.com/finder-preview/pages/sph?id=bad id'),'https://channels.weixin.qq.com/finder-preview/pages/sph?id=bad id');
+  cases++;
+
   console.log('Channels diagnostics and recovery: '+cases+' cases passed');
  }finally{fs.rmSync(scratch,{recursive:true,force:true});}
 }
