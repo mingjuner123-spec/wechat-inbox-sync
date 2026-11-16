@@ -747,7 +747,22 @@ function createSingleOperatorMediaNode({
         if (!plugin || typeof plugin.acquireOperatorWechatChannelsMediaToTempFile !== 'function') {
           throw nodeError('OPERATOR_MEDIA_HANDLER_UNAVAILABLE', '运营节点视频号原生提取能力未就绪', { retryable: true });
         }
-        tempPath = await plugin.acquireOperatorWechatChannelsMediaToTempFile(job.sourceUrl, { signal: activeController.signal });
+        const signal = activeController.signal;
+        tempPath = await plugin.acquireOperatorWechatChannelsMediaToTempFile(job.sourceUrl, {
+          signal,
+          resolvePublicPreview: async () => {
+            try {
+              const response = await callApi('/transcriptions/fallback/worker/media/resolve', baseForJob(job), { signal, timeoutMs: 45000 });
+              return response?.data?.mediaUrl;
+            } catch (error) {
+              if (['PRO_REQUIRED', 'RECORD_GENERATION_CONFLICT', 'CHANNELS_RESOLVE_INELIGIBLE',
+                'JOB_NOT_FOUND', 'LEASE_LOST', 'MEDIA_LEASE_REQUIRED', 'WORKER_CAPABILITY_FORBIDDEN'].includes(error?.code)) {
+                error.retryable = false;
+              }
+              throw error;
+            }
+          },
+        });
         if (!tempPath) throw nodeError('OPERATOR_MEDIA_ACQUIRE_EMPTY', '运营节点未能从视频号原链接获取媒体', { retryable: true });
         activeJob.progress = 45;
         return await transcribeCapturedMedia(job, tempPath);

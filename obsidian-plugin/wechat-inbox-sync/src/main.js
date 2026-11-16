@@ -400,7 +400,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.13';
+const PLUGIN_RUNTIME_VERSION = '1.4.14';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -10038,6 +10038,14 @@ function buildWechatChannelsTitle(description, fallback = '视频号文案') {
   return sanitizeNoteTitlePart(truncateByChars(firstLine, 32), fallback);
 }
 
+function isChannelsProviderMediaUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.port
+      && (url.hostname.endsWith('.video.qq.com') || url.hostname.endsWith('.qpic.cn') || url.hostname.endsWith('.gtimg.com'));
+  } catch { return false; }
+}
+
 function normalizeWechatChannelsFeedPayload(payload) {
   const root = payload && typeof payload === 'object' ? payload : {};
   const data = root.data && typeof root.data === 'object' ? root.data : {};
@@ -10110,6 +10118,9 @@ function normalizeWechatChannelsFeedPayload(payload) {
     videoUrl,
     mediaUrls,
     mediaItems: mediaCandidates,
+    publicPreviewOnly: !videoUrl && root.errCode === 0 && errMsg.type === 0
+      && Boolean(feedInfo.description && feedInfo.coverUrl)
+      && Array.isArray(feedInfo.picInfo) && feedInfo.picInfo.length === 0,
     socialMetrics,
     decodeKey,
     dynamicExportId: String(sceneInfo.dynamicExportId || sceneInfo.dynamic_export_id || objectInfo.id || objectInfo.exportId || ''),
@@ -19967,7 +19978,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async downloadArrayBuffer(url, headers = {}, options = {}) {
-    if (options.signal || typeof options.onProgress === 'function') {
+    if (options.allowRedirect || options.signal || typeof options.onProgress === 'function') {
       return downloadArrayBufferViaNode(url, headers, options);
     }
     try {
@@ -23572,7 +23583,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     throw error;
   }
 
-  async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null } = {}) {
+  async acquireOperatorWechatChannelsMediaToTempFile(sourceUrl, { signal = null, resolvePublicPreview } = {}) {
     const pageUrl = String(sourceUrl || '').trim();
     if (!isWechatChannelsUrl(pageUrl)) {
       const error = new Error('运营节点只接受视频号分享链接');
@@ -23592,6 +23603,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       addCandidate(item && item.url, item && (item.decryptKey || item.decodeKey) || feed.decodeKey);
     });
     addCandidate(feed && feed.videoUrl, feed && feed.decodeKey);
+    if (!candidates.length && feed?.publicPreviewOnly && typeof resolvePublicPreview === 'function') {
+      throwIfAborted(signal);
+      const mediaUrl = await resolvePublicPreview();
+      throwIfAborted(signal);
+      if (!isChannelsProviderMediaUrl(mediaUrl)) {
+        throw Object.assign(new Error('视频号解析服务未返回可信媒体地址'), { code: 'OPERATOR_CHANNELS_PROVIDER_URL_REJECTED' });
+      }
+      return this.downloadMediaToTempFile(mediaUrl, { signal, channelsProviderMedia: true, maxBytes: MAX_CLOUD_FALLBACK_MEDIA_BYTES });
+    }
     let lastError = null;
     for (const candidate of candidates.slice(0, 5)) {
       throwIfAborted(signal);
@@ -25137,7 +25157,7 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
   async downloadMediaToTempFile(audioUrl, options = {}) {
-    const resolvedUrl = shouldResolveMediaDownloadUrl(audioUrl)
+    const resolvedUrl = !options.channelsProviderMedia && shouldResolveMediaDownloadUrl(audioUrl)
       ? await resolveRedirectUrl(audioUrl, 5, 'GET')
       : audioUrl;
     throwIfAborted(options.signal);
@@ -25146,6 +25166,7 @@ class WechatObsidianInboxPlugin extends Plugin {
       const remainingMs = mediaDownloadDeadlineAt - Date.now();
       if (remainingMs <= 0) throw createMediaDownloadTimeoutError('total');
       return {
+        ...(options.channelsProviderMedia ? { allowRedirect: isChannelsProviderMediaUrl } : {}),
         signal: options.signal,
         onProgress: options.onProgress,
         idleTimeoutMs: 90000,
@@ -25196,9 +25217,9 @@ class WechatObsidianInboxPlugin extends Plugin {
       }
     };
     const requestHeaders = getSocialRequestHeaders(sourceUrl || resolvedUrl);
-    const canRecoverDouyin = isDouyinUrl(sourceUrl)
+    const canRecoverDouyin = !options.channelsProviderMedia && (isDouyinUrl(sourceUrl)
       || isDouyinUrl(audioUrl)
-      || isDouyinMediaUrl(resolvedUrl);
+      || isDouyinMediaUrl(resolvedUrl));
     const canRecoverXiaohongshu = Boolean(sourceUrl)
       && (isXiaohongshuUrl(sourceUrl)
         || isXiaohongshuMediaUrl(resolvedUrl)
