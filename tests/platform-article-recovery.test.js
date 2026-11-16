@@ -67,4 +67,6 @@ assert.equal(article.hasMatchingPlatformArticleDocumentIdentity(canonicalDoc(url
 assert.equal(article.hasMatchingPlatformArticleDocumentIdentity(canonicalDoc(url+'/other'),url),false);
 assert.equal(article.hasMatchingPlatformArticleDocumentIdentity(canonicalDoc('https://www.zhihu.com/answer/333'),url),false);
 assert.equal(article.hasMatchingPlatformArticleDocumentIdentity(canonicalDoc(''),url),false);
-console.log('platform article recovery tests passed');
+require('./toutiao-operator-content-cases')()
+  .then(() => console.log('platform article recovery tests passed'))
+  .catch(error => { console.error(error); process.exitCode = 1; });

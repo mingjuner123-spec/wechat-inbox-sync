@@ -263,6 +263,7 @@ const {
   isToutiaoArticleIdentityUrl,
   matchesPlatformArticleRenderIdentity,
   hasPlatformArticleBody,
+  cleanToutiaoArticleMarkdown,
   selectPlatformArticleBody,
   hasMatchingPlatformArticleDocumentIdentity,
   sanitizePlatformArticleDiagnostic,
@@ -399,7 +400,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.12';
+const PLUGIN_RUNTIME_VERSION = '1.4.13';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -10042,6 +10043,7 @@ function normalizeWechatChannelsFeedPayload(payload) {
   const data = root.data && typeof root.data === 'object' ? root.data : {};
   const objectInfo = data.object && typeof data.object === 'object' ? data.object
     : data.object_info && typeof data.object_info === 'object' ? data.object_info
+      : data.objectInfo && typeof data.objectInfo === 'object' ? data.objectInfo
       : {};
   const feedInfo = data.feedInfo && typeof data.feedInfo === 'object' ? data.feedInfo
     : data.feed_info && typeof data.feed_info === 'object' ? data.feed_info
@@ -10070,6 +10072,24 @@ function normalizeWechatChannelsFeedPayload(payload) {
   );
   const socialMetrics = buildWechatChannelsSocialMetrics(root);
   const mediaCandidates = getWechatChannelsMediaCandidates(root);
+  if (!mediaCandidates.length && !data.object && (objectInfo === data.object_info || objectInfo === data.objectInfo)) {
+    // These wrappers describe the requested feed. Do not traverse other feeds or recommendations.
+    const descriptor = objectInfo.objectDesc || objectInfo.object_desc || {};
+    const wrappedMedia = getWechatChannelsMediaCandidates({
+      media: descriptor.media,
+      mediaList: descriptor.mediaList,
+      media_list: descriptor.media_list,
+    });
+    for (const candidate of wrappedMedia) {
+      try {
+        const url = new URL(candidate.url);
+        if (url.protocol === 'https:' && !url.username && !url.password && !url.port
+          && ['finder.video.qq.com', 'mpvideo.qpic.cn'].includes(url.hostname)) {
+          mediaCandidates.push(candidate);
+        }
+      } catch { /* An invalid media URL is not a usable candidate. */ }
+    }
+  }
   const mediaUrls = mediaCandidates.map((candidate) => candidate.url);
   const firstMedia = mediaCandidates[0] || {};
   const decodeKey = firstMedia.decodeKey || (mediaCandidates.find((candidate) => candidate.decodeKey) || {}).decodeKey || '';
@@ -13595,7 +13615,7 @@ const PLATFORM_ARTICLE_SELECTORS = {
     blockMarker: /请求存在异常|访问过于频繁|安全验证/,
     // Share short links sometimes only resolve inside the Toutiao app. That page
     // has no article body, so say so instead of reporting a generic failure.
-    appWallMarker: /打开今日头条\s*(?:App|APP|app)|下载今日头条|打开\s*APP\s*查看|请在\s*APP\s*内打开/,
+    appWallMarker: /(?:请)?(?:打开|下载)(?:今日头条)?\s*App\s*(?:后|内)?\s*(?:查看|阅读|继续)|请在\s*(?:今日头条)?\s*App\s*内打开/i,
   },
 };
 
@@ -13733,6 +13753,7 @@ async function renderPlatformArticleWithElectron(url, { operatorSession = false 
       result.author = embedded.author || result.author;
     }
     result.identityMatched = matchesPlatformArticleRenderIdentity(url, result.finalUrl);
+    if (platform === 'toutiao') result.markdown = cleanToutiaoArticleMarkdown(result.markdown);
     if (!result.identityMatched || !hasPlatformArticleBody(result.markdown)) result.markdown = '';
     if (loadFailure) {
       result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || '').slice(0, 160);
@@ -23399,8 +23420,15 @@ class WechatObsidianInboxPlugin extends Plugin {
       html = String(response && response.text || '');
       httpStatus = Number(response && response.status) || 0;
       if (shortLink) {
-        const resolvedUrl = String(response && response.url || '').trim();
-        if (isToutiaoArticleIdentityUrl(resolvedUrl)) articleUrl = resolvedUrl;
+        // Obsidian's RequestUrlResponse can omit its final URL. A separate
+        // observed browser redirect gives us the target for the HTML ID check.
+        const httpUrl = String(response && response.url || '').trim();
+        const browserUrl = String(rendered && rendered.finalUrl || '').trim();
+        const browserCanConfirm = rendered && !rendered.appWall && !rendered.needsLogin && !rendered.blocked;
+        const resolvedUrl = httpUrl || (browserCanConfirm ? browserUrl : '');
+        const contradictoryTargets = isToutiaoArticleIdentityUrl(httpUrl) && isToutiaoArticleIdentityUrl(browserUrl)
+          && !matchesPlatformArticleRenderIdentity(httpUrl, browserUrl);
+        if (isToutiaoArticleIdentityUrl(resolvedUrl) && !contradictoryTargets) articleUrl = resolvedUrl;
         else html = '';
       }
     } catch (error) {
@@ -23430,6 +23458,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (body && identityMatched) markdown = htmlToMarkdown(body.innerHTML);
       } catch (_) { markdown = ''; }
     } else identityMatched = Boolean(embedded && getPlatformArticleIdentity(articleUrl));
+    markdown = cleanToutiaoArticleMarkdown(markdown);
     if (identityMatched && hasPlatformArticleBody(markdown)) {
       return { kind: 'content', content: { markdown: String(markdown).trim(), title: String(rendered && rendered.title || embedded && embedded.title || '').trim(), author: String(rendered && rendered.author || embedded && embedded.author || '').trim(), imageUrls: [], tags: [] } };
     }
@@ -29622,6 +29651,7 @@ class WechatObsidianInboxPlugin extends Plugin {
                 if (!platformError) platformError = error;
               }
             }
+            if (platformKind === 'toutiao') markdown = cleanToutiaoArticleMarkdown(markdown);
             if (hasPlatformArticleBody(markdown)) {
               platformResult = {
                 ...(platformResult || {}),
@@ -29688,7 +29718,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             if ((responseText || responseJson) && fallback.type === 'info-v2') {
               const parsed = parseToutiaoInfoV2(responseJson || responseText, fallback.targetUrl);
               if (parsed) {
-                const markdown = parsed.contentHtml ? htmlToMarkdown(parsed.contentHtml) : parsed.contentText;
+                const markdown = cleanToutiaoArticleMarkdown(parsed.contentHtml ? htmlToMarkdown(parsed.contentHtml) : parsed.contentText);
                 if (hasPlatformArticleBody(markdown)) {
                   candidateResult = {
                     title: parsed.title,

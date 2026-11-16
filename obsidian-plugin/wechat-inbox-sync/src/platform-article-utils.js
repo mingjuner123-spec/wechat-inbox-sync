@@ -209,6 +209,22 @@ function matchesPlatformArticleRenderIdentity(sourceUrl, finalUrl) {
   return true;
 }
 
+// Only call this on the selected article body. Keep access/preview controls
+// separate from a standalone app promotion embedded in a readable article.
+function cleanToutiaoArticleMarkdown(value) {
+  const lines = String(value || '').split(/\r?\n/);
+  const body = [];
+  for (const line of lines) {
+    const label = line.trim()
+      .replace(/^\[([^\]]+)\]\([^)]*\)$/, '$1').replace(/[。！!\s]+$/, '');
+    const preview = /^(?:本文仅(?:为|展示)|以下为)(?:部分内容|试读|节选|预览)$|^(?:剩余|余下)\s*(?:全文|正文|内容|\d+%?).{0,24}(?:App|客户端|登录)(?:内)?(?:查看|打开|阅读)?$/i;
+    const accessPrompt = /^(?:请)?(?:登录后|请先登录|登录以)\s*(?:方可|即可|才能)?\s*(?:查看|阅读|继续)(?:剩余|完整|全部)?(?:全文|正文|内容|阅读)?$|^(?:请)?(?:打开|下载|在)\s*(?:今日头条)?\s*(?:APP|客户端)\s*(?:后|内)?\s*(?:查看|阅读|继续)(?:剩余|完整|全部)?(?:全文|正文|内容|阅读)?$|^请在\s*(?:今日头条)?\s*(?:APP|客户端)内打开$|^(?:安全验证|请输入验证码)$/i;
+    if (preview.test(label) || accessPrompt.test(label)) return '';
+    if (!/^(?:打开|下载)\s*今日头条\s*App$/i.test(label)) body.push(line);
+  }
+  return body.join('\n').trim();
+}
+
 // Judge the body, not its title, source URL, or site navigation.
 function hasPlatformArticleBody(markdown) {
   if (/^\s*>?\s*(?:知乎|今日头条)(?:正文未能自动提取|页面需要登录后才能读取正文|返回访问验证或登录提示)/m.test(String(markdown || ''))
@@ -651,6 +667,7 @@ module.exports = {
   isToutiaoArticleIdentityUrl,
   matchesPlatformArticleRenderIdentity,
   hasPlatformArticleBody,
+  cleanToutiaoArticleMarkdown,
   selectPlatformArticleBody,
   hasMatchingPlatformArticleDocumentIdentity,
   sanitizePlatformArticleDiagnostic,

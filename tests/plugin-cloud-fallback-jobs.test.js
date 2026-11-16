@@ -37,6 +37,7 @@ for (const ext of ['.ps1', '.sh', '.py']) {
   };
 }
 const originalModuleLoad = Module._load;
+let feedRequest;
 Module._load = function loadWithObsidianStub(request, parent, isMain) {
   if (request === 'obsidian') {
     return {
@@ -45,7 +46,7 @@ Module._load = function loadWithObsidianStub(request, parent, isMain) {
       Modal: class {},
       Notice: class {},
       Setting: class {},
-      requestUrl: async () => ({ status: 200, json: { success: true } }),
+      requestUrl: async options => feedRequest ? feedRequest(options) : ({ status: 200, json: { success: true } }),
     };
   }
   return originalModuleLoad.call(this, request, parent, isMain);
@@ -343,6 +344,40 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   assert.equal(channelsAcquireCalls[1].options.decryptKey, 'synthetic-key');
   assert.equal(channelsAcquireCalls[1].options.sourceUrl, 'https://weixin.qq.com/sph/channels-fallback');
   await assert.rejects(channelsAcquirePlugin.acquireOperatorWechatChannelsMediaToTempFile('https://evil.example/sph/channels-fallback'), error => error && error.code === 'OPERATOR_MEDIA_SOURCE_INVALID');
+
+  // Exercise the official feed response through the worker's normal acquisition entry point.
+  const fixtureNode = Object.create(PluginClass.prototype);
+  const channelSource = 'https://weixin.qq.com/sph/operator-fixture';
+  const mediaUrl = 'https://finder.video.qq.com/fixture.mp4';
+  const downloads = [];
+  fixtureNode.downloadMediaToTempFile = async (url, options) => {
+    downloads.push({ url, decryptKey: options.decryptKey, sourceUrl: options.sourceUrl });
+    return '/tmp/fixture-channel.mp4';
+  };
+  let feedBody;
+  feedRequest = options => {
+    assert.equal(JSON.parse(options.body).shortUri, 'operator-fixture');
+    return { status: 200, json: feedBody };
+  };
+  try {
+    for (const [wrapper, desc, list] of [['object_info', 'object_desc', 'media_list'], ['objectInfo', 'objectDesc', 'media']]) {
+      feedBody = { data: { [wrapper]: { [desc]: { [list]: [{ url: mediaUrl, urlToken: '?fixture=1', decodeKey: 'fixture-key' }] } } } };
+      assert.equal(await fixtureNode.acquireOperatorWechatChannelsMediaToTempFile(channelSource), '/tmp/fixture-channel.mp4');
+    }
+    assert.deepEqual(downloads, Array(2).fill({ url: mediaUrl + '?fixture=1', decryptKey: 'fixture-key', sourceUrl: channelSource }));
+    for (const data of [
+      { object_info: { object_desc: { media: [] } } },
+      { object_info: { recommendations: [{ objectDesc: { media: [{ url: mediaUrl }] } }] } },
+      { object_info: { object_desc: { media: [{ url: 'https://unrelated.example/fixture.mp4' }] } } },
+      { object: { objectDesc: { media: [] } }, objectInfo: { objectDesc: { media: [{ url: mediaUrl }] } } },
+    ]) {
+      feedBody = { data };
+      await assert.rejects(fixtureNode.acquireOperatorWechatChannelsMediaToTempFile(channelSource), error => error.code === 'OPERATOR_CHANNELS_MEDIA_EMPTY');
+    }
+    assert.equal(downloads.length, 2);
+  } finally {
+    feedRequest = undefined;
+  }
 
   const racedSubmitPlugin = makePlugin();
   const racedAbortController = new AbortController();
