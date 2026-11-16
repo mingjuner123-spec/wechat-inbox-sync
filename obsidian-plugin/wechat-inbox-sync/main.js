@@ -24258,7 +24258,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.15";
+var PLUGIN_RUNTIME_VERSION = "1.4.16";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -32535,6 +32535,23 @@ function buildWechatChannelsPreviewUrl(url) {
   return String(url || "");
 }
 __name(buildWechatChannelsPreviewUrl, "buildWechatChannelsPreviewUrl");
+function normalizeWechatChannelsShareUrl(url) {
+  const text = String(url || "").trim();
+  try {
+    const parsed = new URL(text);
+    const rawHost = String(parsed.hostname || "").toLowerCase();
+    const hostname = rawHost.endsWith(".") ? rawHost.slice(0, -1) : rawHost;
+    if (hostname !== "channels.weixin.qq.com") return text;
+    const pathname = String(parsed.pathname || "");
+    if (pathname !== "/finder-preview/pages/sph" && pathname !== "/finder-preview/pages/sph/") return text;
+    const shortUri = String(parsed.searchParams.get("id") || "").trim();
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(shortUri)) return text;
+    return "https://weixin.qq.com/sph/" + shortUri;
+  } catch (error) {
+    return text;
+  }
+}
+__name(normalizeWechatChannelsShareUrl, "normalizeWechatChannelsShareUrl");
 function buildWechatChannelsUnavailableMarkdown(url, feed = {}, reason = "") {
   const lines = [
     "原始链接：" + cleanDisplayUrl(url),
@@ -48210,6 +48227,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
   }
   async hydrateWechatChannelsTranscript(record, url, binding = null, title = "", options = {}) {
     var _a, _b;
+    url = normalizeWechatChannelsShareUrl(url);
     throwIfAborted(options.signal);
     const metadata = { ...record.metadata || {}, conversionError: "" };
     record = { ...record, metadata };
@@ -53274,6 +53292,7 @@ WechatObsidianInboxPlugin.__test = {
   isWechatChannelsUrl,
   extractWechatChannelsRequestPayload,
   normalizeWechatChannelsFeedPayload,
+  normalizeWechatChannelsShareUrl,
   extractWechatChannelsProfilesFromText,
   generateWechatChannelsDecryptorBytes,
   decryptWechatChannelsMediaBuffer,
