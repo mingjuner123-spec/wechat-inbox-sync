@@ -4,6 +4,11 @@ function buildSyncNotice(count) {
   return count ? `已同步 ${count} 条内容到 Obsidian` : '没有需要同步的新内容';
 }
 
+function hasPendingCloudResult(skipped) {
+  return Array.isArray(skipped) && skipped.some(item => item
+    && (item.reason === 'cloud-fallback-processing' || item.reason === 'cloud-transcription-processing'));
+}
+
 function buildSyncResultNotice(
   written = [],
   skipped = [],
@@ -13,12 +18,13 @@ function buildSyncResultNotice(
   const writtenCount = Array.isArray(written) ? written.length : 0;
   const pendingSetup = (Array.isArray(failed) ? failed : []).filter(item => item.setupRequired);
   const currentFailedItems = (Array.isArray(failed) ? failed : []).filter(item => !item.setupRequired);
-  let message = buildSyncNotice(writtenCount);
+  const cloudPending = hasPendingCloudResult(skipped);
+  let message = !writtenCount && cloudPending ? '' : buildSyncNotice(writtenCount);
   if (!writtenCount && currentFailedItems.length) {
     message = `同步失败：${currentFailedItems.length} 条内容未同步：${currentFailedItems[0].message}`;
   }
   if (Array.isArray(skipped) && skipped.length) {
-    message += buildSkippedSyncNotice(skipped);
+    message += buildSkippedSyncNotice(skipped, message ? '，' : '');
   }
   message += buildConversionWarningsNotice(
     Array.isArray(conversionWarnings) ? conversionWarnings : [],
@@ -28,12 +34,14 @@ function buildSyncResultNotice(
   }
   if (pendingSetup.length) {
     const setupMessage = pendingSetup.length+' 条内容待准备：'+pendingSetup[0].message;
-    message = !writtenCount && !currentFailedItems.length ? setupMessage : message + '；' + setupMessage;
+    message = !writtenCount && !currentFailedItems.length && !cloudPending ? setupMessage : message + '；' + setupMessage;
   }
   return message;
 }
 
-function buildSkippedSyncNotice(skipped = []) {
+function buildSkippedSyncNotice(skipped = [], prefix = '，') {
+  const fallbackCount = skipped.filter(item => item && item.reason === 'cloud-fallback-processing').length;
+  const queuedCount = skipped.filter(item => item?.reason === 'cloud-fallback-processing' && item.status === 'queued').length;
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
   const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === 'locally-quarantined-unrecoverable').length;
   const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === 'deleted-expired-xhs-shortlink').length;
@@ -43,10 +51,13 @@ function buildSkippedSyncNotice(skipped = []) {
     && item.reason !== 'failed-awaiting-manual-retry'
     && item.reason !== 'failure-report-pending'
     && item.reason !== 'cloud-transcription-processing'
+    && item.reason !== 'cloud-fallback-processing'
     && item.reason !== 'locally-quarantined-unrecoverable'
     && item.reason !== 'deleted-expired-xhs-shortlink'
     && item.reason !== 'xiaohongshu-rate-limited').length;
   const parts = [];
+  if (queuedCount) parts.push(`${queuedCount} 条在云端排队，等待处理`);
+  if (fallbackCount > queuedCount) parts.push(`${fallbackCount - queuedCount} 条等待云端结果`);
   if (cloudProcessingCount) {
     parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
   }
@@ -62,7 +73,7 @@ function buildSkippedSyncNotice(skipped = []) {
   if (otherSkippedCount) {
     parts.push(`${otherSkippedCount} 条已跳过`);
   }
-  return parts.length ? `，${parts.join('，')}` : '';
+  return parts.length ? prefix + parts.join('，') : '';
 }
 
 function normalizeProgressPercent(value) {
@@ -141,6 +152,7 @@ function buildSyncProgressMessage({
   const suffix = title ? `：${title}` : '';
   if (stage === 'fetching') return `${label}正在同步，正在获取待同步内容`;
   if (stage === 'empty') return `${label}没有需要同步的新内容`;
+  if (stage === 'waiting-local-asr') return `${label}本地转写正在排队，空闲后自动开始${suffix}`;
   if (stage === 'failed') return `${label}同步失败：仍有 ${Math.max(1, Number(total) || 0)} 条内容未同步成功`;
   if (stage === 'processing') return `${label}正在处理 ${countText}${suffix}`;
   if (stage === 'downloading') return `${label}正在下载附件 ${countText}${percentText}${suffix}`;
@@ -172,6 +184,7 @@ function buildConversionWarningsNotice(warnings = []) {
 }
 
 module.exports = {
+  hasPendingCloudResult,
   buildConversionWarningsNotice,
   buildLocalAsrProgressKey,
   buildSkippedSyncNotice,

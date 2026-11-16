@@ -1694,6 +1694,7 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   let releaseForegroundMutex = null;
   const foregroundMutexGate = new Promise((resolve) => { releaseForegroundMutex = resolve; });
   const foregroundMutexPlugin = Object.create(PluginClass.prototype);
+  foregroundMutexPlugin.showSyncProgress = ({ stage }) => assert.equal(stage, 'waiting-local-asr');
   foregroundMutexPlugin.localAsrMutexOwner = null;
   foregroundMutexPlugin.operatorLocalAsrActive = false;
   foregroundMutexPlugin.runLocalTranscriptionCore = async () => {
@@ -1706,17 +1707,17 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
     foregroundMutexPlugin.runOperatorLocalTranscription('/tmp/operator.mp3'),
     error => error && error.code === 'OPERATOR_ASR_BUSY',
   );
-  await assert.rejects(
-    foregroundMutexPlugin.runLocalTranscription('/tmp/second-foreground.mp3'),
-    error => error && error.code === 'LOCAL_ASR_BUSY',
-  );
+  const secondForeground = foregroundMutexPlugin.runLocalTranscription('/tmp/second-foreground.mp3');
+  assert.equal(foregroundMutexPlugin.localAsrWaiters.size, 1);
   releaseForegroundMutex();
   assert.strictEqual(await foregroundMutexRun, 'foreground transcript');
+  assert.strictEqual(await secondForeground, 'foreground transcript');
   assert.strictEqual(foregroundMutexPlugin.localAsrMutexOwner, null);
 
   let releaseOperatorMutex = null;
   const operatorMutexGate = new Promise((resolve) => { releaseOperatorMutex = resolve; });
   const operatorMutexPlugin = Object.create(PluginClass.prototype);
+  operatorMutexPlugin.showSyncProgress = ({ stage }) => assert.equal(stage, 'waiting-local-asr');
   operatorMutexPlugin.localAsrMutexOwner = null;
   operatorMutexPlugin.operatorLocalAsrActive = false;
   operatorMutexPlugin.runLocalTranscriptionCore = async () => {
@@ -1725,13 +1726,45 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
   };
   const operatorMutexRun = operatorMutexPlugin.runOperatorLocalTranscription('/tmp/operator.mp3');
   assert.strictEqual(operatorMutexPlugin.localAsrMutexOwner.kind, 'operator', 'operator ASR must claim the mutex before setup awaits');
-  await assert.rejects(
-    operatorMutexPlugin.runLocalTranscription('/tmp/foreground.mp3'),
-    error => error && error.code === 'LOCAL_ASR_BUSY',
-  );
+  const localStarts = [];
+  operatorMutexPlugin.runLocalTranscriptionCore = async input => { localStarts.push(input); return 'local transcript'; };
+  const controller = new AbortController();
+  const cancelledWait = operatorMutexPlugin.runLocalTranscription('/tmp/cancel.mp3', { signal: controller.signal });
+  operatorMutexPlugin.currentProcessingAbortController = controller;
+  operatorMutexPlugin.currentTranscriptionAbortRequest = () => assert.fail('stop must not abort the active operator');
+  operatorMutexPlugin.currentTranscriptionProcess = { kill() { assert.fail('stop must not kill the active operator'); } };
+  const firstWait = operatorMutexPlugin.runLocalTranscription('/tmp/foreground.mp3');
+  const secondWait = operatorMutexPlugin.runLocalTranscription('/tmp/next.mp3');
+  await operatorMutexPlugin.stopCurrentTranscription();
+  await assert.rejects(cancelledWait, /abort|取消|停止/i);
+  assert.deepEqual(localStarts, []);
   releaseOperatorMutex();
   assert.strictEqual(await operatorMutexRun, 'operator transcript');
+  assert.deepEqual(await Promise.all([firstWait, secondWait]), ['local transcript', 'local transcript']);
+  assert.deepEqual(localStarts, ['/tmp/foreground.mp3', '/tmp/next.mp3']);
+  assert.equal(operatorMutexPlugin.localAsrWaiters.size, 0);
   assert.strictEqual(operatorMutexPlugin.localAsrMutexOwner, null);
+
+  const busyChannels = makePlugin();
+  busyChannels.settings.aiProvider = 'local';
+  busyChannels.settings.cloudFallbackEnabled = true;
+  busyChannels.showSyncProgress = () => {};
+  busyChannels.evaluateCloudFallbackUserGate = () => assert.fail('contention must not enter fallback');
+  busyChannels.submitCloudFallbackJob = () => assert.fail('contention must not create a job');
+  const operatorSlot = { kind: 'operator' };
+  busyChannels.localAsrMutexOwner = operatorSlot;
+  const preparedInput = 'https://finder.video.qq.com/prepared.mp4';
+  const attemptedInputs = [];
+  busyChannels.runLocalTranscriptionCore = async input => { attemptedInputs.push(input); return 'transcribed locally'; };
+  const configuredRun = busyChannels.runConfiguredTranscription(preparedInput, {
+    forceLocal: true, sourceUrl: channelSource, recordId: 'busy-channels', binding: busyChannels.settings.bindings[0],
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(busyChannels.localAsrWaiters.size, 1);
+  assert.deepEqual(attemptedInputs, []);
+  busyChannels.releaseLocalAsrSlot(operatorSlot);
+  assert.equal((await configuredRun).transcription, 'transcribed locally');
+  assert.deepEqual(attemptedInputs, [preparedInput]);
 
   const stoppedOperatorTempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'wechat-inbox-operator-stop-test-'));
   const stoppedOperatorMediaPath = path.join(stoppedOperatorTempRoot, 'operator.mp4');

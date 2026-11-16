@@ -33,6 +33,17 @@ for (const functionName of functionNames) {
 
 assert.strictEqual(helpers.buildSyncNotice(0), '没有需要同步的新内容');
 assert.strictEqual(helpers.buildSyncNotice(2), '已同步 2 条内容到 Obsidian');
+const waiting = { reason: 'cloud-fallback-processing' };
+assert.strictEqual(helpers.buildSyncResultNotice([{ id: 'video' }], Array(4).fill({ ...waiting, status: 'queued' })),
+  '已同步 1 条内容到 Obsidian，4 条在云端排队，等待处理');
+assert.strictEqual(helpers.buildSyncProgressMessage({ stage: 'waiting-local-asr' }), '本地转写正在排队，空闲后自动开始');
+assert.strictEqual(helpers.buildSyncResultNotice([], [waiting]), '1 条等待云端结果');
+assert.strictEqual(helpers.buildSyncResultNotice([], [waiting, waiting, { reason: 'unsupported' }]),
+  '2 条等待云端结果，1 条已跳过');
+assert.strictEqual(helpers.buildSyncResultNotice([{ id: '1' }], [waiting]),
+  '已同步 1 条内容到 Obsidian，1 条等待云端结果');
+assert.strictEqual(helpers.buildSyncResultNotice([], [waiting], [], [{setupRequired: true, message: '检查组件'}]),
+  '1 条等待云端结果；1 条内容待准备：检查组件');
 assert.strictEqual(
   helpers.buildSyncResultNotice([], [], [], [{ message: '小红书内容提取失败' }]),
   '同步失败：1 条内容未同步：小红书内容提取失败',
@@ -182,6 +193,7 @@ try {
 } finally {
   Module._load = originalLoad;
 }
+assert.strictEqual(PluginClass.__test.buildSyncResultNotice([], [waiting]), '1 条等待云端结果');
 
 for (const functionName of [
   'buildSyncResultNotice',
