@@ -18569,6 +18569,19 @@ var require_platform_article_utils = __commonJS({
       return true;
     }
     __name(matchesPlatformArticleRenderIdentity2, "matchesPlatformArticleRenderIdentity");
+    function cleanToutiaoArticleMarkdown2(value) {
+      const lines = String(value || "").split(/\r?\n/);
+      const body = [];
+      for (const line of lines) {
+        const label = line.trim().replace(/^\[([^\]]+)\]\([^)]*\)$/, "$1").replace(/[。！!\s]+$/, "");
+        const preview = /^(?:本文仅(?:为|展示)|以下为)(?:部分内容|试读|节选|预览)$|^(?:剩余|余下)\s*(?:全文|正文|内容|\d+%?).{0,24}(?:App|客户端|登录)(?:内)?(?:查看|打开|阅读)?$/i;
+        const accessPrompt = /^(?:请)?(?:登录后|请先登录|登录以)\s*(?:方可|即可|才能)?\s*(?:查看|阅读|继续)(?:剩余|完整|全部)?(?:全文|正文|内容|阅读)?$|^(?:请)?(?:打开|下载|在)\s*(?:今日头条)?\s*(?:APP|客户端)\s*(?:后|内)?\s*(?:查看|阅读|继续)(?:剩余|完整|全部)?(?:全文|正文|内容|阅读)?$|^请在\s*(?:今日头条)?\s*(?:APP|客户端)内打开$|^(?:安全验证|请输入验证码)$/i;
+        if (preview.test(label) || accessPrompt.test(label)) return "";
+        if (!/^(?:打开|下载)\s*今日头条\s*App$/i.test(label)) body.push(line);
+      }
+      return body.join("\n").trim();
+    }
+    __name(cleanToutiaoArticleMarkdown2, "cleanToutiaoArticleMarkdown");
     function hasPlatformArticleBody2(markdown) {
       if (/^\s*>?\s*(?:知乎|今日头条)(?:正文未能自动提取|页面需要登录后才能读取正文|返回访问验证或登录提示)/m.test(String(markdown || "")) || /^\s*>?\s*(?:原始链接已写入笔记属性，可稍后重新同步|已保留原始链接等待重试，本次未完成正文同步)/m.test(String(markdown || ""))) return false;
       const body = String(markdown || "").replace(/^\uFEFF?---\s*\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/, "").replace(/<!--[^]*?-->/g, "").replace(/^\s*#{1,6}\s+.*$/gm, "").replace(/^\s*(?:原始链接|来源链接|来源|作者|发布时间|source\s*url)\s*[：:].*$/gim, "").replace(/!?\[[^\]]*\]\([^)]+\)|!?\[\[[^\]]+\]\]/g, "").replace(/https?:\/\/\S+/g, "").replace(/<[^>]*>/g, "").trim();
@@ -18981,6 +18994,7 @@ var require_platform_article_utils = __commonJS({
       isToutiaoArticleIdentityUrl: isToutiaoArticleIdentityUrl2,
       matchesPlatformArticleRenderIdentity: matchesPlatformArticleRenderIdentity2,
       hasPlatformArticleBody: hasPlatformArticleBody2,
+      cleanToutiaoArticleMarkdown: cleanToutiaoArticleMarkdown2,
       selectPlatformArticleBody: selectPlatformArticleBody2,
       hasMatchingPlatformArticleDocumentIdentity: hasMatchingPlatformArticleDocumentIdentity2,
       sanitizePlatformArticleDiagnostic: sanitizePlatformArticleDiagnostic2,
@@ -24086,6 +24100,7 @@ var {
   isToutiaoArticleIdentityUrl,
   matchesPlatformArticleRenderIdentity,
   hasPlatformArticleBody,
+  cleanToutiaoArticleMarkdown,
   selectPlatformArticleBody,
   hasMatchingPlatformArticleDocumentIdentity,
   sanitizePlatformArticleDiagnostic,
@@ -24208,7 +24223,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.12";
+var PLUGIN_RUNTIME_VERSION = "1.4.13";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -32361,7 +32376,7 @@ __name(buildWechatChannelsTitle, "buildWechatChannelsTitle");
 function normalizeWechatChannelsFeedPayload(payload) {
   const root = payload && typeof payload === "object" ? payload : {};
   const data = root.data && typeof root.data === "object" ? root.data : {};
-  const objectInfo = data.object && typeof data.object === "object" ? data.object : data.object_info && typeof data.object_info === "object" ? data.object_info : {};
+  const objectInfo = data.object && typeof data.object === "object" ? data.object : data.object_info && typeof data.object_info === "object" ? data.object_info : data.objectInfo && typeof data.objectInfo === "object" ? data.objectInfo : {};
   const feedInfo = data.feedInfo && typeof data.feedInfo === "object" ? data.feedInfo : data.feed_info && typeof data.feed_info === "object" ? data.feed_info : {};
   const objectDesc = data.object_desc && typeof data.object_desc === "object" ? data.object_desc : data.objectDesc && typeof data.objectDesc === "object" ? data.objectDesc : objectInfo.object_desc && typeof objectInfo.object_desc === "object" ? objectInfo.object_desc : objectInfo.objectDesc && typeof objectInfo.objectDesc === "object" ? objectInfo.objectDesc : feedInfo.object_desc && typeof feedInfo.object_desc === "object" ? feedInfo.object_desc : feedInfo.objectDesc && typeof feedInfo.objectDesc === "object" ? feedInfo.objectDesc : {};
   const authorInfo = data.authorInfo && typeof data.authorInfo === "object" ? data.authorInfo : data.author_info && typeof data.author_info === "object" ? data.author_info : objectInfo.contact && typeof objectInfo.contact === "object" ? objectInfo.contact : objectInfo.authorInfo && typeof objectInfo.authorInfo === "object" ? objectInfo.authorInfo : {};
@@ -32372,6 +32387,23 @@ function normalizeWechatChannelsFeedPayload(payload) {
   );
   const socialMetrics = buildWechatChannelsSocialMetrics(root);
   const mediaCandidates = getWechatChannelsMediaCandidates(root);
+  if (!mediaCandidates.length && !data.object && (objectInfo === data.object_info || objectInfo === data.objectInfo)) {
+    const descriptor = objectInfo.objectDesc || objectInfo.object_desc || {};
+    const wrappedMedia = getWechatChannelsMediaCandidates({
+      media: descriptor.media,
+      mediaList: descriptor.mediaList,
+      media_list: descriptor.media_list
+    });
+    for (const candidate of wrappedMedia) {
+      try {
+        const url = new URL(candidate.url);
+        if (url.protocol === "https:" && !url.username && !url.password && !url.port && ["finder.video.qq.com", "mpvideo.qpic.cn"].includes(url.hostname)) {
+          mediaCandidates.push(candidate);
+        }
+      } catch {
+      }
+    }
+  }
   const mediaUrls = mediaCandidates.map((candidate) => candidate.url);
   const firstMedia = mediaCandidates[0] || {};
   const decodeKey = firstMedia.decodeKey || (mediaCandidates.find((candidate) => candidate.decodeKey) || {}).decodeKey || "";
@@ -35547,7 +35579,7 @@ var PLATFORM_ARTICLE_SELECTORS = {
     blockMarker: /请求存在异常|访问过于频繁|安全验证/,
     // Share short links sometimes only resolve inside the Toutiao app. That page
     // has no article body, so say so instead of reporting a generic failure.
-    appWallMarker: /打开今日头条\s*(?:App|APP|app)|下载今日头条|打开\s*APP\s*查看|请在\s*APP\s*内打开/
+    appWallMarker: /(?:请)?(?:打开|下载)(?:今日头条)?\s*App\s*(?:后|内)?\s*(?:查看|阅读|继续)|请在\s*(?:今日头条)?\s*App\s*内打开/i
   }
 };
 async function renderPlatformArticleWithElectron(url, { operatorSession = false } = {}) {
@@ -35677,6 +35709,7 @@ async function renderPlatformArticleWithElectron(url, { operatorSession = false 
       result.author = embedded.author || result.author;
     }
     result.identityMatched = matchesPlatformArticleRenderIdentity(url, result.finalUrl);
+    if (platform === "toutiao") result.markdown = cleanToutiaoArticleMarkdown(result.markdown);
     if (!result.identityMatched || !hasPlatformArticleBody(result.markdown)) result.markdown = "";
     if (loadFailure) {
       result.loadError = String(loadFailure && (loadFailure.message || loadFailure) || "").slice(0, 160);
@@ -44637,8 +44670,12 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
       html = String(response && response.text || "");
       httpStatus = Number(response && response.status) || 0;
       if (shortLink) {
-        const resolvedUrl = String(response && response.url || "").trim();
-        if (isToutiaoArticleIdentityUrl(resolvedUrl)) articleUrl = resolvedUrl;
+        const httpUrl = String(response && response.url || "").trim();
+        const browserUrl = String(rendered && rendered.finalUrl || "").trim();
+        const browserCanConfirm = rendered && !rendered.appWall && !rendered.needsLogin && !rendered.blocked;
+        const resolvedUrl = httpUrl || (browserCanConfirm ? browserUrl : "");
+        const contradictoryTargets = isToutiaoArticleIdentityUrl(httpUrl) && isToutiaoArticleIdentityUrl(browserUrl) && !matchesPlatformArticleRenderIdentity(httpUrl, browserUrl);
+        if (isToutiaoArticleIdentityUrl(resolvedUrl) && !contradictoryTargets) articleUrl = resolvedUrl;
         else html = "";
       }
     } catch (error2) {
@@ -44674,6 +44711,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         markdown = "";
       }
     } else identityMatched = Boolean(embedded && getPlatformArticleIdentity(articleUrl));
+    markdown = cleanToutiaoArticleMarkdown(markdown);
     if (identityMatched && hasPlatformArticleBody(markdown)) {
       return { kind: "content", content: { markdown: String(markdown).trim(), title: String(rendered && rendered.title || embedded && embedded.title || "").trim(), author: String(rendered && rendered.author || embedded && embedded.author || "").trim(), imageUrls: [], tags: [] } };
     }
@@ -50219,6 +50257,7 @@ ${finalized.markdown}
                 if (!platformError) platformError = error;
               }
             }
+            if (platformKind === "toutiao") markdown2 = cleanToutiaoArticleMarkdown(markdown2);
             if (hasPlatformArticleBody(markdown2)) {
               platformResult = {
                 ...platformResult || {},
@@ -50283,7 +50322,7 @@ ${finalized.markdown}
             if ((responseText || responseJson) && fallback.type === "info-v2") {
               const parsed = parseToutiaoInfoV2(responseJson || responseText, fallback.targetUrl);
               if (parsed) {
-                const markdown2 = parsed.contentHtml ? htmlToMarkdown(parsed.contentHtml) : parsed.contentText;
+                const markdown2 = cleanToutiaoArticleMarkdown(parsed.contentHtml ? htmlToMarkdown(parsed.contentHtml) : parsed.contentText);
                 if (hasPlatformArticleBody(markdown2)) {
                   candidateResult = {
                     title: parsed.title,
