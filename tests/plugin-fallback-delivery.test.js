@@ -315,6 +315,11 @@ async function test(name, run) { await run(); count++; console.log(`PASS ${name}
     assert.equal(selectFailureDetail({code:'CLOUD_FALLBACK_FAILED',diagnostic:{cloudFallback}}),'OPERATOR_WECHAT_ARTICLE_EMPTY');
     assert.notEqual(selectFailureDetail({code:'CLOUD_FALLBACK_CANCELLED',diagnostic:{cloudFallback}}),'OPERATOR_WECHAT_ARTICLE_EMPTY');
     assert.equal(sanitizeFallbackDecision({status:'failed',code:'private text',stage:'path'}),null);
+    const expired = sanitizeFallbackDecision({status:'failed',code:'CLOUD_FALLBACK_EXPIRED',stage:'acquiring'});
+    assert.deepEqual(expired,{status:'failed',code:'CLOUD_FALLBACK_EXPIRED',stage:'acquiring'});
+    assert.equal(selectFailureDetail({code:'CLOUD_FALLBACK_FAILED',diagnostic:{cloudFallback:expired}}),'CLOUD_FALLBACK_EXPIRED');
+    const retired = sanitizeFallbackDecision({status:'failed',code:'CLOUD_FALLBACK_DISPATCH_RETIRED',stage:'unknown'});
+    assert.deepEqual(retired,{status:'failed',code:'CLOUD_FALLBACK_DISPATCH_RETIRED',stage:'unknown'});
   });
 
 

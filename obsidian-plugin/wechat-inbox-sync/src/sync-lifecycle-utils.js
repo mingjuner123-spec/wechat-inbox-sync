@@ -20,6 +20,8 @@ const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
   // Preserve safe, machine-readable failure causes through the lifecycle API.
   // The mini-program uses these codes to show a precise recovery step.
   CLOUD_FALLBACK_FAILED: '\u4e91\u7aef\u515c\u5e95\u5904\u7406\u5931\u8d25\uff0c\u5c1a\u672a\u4ea4\u4ed8\u7ed3\u679c',
+  CLOUD_FALLBACK_EXPIRED: '云端任务超时，已停止等待，请重新提交',
+  CLOUD_FALLBACK_DISPATCH_RETIRED: '云端任务已失效，请重新提交',
   NODE_HTTP_TIMEOUT: '\u8bf7\u6c42\u5904\u7406\u8d85\u65f6\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5',
   MEDIA_DOWNLOAD_INTERRUPTED: '\u5a92\u4f53\u4e0b\u8f7d\u4e2d\u65ad\uff0c\u8bf7\u5728\u7f51\u7edc\u7a33\u5b9a\u540e\u91cd\u8bd5',
   CHANNELS_OPERATION_FAILED: '\u89c6\u9891\u53f7\u5904\u7406\u672a\u5b8c\u6210',

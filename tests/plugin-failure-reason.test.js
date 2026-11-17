@@ -31,6 +31,13 @@ assert.equal(queue({ code: 'EXTRACTION_FAILED', diagnostic: { failureCode: 'TOKE
 assert.equal(selectFailureDetail({ ...nested('PRO_REQUIRED'), code: 'CLOUD_FALLBACK_FAILED' }), 'CLOUD_FALLBACK_FAILED');
 assert.equal(observedFailureStage({ ...nested('PRO_REQUIRED'), code: 'CLOUD_FALLBACK_FAILED' }, 'sync'), 'sync');
 assert.match(failureMessage({ code: 'CLOUD_FALLBACK_FAILED' }), /无需因此重装/);
+const retired = { code: 'CLOUD_FALLBACK_FAILED', diagnostic: { cloudFallback: { status: 'failed', code: 'CLOUD_FALLBACK_DISPATCH_RETIRED' } } };
+assert.equal(selectFailureDetail(retired), 'CLOUD_FALLBACK_DISPATCH_RETIRED');
+assert.match(failureMessage(retired), /旧版本/);
+const expired = { code: 'CLOUD_FALLBACK_FAILED', diagnostic: { cloudFallback: { status: 'failed', code: 'CLOUD_FALLBACK_EXPIRED' } } };
+assert.equal(selectFailureDetail(expired), 'CLOUD_FALLBACK_EXPIRED');
+assert.match(failureMessage(expired), /24 小时/);
+
 assert.equal(selectFailureDetail({ code: 'PLUGIN_VERSION_MISMATCH', diagnostic: { failureCode: 'PRO_REQUIRED' } }), 'PLUGIN_VERSION_MISMATCH');
 assert.equal(queue({ code: 'PLUGIN_VERSION_MISMATCH' }).errorCode, 'PLUGIN_VERSION_MISMATCH');
 assert.equal(selectFailureDetail({ code: 'ENOENT', syscall: 'open' }), '', 'write ENOENT cannot imply ASR missing');

@@ -27,8 +27,11 @@ const FAILURE_DETAILS = Object.freeze({
   CHANNELS_OPERATION_FAILED: ['视频号处理操作未完成。', '请保留任务编号排查具体操作环节，不要反复重新提交。'],
   CLOUD_FALLBACK_FAILED: ['本次云端兜底处理失败，尚未交付结果。', '请保留任务编号查看后续处理；无需因此重装自己电脑的转写组件。'],
   CLOUD_MEDIA_UPLOAD_TIMEOUT: ['发送媒体到云端的请求超时。', '请保留任务编号排查上传连接；这不是本地转写组件安装失败，无需因此重装组件。'],
+  CLOUD_FALLBACK_EXPIRED: ['这条云端任务超过 24 小时未完成，已停止等待。', '请重新提交这条内容；不会重复扣费。'],
+  CLOUD_FALLBACK_DISPATCH_RETIRED: ['这条云端任务由旧版本创建，已无法继续处理。', '请重新提交这条内容。'],
 });
 const DETAIL_CODES = new Set(Object.keys(FAILURE_DETAILS));
+const TERMINAL_FALLBACK_CODES = new Set(['CLOUD_FALLBACK_EXPIRED', 'CLOUD_FALLBACK_DISPATCH_RETIRED']);
 const VERSION_CODES = new Set(['PLUGIN_UPDATE_REQUIRED', 'PLUGIN_VERSION_MISMATCH', 'PLUGIN_VERSION_UNSUPPORTED']);
 const codeOf = value => typeof value === 'string' ? value.trim().toUpperCase() : '';
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -39,7 +42,8 @@ function selectFailureDetail(error = {}) {
   const top = codeOf(error.code);
   const terminal = object(diagnostic.cloudFallback || error.cloudFallback);
   if (top === 'CLOUD_FALLBACK_FAILED' && terminal.status === 'failed'
-    && /^(OPERATOR_|CLOUD_MEDIA_)/.test(codeOf(terminal.code)) && DETAIL_CODES.has(codeOf(terminal.code))) return codeOf(terminal.code);
+    && (TERMINAL_FALLBACK_CODES.has(codeOf(terminal.code))
+      || (/^(OPERATOR_|CLOUD_MEDIA_)/.test(codeOf(terminal.code)) && DETAIL_CODES.has(codeOf(terminal.code))))) return codeOf(terminal.code);
   // A cloud failure must not be relabelled as the end user's local failure.
   if (VERSION_CODES.has(top) || /^CLOUD_/.test(top) && DETAIL_CODES.has(top)) return top;
   const candidates = [top, codeOf(diagnostic.errorCode), codeOf(diagnostic.failureCode),

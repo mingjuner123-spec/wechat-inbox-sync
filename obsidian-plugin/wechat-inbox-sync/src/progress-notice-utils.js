@@ -39,9 +39,19 @@ function buildSyncResultNotice(
   return message;
 }
 
-function buildSkippedSyncNotice(skipped = [], prefix = '，') {
-  const fallbackCount = skipped.filter(item => item && item.reason === 'cloud-fallback-processing').length;
-  const queuedCount = skipped.filter(item => item?.reason === 'cloud-fallback-processing' && item.status === 'queued').length;
+const CLOUD_QUEUE_STALE_MS = 6 * 60 * 60 * 1000;
+
+function buildSkippedSyncNotice(skipped = [], prefix = '，', nowMs = Date.now()) {
+  const fallbackItems = skipped.filter(item => item && item.reason === 'cloud-fallback-processing');
+  const fallbackCount = fallbackItems.length;
+  const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+  const isStale = (item) => {
+    const at = Date.parse(String(item && item.updatedAt || ''));
+    return Number.isFinite(at) && now - at > CLOUD_QUEUE_STALE_MS;
+  };
+  const staleCount = fallbackItems.filter(isStale).length;
+  const queuedCount = fallbackItems.filter(item => item.status === 'queued' && !isStale(item)).length;
+  const awaitingCount = fallbackCount - staleCount - queuedCount;
   const cloudProcessingCount = skipped.filter((item) => item && item.reason === 'cloud-transcription-processing').length;
   const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === 'locally-quarantined-unrecoverable').length;
   const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === 'deleted-expired-xhs-shortlink').length;
@@ -57,7 +67,8 @@ function buildSkippedSyncNotice(skipped = [], prefix = '，') {
     && item.reason !== 'xiaohongshu-rate-limited').length;
   const parts = [];
   if (queuedCount) parts.push(`${queuedCount} 条在云端排队，等待处理`);
-  if (fallbackCount > queuedCount) parts.push(`${fallbackCount - queuedCount} 条等待云端结果`);
+  if (staleCount) parts.push(`${staleCount} 条云端任务处理时间较长`);
+  if (awaitingCount > 0) parts.push(`${awaitingCount} 条等待云端结果`);
   if (cloudProcessingCount) {
     parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
   }

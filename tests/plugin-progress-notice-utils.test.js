@@ -44,6 +44,15 @@ assert.strictEqual(helpers.buildSyncResultNotice([{ id: '1' }], [waiting]),
   '已同步 1 条内容到 Obsidian，1 条等待云端结果');
 assert.strictEqual(helpers.buildSyncResultNotice([], [waiting], [], [{setupRequired: true, message: '检查组件'}]),
   '1 条等待云端结果；1 条内容待准备：检查组件');
+const noticeNow = Date.parse('2026-11-17T00:00:00.000Z');
+const freshQueued = { reason: 'cloud-fallback-processing', status: 'queued', updatedAt: '2026-11-16T23:00:00.000Z' };
+const staleQueued = { reason: 'cloud-fallback-processing', status: 'queued', updatedAt: '2026-11-16T10:00:00.000Z' };
+const freshProcessing = { reason: 'cloud-fallback-processing', status: 'processing', updatedAt: '2026-11-16T23:00:00.000Z' };
+assert.strictEqual(helpers.buildSkippedSyncNotice([freshQueued, freshQueued], '，', noticeNow), '，2 条在云端排队，等待处理');
+assert.strictEqual(helpers.buildSkippedSyncNotice([staleQueued], '，', noticeNow), '，1 条云端任务处理时间较长');
+assert.strictEqual(helpers.buildSkippedSyncNotice([staleQueued, freshQueued, freshProcessing], '，', noticeNow), '，1 条在云端排队，等待处理，1 条云端任务处理时间较长，1 条等待云端结果');
+assert.strictEqual(helpers.buildSkippedSyncNotice([{ reason: 'cloud-fallback-processing', status: 'queued' }], '，', noticeNow), '，1 条在云端排队，等待处理');
+
 assert.strictEqual(
   helpers.buildSyncResultNotice([], [], [], [{ message: '小红书内容提取失败' }]),
   '同步失败：1 条内容未同步：小红书内容提取失败',
