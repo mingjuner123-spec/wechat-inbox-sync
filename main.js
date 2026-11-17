@@ -3234,9 +3234,12 @@ var require_failure_reason_utils = __commonJS({
       WECHAT_ARTICLE_BODY_MISSING: ["未取得公众号文章正文。", "请确认原文可打开，并在插件中检查公众号访问验证；仍失败时保留任务编号。"],
       CHANNELS_OPERATION_FAILED: ["视频号处理操作未完成。", "请保留任务编号排查具体操作环节，不要反复重新提交。"],
       CLOUD_FALLBACK_FAILED: ["本次云端兜底处理失败，尚未交付结果。", "请保留任务编号查看后续处理；无需因此重装自己电脑的转写组件。"],
-      CLOUD_MEDIA_UPLOAD_TIMEOUT: ["发送媒体到云端的请求超时。", "请保留任务编号排查上传连接；这不是本地转写组件安装失败，无需因此重装组件。"]
+      CLOUD_MEDIA_UPLOAD_TIMEOUT: ["发送媒体到云端的请求超时。", "请保留任务编号排查上传连接；这不是本地转写组件安装失败，无需因此重装组件。"],
+      CLOUD_FALLBACK_EXPIRED: ["这条云端任务超过 24 小时未完成，已停止等待。", "请重新提交这条内容；不会重复扣费。"],
+      CLOUD_FALLBACK_DISPATCH_RETIRED: ["这条云端任务由旧版本创建，已无法继续处理。", "请重新提交这条内容。"]
     });
     var DETAIL_CODES = new Set(Object.keys(FAILURE_DETAILS));
+    var TERMINAL_FALLBACK_CODES = /* @__PURE__ */ new Set(["CLOUD_FALLBACK_EXPIRED", "CLOUD_FALLBACK_DISPATCH_RETIRED"]);
     var VERSION_CODES = /* @__PURE__ */ new Set(["PLUGIN_UPDATE_REQUIRED", "PLUGIN_VERSION_MISMATCH", "PLUGIN_VERSION_UNSUPPORTED"]);
     var codeOf = /* @__PURE__ */ __name((value) => typeof value === "string" ? value.trim().toUpperCase() : "", "codeOf");
     var object = /* @__PURE__ */ __name((value) => value && typeof value === "object" && !Array.isArray(value) ? value : {}, "object");
@@ -3245,7 +3248,7 @@ var require_failure_reason_utils = __commonJS({
       const media = object(error.mediaResolutionDiagnostic || diagnostic.mediaResolutionDiagnostic || diagnostic);
       const top = codeOf(error.code);
       const terminal = object(diagnostic.cloudFallback || error.cloudFallback);
-      if (top === "CLOUD_FALLBACK_FAILED" && terminal.status === "failed" && /^(OPERATOR_|CLOUD_MEDIA_)/.test(codeOf(terminal.code)) && DETAIL_CODES.has(codeOf(terminal.code))) return codeOf(terminal.code);
+      if (top === "CLOUD_FALLBACK_FAILED" && terminal.status === "failed" && (TERMINAL_FALLBACK_CODES.has(codeOf(terminal.code)) || /^(OPERATOR_|CLOUD_MEDIA_)/.test(codeOf(terminal.code)) && DETAIL_CODES.has(codeOf(terminal.code)))) return codeOf(terminal.code);
       if (VERSION_CODES.has(top) || /^CLOUD_/.test(top) && DETAIL_CODES.has(top)) return top;
       const candidates = [
         top,
@@ -17944,9 +17947,18 @@ var require_progress_notice_utils = __commonJS({
       return message;
     }
     __name(buildSyncResultNotice2, "buildSyncResultNotice");
-    function buildSkippedSyncNotice2(skipped = [], prefix = "，") {
-      const fallbackCount = skipped.filter((item) => item && item.reason === "cloud-fallback-processing").length;
-      const queuedCount = skipped.filter((item) => (item == null ? void 0 : item.reason) === "cloud-fallback-processing" && item.status === "queued").length;
+    var CLOUD_QUEUE_STALE_MS = 6 * 60 * 60 * 1e3;
+    function buildSkippedSyncNotice2(skipped = [], prefix = "，", nowMs = Date.now()) {
+      const fallbackItems = skipped.filter((item) => item && item.reason === "cloud-fallback-processing");
+      const fallbackCount = fallbackItems.length;
+      const now = Number.isFinite(Number(nowMs)) ? Number(nowMs) : Date.now();
+      const isStale = /* @__PURE__ */ __name((item) => {
+        const at = Date.parse(String(item && item.updatedAt || ""));
+        return Number.isFinite(at) && now - at > CLOUD_QUEUE_STALE_MS;
+      }, "isStale");
+      const staleCount = fallbackItems.filter(isStale).length;
+      const queuedCount = fallbackItems.filter((item) => item.status === "queued" && !isStale(item)).length;
+      const awaitingCount = fallbackCount - staleCount - queuedCount;
       const cloudProcessingCount = skipped.filter((item) => item && item.reason === "cloud-transcription-processing").length;
       const locallyQuarantinedCount = skipped.filter((item) => item && item.reason === "locally-quarantined-unrecoverable").length;
       const deletedExpiredXiaohongshuCount = skipped.filter((item) => item && item.reason === "deleted-expired-xhs-shortlink").length;
@@ -17954,7 +17966,8 @@ var require_progress_notice_utils = __commonJS({
       const otherSkippedCount = skipped.filter((item) => item && item.reason !== "already-synced-local" && item.reason !== "failed-awaiting-manual-retry" && item.reason !== "failure-report-pending" && item.reason !== "cloud-transcription-processing" && item.reason !== "cloud-fallback-processing" && item.reason !== "locally-quarantined-unrecoverable" && item.reason !== "deleted-expired-xhs-shortlink" && item.reason !== "xiaohongshu-rate-limited").length;
       const parts = [];
       if (queuedCount) parts.push(`${queuedCount} 条在云端排队，等待处理`);
-      if (fallbackCount > queuedCount) parts.push(`${fallbackCount - queuedCount} 条等待云端结果`);
+      if (staleCount) parts.push(`${staleCount} 条云端任务处理时间较长`);
+      if (awaitingCount > 0) parts.push(`${awaitingCount} 条等待云端结果`);
       if (cloudProcessingCount) {
         parts.push(`${cloudProcessingCount} 条云端转写中，完成后再同步`);
       }
@@ -24258,7 +24271,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.16";
+var PLUGIN_RUNTIME_VERSION = "1.4.17";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -52038,7 +52051,7 @@ ${finalized.markdown}
     }, binding);
   }
   async syncBinding(binding, shouldPrefixTitle) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     this.ensureSerializedSaveData();
     clearXiaohongshuRestriction();
     const bindingLabel = binding && (binding.label || binding.token) ? binding.label || binding.token : "";
@@ -52115,7 +52128,8 @@ ${finalized.markdown}
           recordId,
           reason: "cloud-fallback-processing",
           jobId: record.metadata && record.metadata.cloudFallbackJobId,
-          status: (_a = record.metadata) == null ? void 0 : _a.cloudFallbackStatus
+          status: (_a = record.metadata) == null ? void 0 : _a.cloudFallbackStatus,
+          updatedAt: ((_b = record.metadata) == null ? void 0 : _b.cloudFallbackUpdatedAt) || ""
         });
         if (!this.backgroundSyncActive) {
           this.showSyncProgress({ ...progress, stage: "processing", title: `${buildRecordTitleBase(record)} 云端兜底中` });
@@ -52157,7 +52171,7 @@ ${finalized.markdown}
       this.setTranscriptionStopAvailable(true);
       try {
         throwIfAborted(processingAbortController.signal);
-        lifecycle = ((_b = record.metadata) == null ? void 0 : _b.cloudFallbackDeliveryKey) ? await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised, record) : getActiveCloudFallbackLifecycle(record) || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
+        lifecycle = ((_c = record.metadata) == null ? void 0 : _c.cloudFallbackDeliveryKey) ? await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised, record) : getActiveCloudFallbackLifecycle(record) || await this.claimSyncRecordProcessing(recordId, binding, lifecycleAdvertised);
         if (lifecycle.conflict) {
           skipped.push({ recordId, reason: "record-busy" });
           continue;
@@ -52277,7 +52291,7 @@ ${finalized.markdown}
           throw Object.assign(new Error(record.metadata.transcriptionError || messages[status] || messages.failed), {
             code: `CLOUD_FALLBACK_${status.toUpperCase()}`,
             fallbackStatus: status,
-            diagnostic: { cloudFallback: { status, code: ((_c = record.metadata.cloudFallbackError) == null ? void 0 : _c.code) || "", stage: ((_d = record.metadata.cloudFallbackError) == null ? void 0 : _d.stage) || "" } }
+            diagnostic: { cloudFallback: { status, code: ((_d = record.metadata.cloudFallbackError) == null ? void 0 : _d.code) || "", stage: ((_e = record.metadata.cloudFallbackError) == null ? void 0 : _e.stage) || "" } }
           });
         }
         const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
@@ -52352,7 +52366,8 @@ ${finalized.markdown}
             recordId,
             reason: "cloud-fallback-processing",
             jobId: queuedJob && queuedJob.jobId || "",
-            status: queuedJob == null ? void 0 : queuedJob.status
+            status: queuedJob == null ? void 0 : queuedJob.status,
+            updatedAt: (queuedJob == null ? void 0 : queuedJob.updatedAt) || ""
           });
           if (!this.backgroundSyncActive) {
             this.showSyncProgress({ ...progress, stage: "processing", title: `${processingTitle} 云端兜底中` });
