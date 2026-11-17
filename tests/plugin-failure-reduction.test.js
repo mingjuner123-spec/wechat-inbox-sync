@@ -259,6 +259,8 @@ function run() {
         const decision = await plugin.maybeSubmitWechatArticleCloudFallback({ _id: 'fixture' }, input);
         const error = attachFallbackDecision(Object.assign(Error('公众号正文未取得'), { code: 'WECHAT_ARTICLE_BODY_MISSING' }), decision);
         assert.equal(categorizeSyncFailure(error), 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED');
+        assert.equal(categorizeSyncFailure({ code: 'CLOUD_FALLBACK_FAILED', diagnostic: { cloudFallback: { status: 'failed', code: 'CLOUD_FALLBACK_EXPIRED' } } }), 'CLOUD_FALLBACK_EXPIRED');
+        assert.equal(categorizeSyncFailure({ code: 'CLOUD_FALLBACK_FAILED', diagnostic: { cloudFallback: { status: 'failed', code: 'CLOUD_FALLBACK_DISPATCH_RETIRED' } } }), 'CLOUD_FALLBACK_DISPATCH_RETIRED');
         const report = JSON.parse(buildFailureTechnicalReport({ error }).text);
         assert.deepEqual(report.failure.cloudFallback, { status: 'not_submitted', code: 'LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', stage: 'eligibility' });
         assert.doesNotMatch(JSON.stringify(report.failure.cloudFallback), /fixture|https/);

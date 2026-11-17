@@ -4873,7 +4873,7 @@ var require_fallback_decision = __commonJS({
       "SOURCE_UNAVAILABLE"
     ]);
     function sanitizeFallbackDecision2(value) {
-      const terminalCodes = /* @__PURE__ */ new Set(["OPERATOR_WECHAT_ARTICLE_EMPTY", "OPERATOR_WECHAT_ARTICLE_CAPTCHA", "OPERATOR_MEDIA_ACQUIRE_EMPTY", "OPERATOR_MEDIA_RESOLUTION_EMPTY", "CLOUD_MEDIA_UPLOAD_TIMEOUT", "CLOUD_MEDIA_UPLOAD_FAILED", "CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED", "OPERATOR_DOUBAO_ACCESS_DENIED", "OPERATOR_ASR_EMPTY", "OPERATOR_NODE_FAILED"]);
+      const terminalCodes = /* @__PURE__ */ new Set(["OPERATOR_WECHAT_ARTICLE_EMPTY", "OPERATOR_WECHAT_ARTICLE_CAPTCHA", "OPERATOR_MEDIA_ACQUIRE_EMPTY", "OPERATOR_MEDIA_RESOLUTION_EMPTY", "CLOUD_MEDIA_UPLOAD_TIMEOUT", "CLOUD_MEDIA_UPLOAD_FAILED", "CLOUD_MEDIA_UPLOAD_WINDOW_EXPIRED", "OPERATOR_DOUBAO_ACCESS_DENIED", "OPERATOR_ASR_EMPTY", "OPERATOR_NODE_FAILED", "CLOUD_FALLBACK_EXPIRED", "CLOUD_FALLBACK_DISPATCH_RETIRED"]);
       if (value && value.status === "failed" && terminalCodes.has(value.code)) {
         return { status: "failed", code: value.code, stage: ["acquiring", "upload", "transcribing"].includes(value.stage) ? value.stage : "unknown" };
       }
@@ -19086,6 +19086,8 @@ var require_sync_lifecycle_utils = __commonJS({
       // Preserve safe, machine-readable failure causes through the lifecycle API.
       // The mini-program uses these codes to show a precise recovery step.
       CLOUD_FALLBACK_FAILED: "云端兜底处理失败，尚未交付结果",
+      CLOUD_FALLBACK_EXPIRED: "云端任务超时，已停止等待，请重新提交",
+      CLOUD_FALLBACK_DISPATCH_RETIRED: "云端任务已失效，请重新提交",
       NODE_HTTP_TIMEOUT: "请求处理超时，请稍后重试",
       MEDIA_DOWNLOAD_INTERRUPTED: "媒体下载中断，请在网络稳定后重试",
       CHANNELS_OPERATION_FAILED: "视频号处理未完成",
