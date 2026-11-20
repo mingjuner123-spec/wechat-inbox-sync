@@ -401,7 +401,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.17';
+const PLUGIN_RUNTIME_VERSION = '1.4.18';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -6532,6 +6532,61 @@ function installPlatformArticleNavigationGuards(webContents, platform, initialUr
   }
   // A child window created by page-side window.open escapes the hidden renderer
   // and becomes visible.
+  webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+}
+
+function isAllowedFeishuNavigationUrl(value) {
+  try {
+    const target = new URL(String(value || ''));
+    if (target.protocol !== 'https:' || target.username || target.password) return false;
+    if (target.port && target.port !== '443') return false;
+    const host = String(target.hostname || '').toLowerCase().replace(/\.$/, '');
+    if (!host) return false;
+    const underDomain = (domain) => host === domain || host.endsWith('.' + domain);
+    if (underDomain('feishu.cn') || underDomain('feishu.net')
+      || underDomain('larksuite.com') || underDomain('larkoffice.com')) return true;
+    // 个人版飞书把登录委托给豆包账号；该跳转只能留在隐藏窗口内完成。
+    return host === 'accounts.doubao.com' || host === 'passport.doubao.com';
+  } catch (error) {
+    return false;
+  }
+}
+
+function installFeishuDocumentNavigationGuards(webContents, initialUrl) {
+  // 隐藏飞书窗口绝不允许把跳转交给系统浏览器。Obsidian 给所有 webContents
+  // 装了会取消跳转并调用 shell.openExternal 的监听；私有文档的登录跳转因此
+  // 每次同步都会弹一个浏览器窗口。这个窗口尚未加载页面，可以先清掉继承的
+  // 跳转监听，再加上我们自己的白名单。
+  if (!webContents || typeof webContents.removeAllListeners !== 'function'
+    || typeof webContents.on !== 'function' || typeof webContents.setWindowOpenHandler !== 'function') {
+    throw new Error('无法隔离飞书文档提取窗口的跳转处理');
+  }
+  if (!isAllowedFeishuNavigationUrl(initialUrl)) {
+    throw new Error('飞书文档提取仅允许官方 HTTPS 页面');
+  }
+  for (const eventName of ['will-navigate', 'will-frame-navigate', 'will-redirect']) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictTopLevelNavigation = (event, navigation) => {
+    const value = typeof navigation === 'string' ? navigation
+      : (navigation && navigation.url) || (event && event.url);
+    if (!isAllowedFeishuNavigationUrl(value) && event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+  };
+  webContents.on('will-navigate', restrictTopLevelNavigation);
+  webContents.on('will-redirect', restrictTopLevelNavigation);
+  const restrictFrameProtocol = (event, navigation) => {
+    const value = typeof navigation === 'string' ? navigation
+      : (navigation && navigation.url) || (event && event.url);
+    let allowed = false;
+    try {
+      const target = new URL(String(value || ''));
+      allowed = ['https:', 'http:', 'blob:', 'data:', 'about:'].includes(target.protocol);
+    } catch (error) {}
+    if (!allowed && event && typeof event.preventDefault === 'function') event.preventDefault();
+  };
+  webContents.on('will-frame-navigate', restrictFrameProtocol);
   webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 }
 
@@ -13815,6 +13870,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
   });
 
   try {
+    installFeishuDocumentNavigationGuards(win.webContents, url);
     const loaded = waitForWebContents(win.webContents);
     await win.loadURL(url);
     await loaded;
@@ -13825,7 +13881,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           .replace(/\\u00a0/g, ' ')
           .replace(/[ \\t]+/g, ' ')
           .trim();
-        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn/i.test(location.href)
+        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn|accounts\\.(?:feishu|doubao)\\.com|passport\\.feishu\\.cn|\\/suite\\/passport\\//i.test(location.href)
           || /扫码登录|登录飞书|Login Required/i.test(document.body ? String(document.body.innerText || document.body.textContent || '') : '');
         const getPathToken = () => {
           const match = String(location.pathname || '').match(/\\/(?:docx|wiki)\\/([^/?#]+)/i);
@@ -18874,6 +18930,19 @@ class WechatObsidianInboxPlugin extends Plugin {
     } catch (error) {
       return this.settings.feishuOAuthStatus || null;
     }
+  }
+
+  async clearFeishuOAuthStatusCacheOnDisconnect(error) {
+    const message = String(error && error.message || error || '');
+    if (!/not connected|connect feishu|authorization expired/i.test(message)) return;
+    if (!this.settings || !this.settings.feishuOAuthStatus) return;
+    this.settings.feishuOAuthStatus = null;
+    try {
+      await this.saveSettings({ ...this.settings, feishuOAuthStatus: null });
+    } catch (saveError) {
+      // 缓存已清空，交给下一次状态刷新纠正。
+    }
+    new Notice('飞书授权已失效，请在插件设置中重新连接飞书官方 API。');
   }
 
   async generateMetadataWithCloud(record, binding = null) {
@@ -28159,6 +28228,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             };
           } catch (error) {
             openApiError = error;
+            await this.clearFeishuOAuthStatusCacheOnDisconnect(error);
           }
         }
         try {
