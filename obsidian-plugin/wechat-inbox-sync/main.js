@@ -24273,7 +24273,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.17";
+var PLUGIN_RUNTIME_VERSION = "1.4.18";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -29385,6 +29385,53 @@ function installPlatformArticleNavigationGuards(webContents, platform, initialUr
   webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 }
 __name(installPlatformArticleNavigationGuards, "installPlatformArticleNavigationGuards");
+function isAllowedFeishuNavigationUrl(value) {
+  try {
+    const target = new URL(String(value || ""));
+    if (target.protocol !== "https:" || target.username || target.password) return false;
+    if (target.port && target.port !== "443") return false;
+    const host = String(target.hostname || "").toLowerCase().replace(/\.$/, "");
+    if (!host) return false;
+    const underDomain = /* @__PURE__ */ __name((domain) => host === domain || host.endsWith("." + domain), "underDomain");
+    if (underDomain("feishu.cn") || underDomain("feishu.net") || underDomain("larksuite.com") || underDomain("larkoffice.com")) return true;
+    return host === "accounts.doubao.com" || host === "passport.doubao.com";
+  } catch (error) {
+    return false;
+  }
+}
+__name(isAllowedFeishuNavigationUrl, "isAllowedFeishuNavigationUrl");
+function installFeishuDocumentNavigationGuards(webContents, initialUrl) {
+  if (!webContents || typeof webContents.removeAllListeners !== "function" || typeof webContents.on !== "function" || typeof webContents.setWindowOpenHandler !== "function") {
+    throw new Error("无法隔离飞书文档提取窗口的跳转处理");
+  }
+  if (!isAllowedFeishuNavigationUrl(initialUrl)) {
+    throw new Error("飞书文档提取仅允许官方 HTTPS 页面");
+  }
+  for (const eventName of ["will-navigate", "will-frame-navigate", "will-redirect"]) {
+    webContents.removeAllListeners(eventName);
+  }
+  const restrictTopLevelNavigation = /* @__PURE__ */ __name((event, navigation) => {
+    const value = typeof navigation === "string" ? navigation : navigation && navigation.url || event && event.url;
+    if (!isAllowedFeishuNavigationUrl(value) && event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+  }, "restrictTopLevelNavigation");
+  webContents.on("will-navigate", restrictTopLevelNavigation);
+  webContents.on("will-redirect", restrictTopLevelNavigation);
+  const restrictFrameProtocol = /* @__PURE__ */ __name((event, navigation) => {
+    const value = typeof navigation === "string" ? navigation : navigation && navigation.url || event && event.url;
+    let allowed = false;
+    try {
+      const target = new URL(String(value || ""));
+      allowed = ["https:", "http:", "blob:", "data:", "about:"].includes(target.protocol);
+    } catch (error) {
+    }
+    if (!allowed && event && typeof event.preventDefault === "function") event.preventDefault();
+  }, "restrictFrameProtocol");
+  webContents.on("will-frame-navigate", restrictFrameProtocol);
+  webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+}
+__name(installFeishuDocumentNavigationGuards, "installFeishuDocumentNavigationGuards");
 function createXiaohongshuBrowserDiagnostic(record = null) {
   return {
     source: "xiaohongshu-browser",
@@ -35817,6 +35864,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
     }
   });
   try {
+    installFeishuDocumentNavigationGuards(win.webContents, url);
     const loaded = waitForWebContents(win.webContents);
     await win.loadURL(url);
     await loaded;
@@ -35827,7 +35875,7 @@ async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
           .replace(/\\u00a0/g, ' ')
           .replace(/[ \\t]+/g, ' ')
           .trim();
-        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn/i.test(location.href)
+        const isLoginPage = () => /accounts\\/(?:page\\/login|trap)|login\\.feishu\\.cn|accounts\\.(?:feishu|doubao)\\.com|passport\\.feishu\\.cn|\\/suite\\/passport\\//i.test(location.href)
           || /扫码登录|登录飞书|Login Required/i.test(document.body ? String(document.body.innerText || document.body.textContent || '') : '');
         const getPathToken = () => {
           const match = String(location.pathname || '').match(/\\/(?:docx|wiki)\\/([^/?#]+)/i);
@@ -40546,6 +40594,17 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     } catch (error) {
       return this.settings.feishuOAuthStatus || null;
     }
+  }
+  async clearFeishuOAuthStatusCacheOnDisconnect(error) {
+    const message = String(error && error.message || error || "");
+    if (!/not connected|connect feishu|authorization expired/i.test(message)) return;
+    if (!this.settings || !this.settings.feishuOAuthStatus) return;
+    this.settings.feishuOAuthStatus = null;
+    try {
+      await this.saveSettings({ ...this.settings, feishuOAuthStatus: null });
+    } catch (saveError) {
+    }
+    new Notice("飞书授权已失效，请在插件设置中重新连接飞书官方 API。");
   }
   async generateMetadataWithCloud(record, binding = null) {
     const inputText = extractAiMetadataInputText(record);
@@ -49031,6 +49090,7 @@ ${finalized.markdown}
             };
           } catch (error) {
             openApiError = error;
+            await this.clearFeishuOAuthStatusCacheOnDisconnect(error);
           }
         }
         try {
