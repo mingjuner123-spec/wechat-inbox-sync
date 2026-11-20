@@ -401,7 +401,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.18';
+const PLUGIN_RUNTIME_VERSION = '1.4.19';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -13848,6 +13848,34 @@ async function renderPlatformArticleWithElectron(url, { operatorSession = false 
       win.destroy();
     }
   }
+}
+
+const FEISHU_UNSUPPORTED_NODE_TYPE_LABELS = Object.freeze({
+  mindnote: '思维笔记',
+  sheet: '电子表格',
+  bitable: '多维表格',
+  slides: '幻灯片',
+  file: '附件',
+});
+
+// 飞书 wiki 节点可能是思维笔记、表格等非 docx 对象，官方 docx 接口读不到。
+// 这类失败再走隐藏浏览器只会撞登录页，直接给出可操作的中文提示。
+function buildFeishuUnsupportedNodeTypeError(error) {
+  const message = String(error && error.message || error || '');
+  const match = message.match(/Feishu wiki node is not a document:\s*([a-z0-9_-]+)/i);
+  if (!match) return null;
+  const nodeType = String(match[1] || '').toLowerCase();
+  const label = FEISHU_UNSUPPORTED_NODE_TYPE_LABELS[nodeType] || '当前类型';
+  const unsupportedError = new Error(
+    `该飞书链接是${label}，官方接口暂不支持转存。请在飞书里把内容另存为文档后再同步。`,
+  );
+  unsupportedError.code = 'EXTRACTION_FAILED';
+  unsupportedError.diagnostic = {
+    source: 'feishu-open-api',
+    nodeType,
+    stopReason: 'unsupported_node_type',
+  };
+  return unsupportedError;
 }
 
 async function renderFeishuUrlToSimpleMarkdownWithElectron(url) {
@@ -28227,6 +28255,8 @@ class WechatObsidianInboxPlugin extends Plugin {
               }),
             };
           } catch (error) {
+            const unsupportedNodeTypeError = buildFeishuUnsupportedNodeTypeError(error);
+            if (unsupportedNodeTypeError) throw unsupportedNodeTypeError;
             openApiError = error;
             await this.clearFeishuOAuthStatusCacheOnDisconnect(error);
           }
