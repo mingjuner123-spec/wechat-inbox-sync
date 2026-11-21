@@ -43,6 +43,13 @@ const asrStartupTimeout = require('./asr-startup-timeout');
 const macLegacyAsrCompat = require('./mac-legacy-asr-compat');
 const { buildFailureTechnicalReport, unavailableTechnicalReport } = require('./failure-technical-report');
 const { selectFailureDetail, observedFailureStage, failureMessage } = require('./failure-reason-utils');
+const {
+  SMART_APP_CONTROL_SETTINGS_URI,
+  getSmartAppControlState,
+  isSmartAppControlBlockingMessage,
+  parseSmartAppControlPolicyState,
+  smartAppControlGuidance,
+} = require('./smart-app-control-utils');
 const asrDiagnosticEvidence = require('./asr-diagnostic-evidence');
 const { formatCompactSyncDiagnostic } = require('./compact-sync-diagnostic');
 const failureScope = require('./failure-diagnostic-scope');
@@ -401,7 +408,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.20';
+const PLUGIN_RUNTIME_VERSION = '1.4.21';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -1640,6 +1647,7 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
 
 function explainLocalAsrExitCode(value) {
   const text = String(value || '');
+  if (isSmartAppControlBlockingMessage(text)) return 'Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）；请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。';
   if (asrRecovery.isMacNativeCrash({ message: text })) return '本地转写引擎崩溃；请复制诊断信息联系支持，不能仅凭此错误判断内存不足。';
   if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
@@ -17313,6 +17321,18 @@ class LocalComponentInstallFailureModal extends LocalComponentInstallConfirmModa
   constructor(app, options = {}) {
     super(app);
     this.message = String(options.message || '');
+    this.settingsUri = String(options.settingsUri || '');
+  }
+
+  async openSettings() {
+    const shell = getElectronShell();
+    try {
+      if (shell && typeof shell.openExternal === 'function') {
+        await shell.openExternal(this.settingsUri);
+        return;
+      }
+    } catch (_) { /* fall through to manual guidance */ }
+    new Notice('请手动打开：Windows 安全中心 → 应用和浏览器控制 → 智能应用控制');
   }
 
   onOpen() {
@@ -17327,11 +17347,26 @@ class LocalComponentInstallFailureModal extends LocalComponentInstallConfirmModa
       .forEach((line) => contentEl.createEl('p', { text: line }));
 
     const buttonRow = contentEl.createDiv({ cls: 'wechat-inbox-sync-modal-actions' });
+    if (this.settingsUri) {
+      const settingsButton = buttonRow.createEl('button', { text: '打开智能应用控制设置' });
+      settingsButton.type = 'button';
+      if (typeof settingsButton.addClass === 'function') {
+        settingsButton.addClass('mod-cta');
+      } else {
+        settingsButton.className = `${settingsButton.className || ''} mod-cta`.trim();
+      }
+      settingsButton.addEventListener('click', () => {
+        this.openSettings();
+        this.close();
+      });
+    }
     const closeButton = buttonRow.createEl('button', { text: '知道了' });
-    if (typeof closeButton.addClass === 'function') {
-      closeButton.addClass('mod-cta');
-    } else {
-      closeButton.className = `${closeButton.className || ''} mod-cta`.trim();
+    if (!this.settingsUri) {
+      if (typeof closeButton.addClass === 'function') {
+        closeButton.addClass('mod-cta');
+      } else {
+        closeButton.className = `${closeButton.className || ''} mod-cta`.trim();
+      }
     }
     closeButton.addEventListener('click', () => this.close());
   }
@@ -17341,10 +17376,10 @@ class LocalComponentInstallFailureModal extends LocalComponentInstallConfirmModa
   }
 }
 
-function showLocalComponentInstallFailure(app, message) {
+function showLocalComponentInstallFailure(app, message, options = {}) {
   if (!Modal || !app) return null;
   return new Promise((resolve) => {
-    const modal = new LocalComponentInstallFailureModal(app, { message });
+    const modal = new LocalComponentInstallFailureModal(app, { message, settingsUri: options.settingsUri });
     const originalOnClose = modal.onClose.bind(modal);
     modal.onClose = () => {
       originalOnClose();
@@ -17356,6 +17391,9 @@ function showLocalComponentInstallFailure(app, message) {
 
 function getKnownLocalComponentInstallFailureReason(rawMessage) {
   const message = String(rawMessage || '');
+  if (isSmartAppControlBlockingMessage(message)) {
+    return smartAppControlGuidance();
+  }
   if (/磁盘空间不足|No space left on device|not enough (?:disk )?space/i.test(message)) {
     return '磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。';
   }
@@ -20939,6 +20977,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         status: existingStatus,
       };
     }
+    await this.assertLocalComponentNotBlockedBySmartAppControl();
     const authorizedManifest = await this.getAuthorizedLocalComponentManifest('ocr');
     const componentProcessEnv = buildAuthorizedLocalComponentProcessEnv(process.env, authorizedManifest);
     const authorizedAssetIds = new Set((authorizedManifest && authorizedManifest.assets || []).map((asset) => asset.id));
@@ -22417,11 +22456,15 @@ class WechatObsidianInboxPlugin extends Plugin {
 
   async showLocalComponentInstallFailure(error) {
     const reason = formatLocalComponentInstallFailureReason(error);
-    const message = [
-      `失败原因：${reason}`,
-      '如需协助，请点击插件设置里的「复制诊断」，联系开发者张张（微信：heyhmjx）。',
-    ].join('\n');
-    const modalResult = showLocalComponentInstallFailure(this.app, message);
+    const smartAppControlBlocked = Boolean(
+      error && (error.smartAppControlBlocked || error.code === 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL'),
+    ) || isSmartAppControlBlockingMessage(error && (error.message || error));
+    const message = smartAppControlBlocked
+      ? `失败原因：${reason}`
+      : [`失败原因：${reason}`, '如需协助，请点击插件设置里的「复制诊断」，联系开发者张张（微信：heyhmjx）。'].join('\n');
+    const modalResult = showLocalComponentInstallFailure(this.app, message, {
+      settingsUri: smartAppControlBlocked ? SMART_APP_CONTROL_SETTINGS_URI : '',
+    });
     if (modalResult) {
       await modalResult;
       return;
@@ -22463,6 +22506,13 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (failures.length) {
       const error = new Error(failures.map(item => item.component + '：' + (item.error.message || item.error)).join('\n') + '\n已成功准备的组件会保留；再次点击仅补齐未完成项。');
       error.componentResults = results;
+      // Keep a single shared failure code (for example the Smart App Control
+      // block) so the sync record and the install dialog can name the cause.
+      const failureCodes = failures.map(item => item.error && item.error.code).filter(Boolean);
+      if (failureCodes.length === failures.length && new Set(failureCodes).size === 1) {
+        error.code = failureCodes[0];
+        error.smartAppControlBlocked = failures.every(item => item.error && item.error.smartAppControlBlocked === true);
+      }
       throw error;
     }
     return { pendingRestart: results.some(item => item.status === 'pending_restart'), installed: results.some(item => item.status === 'installed'), skipped: results.every(item => item.status === 'skipped'),
@@ -22569,6 +22619,20 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
+  async readSmartAppControlState() {
+    return await getSmartAppControlState();
+  }
+
+  async assertLocalComponentNotBlockedBySmartAppControl() {
+    if (this.getConfiguredLocalAsrPlatform() !== 'win32') return;
+    const state = await this.readSmartAppControlState();
+    if (state !== 'on') return;
+    throw Object.assign(new Error(smartAppControlGuidance()), {
+      code: 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL',
+      smartAppControlBlocked: true,
+    });
+  }
+
   async doInstallLocalAsr(options = {}) {
     await this.ensureLocalTranscriptionAccess();
     const mismatchMessage = getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform);
@@ -22592,6 +22656,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         status: existingStatus,
       };
     }
+    await this.assertLocalComponentNotBlockedBySmartAppControl();
     if (platform === 'win32') {
       const recovery = await this.recoverExistingLocalAsrInstall({
         reason: options.reason || 'install',
@@ -33096,6 +33161,11 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_OCR_BATCH_RUNNER_VERSION,
   LOCAL_OCR_BATCH_RUNNER_SOURCE,
   isLocalAsrInstallerCurrent,
+  parseSmartAppControlPolicyState,
+  getSmartAppControlState,
+  isSmartAppControlBlockingMessage,
+  smartAppControlGuidance,
+  SMART_APP_CONTROL_SETTINGS_URI,
   isLocalOcrInstallerCurrent,
   isTrustedLocalOcrInstallerSource,
   completePendingLocalOcrSwitch,

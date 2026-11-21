@@ -1,5 +1,5 @@
 'use strict';
-const SETUP_CODES = new Set(['LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED', 'LOCAL_COMPONENT_SETUP_REQUIRED']);
+const SETUP_CODES = new Set(['LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED', 'LOCAL_TRANSCRIPTION_BINDING_REQUIRED', 'LOCAL_COMPONENT_SETUP_REQUIRED', 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL']);
 function membershipGuidance(status = {}, feature = '音视频转写') {
   if (status.status === 'unbound') return '待绑定：请先在插件设置中完成小程序绑定，再刷新会员状态。';
   const reason = status.status === 'expired' ? 'Pro 会员已过期' : '当前没有有效 Pro 会员';

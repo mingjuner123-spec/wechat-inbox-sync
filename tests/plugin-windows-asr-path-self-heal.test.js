@@ -87,6 +87,50 @@ async function run() {
     const recoveredCommand = await plugin.recoverStaleLocalTranscriptionCommand();
     assert.strictEqual(recoveredCommand, expectedCommand);
     assert.strictEqual(savedSettings.localTranscriptionCommand, recoveredCommand);
+
+    const helpers = PluginClass.__test;
+    assert.strictEqual(helpers.parseSmartAppControlPolicyState('    VerifiedAndReputablePolicyState    REG_DWORD    0x1'), 'on');
+    assert.strictEqual(helpers.parseSmartAppControlPolicyState('    VerifiedAndReputablePolicyState    REG_DWORD    0x2'), 'evaluation');
+    assert.strictEqual(helpers.parseSmartAppControlPolicyState('    VerifiedAndReputablePolicyState    REG_DWORD    0x0'), 'off');
+    assert.strictEqual(helpers.parseSmartAppControlPolicyState('ERROR: The system was unable to find the specified registry key or value.'), null);
+    assert.strictEqual(helpers.isSmartAppControlBlockingMessage('whisper.cpp runtime validation failed with exit code -1058471934/0xC0E90002.'), true);
+    assert.strictEqual(helpers.isSmartAppControlBlockingMessage('exit code -1058471934'), true);
+    assert.strictEqual(helpers.isSmartAppControlBlockingMessage('0xC0000428 Windows cannot verify the digital signature'), true);
+    assert.strictEqual(helpers.isSmartAppControlBlockingMessage('exit code -1073740760'), true);
+    assert.strictEqual(helpers.isSmartAppControlBlockingMessage('exit code -1073740286'), false);
+    assert.strictEqual(helpers.isSmartAppControlBlockingMessage('unrelated failure'), false);
+    assert.ok(helpers.smartAppControlGuidance().includes('智能应用控制'));
+    assert.strictEqual(helpers.SMART_APP_CONTROL_SETTINGS_URI, 'windowsdefender://smartapp/');
+    const fakeReg = (stdout) => (file, args, options, callback) => {
+      assert.ok(String(file).toLowerCase().endsWith('reg.exe'));
+      assert.strictEqual(args[0], 'query');
+      callback(null, stdout, '');
+    };
+    assert.strictEqual(
+      await helpers.getSmartAppControlState({ platform: 'win32', execFile: fakeReg('    VerifiedAndReputablePolicyState    REG_DWORD    0x1') }),
+      'on',
+    );
+    assert.strictEqual(
+      await helpers.getSmartAppControlState({ platform: 'win32', execFile: fakeReg('    VerifiedAndReputablePolicyState    REG_DWORD    0x2') }),
+      'evaluation',
+    );
+    assert.strictEqual(
+      await helpers.getSmartAppControlState({ platform: 'win32', execFile: (file, args, options, callback) => callback(new Error('missing'), '', '') }),
+      null,
+    );
+    assert.strictEqual(await helpers.getSmartAppControlState({ platform: 'darwin' }), null);
+    const { isSetupRequired } = require('../obsidian-plugin/wechat-inbox-sync/src/transcription-setup-utils');
+    assert.strictEqual(isSetupRequired({ code: 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL' }), true);
+
+    plugin.readSmartAppControlState = async () => 'on';
+    await assert.rejects(
+      () => plugin.assertLocalComponentNotBlockedBySmartAppControl(),
+      (error) => error.code === 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL' && error.smartAppControlBlocked === true,
+    );
+    plugin.readSmartAppControlState = async () => 'evaluation';
+    await plugin.assertLocalComponentNotBlockedBySmartAppControl();
+    plugin.readSmartAppControlState = async () => 'off';
+    await plugin.assertLocalComponentNotBlockedBySmartAppControl();
   } finally {
     fs.existsSync = originalExistsSync;
     fs.readFileSync = originalReadFileSync;

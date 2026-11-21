@@ -1640,7 +1640,7 @@ var require_operator_linux_asr = __commonJS({
 var require_transcription_setup_utils = __commonJS({
   "src/transcription-setup-utils.js"(exports2, module2) {
     "use strict";
-    var SETUP_CODES = /* @__PURE__ */ new Set(["LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED", "LOCAL_TRANSCRIPTION_BINDING_REQUIRED", "LOCAL_COMPONENT_SETUP_REQUIRED"]);
+    var SETUP_CODES = /* @__PURE__ */ new Set(["LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED", "LOCAL_TRANSCRIPTION_BINDING_REQUIRED", "LOCAL_COMPONENT_SETUP_REQUIRED", "LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL"]);
     function membershipGuidance2(status = {}, feature = "音视频转写") {
       if (status.status === "unbound") return "待绑定：请先在插件设置中完成小程序绑定，再刷新会员状态。";
       const reason = status.status === "expired" ? "Pro 会员已过期" : "当前没有有效 Pro 会员";
@@ -3223,6 +3223,7 @@ var require_failure_reason_utils = __commonJS({
       LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: ["本地转写未通过会员权益校验。", "请在插件设置中检查当前绑定和权益状态；已开通不要重复购买。"],
       LOCAL_TRANSCRIPTION_BINDING_REQUIRED: ["本地转写需要有效绑定。", "请在插件设置中检查当前绑定状态后重试，不要提交绑定令牌。"],
       LOCAL_COMPONENT_SETUP_REQUIRED: ["本地转写组件尚未就绪。", "请在插件设置中完成所需组件安装或修复后重试。"],
+      LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: ["Windows 智能应用控制拦截了本地组件。", "请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后，重新安装组件并重试。"],
       NODE_HTTP_TIMEOUT: ["处理所需的网络请求超时。", "请在网络恢复后重试；若持续失败，保留此任务编号排查请求环节，无需因此重装转写组件。"],
       MEDIA_DOWNLOAD_INTERRUPTED: ["媒体下载中断，未完成下载。", "请在网络恢复后重试；仍失败时保留任务编号排查媒体链接与下载环节。"],
       ERR_SSL_BAD_PACKET_LENGTH: ["下载连接的 TLS 通信失败。", "请检查当前网络或代理后重试，保留安全证书校验。"],
@@ -8117,6 +8118,90 @@ SOFTWARE.
       inspectMacLegacyAsr,
       installMacLegacyAsrCompat,
       activateMacLegacyAsrCompat
+    };
+  }
+});
+
+// src/smart-app-control-utils.js
+var require_smart_app_control_utils = __commonJS({
+  "src/smart-app-control-utils.js"(exports2, module2) {
+    "use strict";
+    var fs2 = require("fs");
+    var path2 = require("path");
+    var childProcess2 = require("child_process");
+    var SMART_APP_CONTROL_REGISTRY_KEY = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy";
+    var SMART_APP_CONTROL_REGISTRY_VALUE = "VerifiedAndReputablePolicyState";
+    var SMART_APP_CONTROL_SETTINGS_URI2 = "windowsdefender://smartapp/";
+    var SMART_APP_CONTROL_EXIT_CODES = Object.freeze(["0XC0E90002", "0XC0000428"]);
+    var SMART_APP_CONTROL_EXIT_DECIMALS = Object.freeze(["-1058471934", "-1073740760"]);
+    function smartAppControlGuidance2() {
+      return "Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）。\n请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。\n关闭后回到这里点“安装／更新本地组件”。部分 Windows 版本关闭后需要重装系统才能再开启。";
+    }
+    __name(smartAppControlGuidance2, "smartAppControlGuidance");
+    function parseSmartAppControlPolicyState2(stdout) {
+      const match = String(stdout || "").match(
+        /VerifiedAndReputablePolicyState\s+REG_DWORD\s+(0x[0-9a-f]+|\d+)/i
+      );
+      if (!match) return null;
+      const raw = match[1];
+      const value = /^0x/i.test(raw) ? parseInt(raw.slice(2), 16) : parseInt(raw, 10);
+      if (value === 0) return "off";
+      if (value === 1) return "on";
+      if (value === 2) return "evaluation";
+      return null;
+    }
+    __name(parseSmartAppControlPolicyState2, "parseSmartAppControlPolicyState");
+    function isSmartAppControlBlockingMessage2(value) {
+      const text = String(value || "");
+      if (!text) return false;
+      const upper = text.toUpperCase();
+      return SMART_APP_CONTROL_EXIT_CODES.some((code) => upper.includes(code)) || SMART_APP_CONTROL_EXIT_DECIMALS.some((code) => text.includes(code)) || /smart app control|智能应用控制/i.test(text);
+    }
+    __name(isSmartAppControlBlockingMessage2, "isSmartAppControlBlockingMessage");
+    function resolveRegPath() {
+      const roots = [process.env.SystemRoot, process.env.windir].filter(Boolean);
+      for (const root of roots) {
+        const candidate = path2.join(root, "System32", "reg.exe");
+        try {
+          if (fs2.existsSync(candidate)) return candidate;
+        } catch (_) {
+        }
+      }
+      return "reg.exe";
+    }
+    __name(resolveRegPath, "resolveRegPath");
+    function getSmartAppControlState2(options = {}) {
+      const platform = options.platform || process.platform;
+      if (platform !== "win32") return Promise.resolve(null);
+      const execFile = options.execFile || childProcess2.execFile;
+      return new Promise((resolve) => {
+        try {
+          execFile(
+            resolveRegPath(),
+            ["query", SMART_APP_CONTROL_REGISTRY_KEY, "/v", SMART_APP_CONTROL_REGISTRY_VALUE],
+            { windowsHide: true, timeout: 5e3, maxBuffer: 64 * 1024 },
+            (error, stdout) => {
+              if (error) {
+                resolve(null);
+                return;
+              }
+              resolve(parseSmartAppControlPolicyState2(stdout));
+            }
+          );
+        } catch (_) {
+          resolve(null);
+        }
+      });
+    }
+    __name(getSmartAppControlState2, "getSmartAppControlState");
+    module2.exports = {
+      SMART_APP_CONTROL_REGISTRY_KEY,
+      SMART_APP_CONTROL_REGISTRY_VALUE,
+      SMART_APP_CONTROL_SETTINGS_URI: SMART_APP_CONTROL_SETTINGS_URI2,
+      getSmartAppControlState: getSmartAppControlState2,
+      isSmartAppControlBlockingMessage: isSmartAppControlBlockingMessage2,
+      parseSmartAppControlPolicyState: parseSmartAppControlPolicyState2,
+      smartAppControlGuidance: smartAppControlGuidance2
     };
   }
 });
@@ -19185,6 +19270,7 @@ var require_sync_lifecycle_utils = __commonJS({
       LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
       LOCAL_TRANSCRIPTION_BINDING_REQUIRED: "请先完成小程序与插件绑定，再重新同步。",
       LOCAL_COMPONENT_SETUP_REQUIRED: "本地转写组件未就绪，请在插件设置安装或更新组件后重试。",
+      LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: "Windows 智能应用控制拦截了本地组件，请关闭后重新安装组件并重试。",
       DOUYIN_LOGIN_REQUIRED: "请在插件设置中登录抖音后重试。",
       DOUYIN_RESOLVER_NOT_INSTALLED: "抖音解析组件未就绪，请在插件设置安装或更新组件后重试。",
       CLOUD_FALLBACK_SUBMIT_FAILED: "本地提取失败，云端兜底暂未接收任务；请保持插件联网，稍后重试。",
@@ -24035,6 +24121,13 @@ var asrStartupTimeout = require_asr_startup_timeout();
 var macLegacyAsrCompat = require_mac_legacy_asr_compat();
 var { buildFailureTechnicalReport, unavailableTechnicalReport } = require_failure_technical_report();
 var { selectFailureDetail, observedFailureStage, failureMessage } = require_failure_reason_utils();
+var {
+  SMART_APP_CONTROL_SETTINGS_URI,
+  getSmartAppControlState,
+  isSmartAppControlBlockingMessage,
+  parseSmartAppControlPolicyState,
+  smartAppControlGuidance
+} = require_smart_app_control_utils();
 var asrDiagnosticEvidence = require_asr_diagnostic_evidence();
 var { formatCompactSyncDiagnostic } = require_compact_sync_diagnostic();
 var failureScope = require_failure_diagnostic_scope();
@@ -24378,7 +24471,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.20";
+var PLUGIN_RUNTIME_VERSION = "1.4.21";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -25327,6 +25420,7 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
 __name(getLocalAsrRunLogPath, "getLocalAsrRunLogPath");
 function explainLocalAsrExitCode(value) {
   const text = String(value || "");
+  if (isSmartAppControlBlockingMessage(text)) return "Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）；请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。";
   if (asrRecovery.isMacNativeCrash({ message: text })) return "本地转写引擎崩溃；请复制诊断信息联系支持，不能仅凭此错误判断内存不足。";
   if (text.includes("-1073741515") || text.toUpperCase().includes("0XC0000135")) {
     return "缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。";
@@ -39252,6 +39346,18 @@ var _LocalComponentInstallFailureModal = class _LocalComponentInstallFailureModa
   constructor(app, options = {}) {
     super(app);
     this.message = String(options.message || "");
+    this.settingsUri = String(options.settingsUri || "");
+  }
+  async openSettings() {
+    const shell = getElectronShell();
+    try {
+      if (shell && typeof shell.openExternal === "function") {
+        await shell.openExternal(this.settingsUri);
+        return;
+      }
+    } catch (_) {
+    }
+    new Notice("请手动打开：Windows 安全中心 → 应用和浏览器控制 → 智能应用控制");
   }
   onOpen() {
     const contentEl = this.contentEl;
@@ -39260,11 +39366,26 @@ var _LocalComponentInstallFailureModal = class _LocalComponentInstallFailureModa
     contentEl.createEl("h3", { text: "本地转写组件安装失败" });
     this.message.split("\n").map((line) => line.trim()).filter(Boolean).forEach((line) => contentEl.createEl("p", { text: line }));
     const buttonRow = contentEl.createDiv({ cls: "wechat-inbox-sync-modal-actions" });
+    if (this.settingsUri) {
+      const settingsButton = buttonRow.createEl("button", { text: "打开智能应用控制设置" });
+      settingsButton.type = "button";
+      if (typeof settingsButton.addClass === "function") {
+        settingsButton.addClass("mod-cta");
+      } else {
+        settingsButton.className = `${settingsButton.className || ""} mod-cta`.trim();
+      }
+      settingsButton.addEventListener("click", () => {
+        this.openSettings();
+        this.close();
+      });
+    }
     const closeButton = buttonRow.createEl("button", { text: "知道了" });
-    if (typeof closeButton.addClass === "function") {
-      closeButton.addClass("mod-cta");
-    } else {
-      closeButton.className = `${closeButton.className || ""} mod-cta`.trim();
+    if (!this.settingsUri) {
+      if (typeof closeButton.addClass === "function") {
+        closeButton.addClass("mod-cta");
+      } else {
+        closeButton.className = `${closeButton.className || ""} mod-cta`.trim();
+      }
     }
     closeButton.addEventListener("click", () => this.close());
   }
@@ -39274,10 +39395,10 @@ var _LocalComponentInstallFailureModal = class _LocalComponentInstallFailureModa
 };
 __name(_LocalComponentInstallFailureModal, "LocalComponentInstallFailureModal");
 var LocalComponentInstallFailureModal = _LocalComponentInstallFailureModal;
-function showLocalComponentInstallFailure(app, message) {
+function showLocalComponentInstallFailure(app, message, options = {}) {
   if (!Modal || !app) return null;
   return new Promise((resolve) => {
-    const modal = new LocalComponentInstallFailureModal(app, { message });
+    const modal = new LocalComponentInstallFailureModal(app, { message, settingsUri: options.settingsUri });
     const originalOnClose = modal.onClose.bind(modal);
     modal.onClose = () => {
       originalOnClose();
@@ -39289,6 +39410,9 @@ function showLocalComponentInstallFailure(app, message) {
 __name(showLocalComponentInstallFailure, "showLocalComponentInstallFailure");
 function getKnownLocalComponentInstallFailureReason(rawMessage) {
   const message = String(rawMessage || "");
+  if (isSmartAppControlBlockingMessage(message)) {
+    return smartAppControlGuidance();
+  }
   if (/磁盘空间不足|No space left on device|not enough (?:disk )?space/i.test(message)) {
     return "磁盘空间不足：请释放本地转写组件安装目录所在磁盘空间后重试。Windows 默认在 C:，建议至少预留 3GB，最好 5GB 以上。";
   }
@@ -42430,6 +42554,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
         status: existingStatus
       };
     }
+    await this.assertLocalComponentNotBlockedBySmartAppControl();
     const authorizedManifest = await this.getAuthorizedLocalComponentManifest("ocr");
     const componentProcessEnv = buildAuthorizedLocalComponentProcessEnv(process.env, authorizedManifest);
     const authorizedAssetIds = new Set((authorizedManifest && authorizedManifest.assets || []).map((asset) => asset.id));
@@ -43809,11 +43934,13 @@ ${installation}`, "sync-install-diagnostic.txt");
   }
   async showLocalComponentInstallFailure(error) {
     const reason = formatLocalComponentInstallFailureReason(error);
-    const message = [
-      `失败原因：${reason}`,
-      "如需协助，请点击插件设置里的「复制诊断」，联系开发者张张（微信：heyhmjx）。"
-    ].join("\n");
-    const modalResult = showLocalComponentInstallFailure(this.app, message);
+    const smartAppControlBlocked = Boolean(
+      error && (error.smartAppControlBlocked || error.code === "LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL")
+    ) || isSmartAppControlBlockingMessage(error && (error.message || error));
+    const message = smartAppControlBlocked ? `失败原因：${reason}` : [`失败原因：${reason}`, "如需协助，请点击插件设置里的「复制诊断」，联系开发者张张（微信：heyhmjx）。"].join("\n");
+    const modalResult = showLocalComponentInstallFailure(this.app, message, {
+      settingsUri: smartAppControlBlocked ? SMART_APP_CONTROL_SETTINGS_URI : ""
+    });
     if (modalResult) {
       await modalResult;
       return;
@@ -43872,6 +43999,11 @@ ${installation}`, "sync-install-diagnostic.txt");
     if (failures.length) {
       const error = new Error(failures.map((item) => item.component + "：" + (item.error.message || item.error)).join("\n") + "\n已成功准备的组件会保留；再次点击仅补齐未完成项。");
       error.componentResults = results;
+      const failureCodes = failures.map((item) => item.error && item.error.code).filter(Boolean);
+      if (failureCodes.length === failures.length && new Set(failureCodes).size === 1) {
+        error.code = failureCodes[0];
+        error.smartAppControlBlocked = failures.every((item) => item.error && item.error.smartAppControlBlocked === true);
+      }
       throw error;
     }
     return {
@@ -43980,6 +44112,18 @@ ${installation}`, "sync-install-diagnostic.txt");
       this.localAsrInstallPromise = null;
     }
   }
+  async readSmartAppControlState() {
+    return await getSmartAppControlState();
+  }
+  async assertLocalComponentNotBlockedBySmartAppControl() {
+    if (this.getConfiguredLocalAsrPlatform() !== "win32") return;
+    const state = await this.readSmartAppControlState();
+    if (state !== "on") return;
+    throw Object.assign(new Error(smartAppControlGuidance()), {
+      code: "LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL",
+      smartAppControlBlocked: true
+    });
+  }
   async doInstallLocalAsr(options = {}) {
     await this.ensureLocalTranscriptionAccess();
     const mismatchMessage = getLocalAsrPlatformMismatchMessage(this.settings.localAsrPlatform);
@@ -44003,6 +44147,7 @@ ${installation}`, "sync-install-diagnostic.txt");
         status: existingStatus
       };
     }
+    await this.assertLocalComponentNotBlockedBySmartAppControl();
     if (platform === "win32") {
       const recovery = await this.recoverExistingLocalAsrInstall({
         reason: options.reason || "install",
@@ -53408,6 +53553,11 @@ WechatObsidianInboxPlugin.__test = {
   LOCAL_OCR_BATCH_RUNNER_VERSION,
   LOCAL_OCR_BATCH_RUNNER_SOURCE,
   isLocalAsrInstallerCurrent,
+  parseSmartAppControlPolicyState,
+  getSmartAppControlState,
+  isSmartAppControlBlockingMessage,
+  smartAppControlGuidance,
+  SMART_APP_CONTROL_SETTINGS_URI,
   isLocalOcrInstallerCurrent,
   isTrustedLocalOcrInstallerSource,
   completePendingLocalOcrSwitch,
