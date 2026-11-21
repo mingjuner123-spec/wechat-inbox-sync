@@ -15,6 +15,7 @@ const FAILURE_DETAILS = Object.freeze({
   LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: ['本地转写未通过会员权益校验。', '请在插件设置中检查当前绑定和权益状态；已开通不要重复购买。'],
   LOCAL_TRANSCRIPTION_BINDING_REQUIRED: ['本地转写需要有效绑定。', '请在插件设置中检查当前绑定状态后重试，不要提交绑定令牌。'],
   LOCAL_COMPONENT_SETUP_REQUIRED: ['本地转写组件尚未就绪。', '请在插件设置中完成所需组件安装或修复后重试。'],
+  LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: ['Windows 智能应用控制拦截了本地组件。', '请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后，重新安装组件并重试。'],
   NODE_HTTP_TIMEOUT: ['处理所需的网络请求超时。', '请在网络恢复后重试；若持续失败，保留此任务编号排查请求环节，无需因此重装转写组件。'],
   MEDIA_DOWNLOAD_INTERRUPTED: ['媒体下载中断，未完成下载。', '请在网络恢复后重试；仍失败时保留任务编号排查媒体链接与下载环节。'],
   ERR_SSL_BAD_PACKET_LENGTH: ['下载连接的 TLS 通信失败。', '请检查当前网络或代理后重试，保留安全证书校验。'],

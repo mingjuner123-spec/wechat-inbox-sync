@@ -14,6 +14,7 @@ const SYNC_LIFECYCLE_FAILURE_MESSAGES = Object.freeze({
   LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
   LOCAL_TRANSCRIPTION_BINDING_REQUIRED: "请先完成小程序与插件绑定，再重新同步。",
   LOCAL_COMPONENT_SETUP_REQUIRED: "本地转写组件未就绪，请在插件设置安装或更新组件后重试。",
+  LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: "Windows 智能应用控制拦截了本地组件，请关闭后重新安装组件并重试。",
   DOUYIN_LOGIN_REQUIRED: "请在插件设置中登录抖音后重试。",
   DOUYIN_RESOLVER_NOT_INSTALLED: "抖音解析组件未就绪，请在插件设置安装或更新组件后重试。",
   CLOUD_FALLBACK_SUBMIT_FAILED: "本地提取失败，云端兜底暂未接收任务；请保持插件联网，稍后重试。",
