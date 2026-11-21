@@ -8,7 +8,7 @@ $ProgressPreference = "SilentlyContinue"
 $TempRoot = Join-Path $env:TEMP ("wechat-inbox-local-asr-install-" + [guid]::NewGuid().ToString("N"))
 $CacheRoot = Join-Path $InstallRoot "cache"
 $InstallStatePath = Join-Path $InstallRoot ".install-state.json"
-$InstallerScriptVersion = "1.2.34"
+$InstallerScriptVersion = "1.2.35"
 $DownloadResumeVersion = "asr-resume-v1"
 $script:DownloadEvents = @()
 $script:AuthorizedDownloadAssets = @()
@@ -387,6 +387,101 @@ function Test-DownloadComplete {
   return (Get-FileSha256 -Path $Path) -eq $Spec.sha256
 }
 
+function Resolve-CurlPath {
+  $command = Get-Command curl.exe -ErrorAction SilentlyContinue
+  if ($command -and $command.Source -and (Test-Path -LiteralPath $command.Source)) {
+    return [string]$command.Source
+  }
+  # PATH can be missing System32 in cleaned or customized environments. Windows
+  # ships curl.exe with the OS since 1803, so try the absolute location before
+  # losing resumable downloads.
+  $roots = @($env:SystemRoot, $env:windir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  foreach ($root in $roots) {
+    foreach ($relative in @('System32\curl.exe', 'Sysnative\curl.exe')) {
+      $candidate = Join-Path $root $relative
+      if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+  }
+  return ''
+}
+
+function Invoke-SystemDownload {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$OutFile,
+    $Spec
+  )
+  # Used only when curl.exe cannot be resolved. Streams to disk, resumes with a
+  # Range request when verified partial bytes already exist, and leaves the
+  # same size/SHA256 validation to the caller.
+  try {
+    if (-not ([Net.ServicePointManager]::SecurityProtocol -band [Net.SecurityProtocolType]::Tls12)) {
+      [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    }
+  } catch {}
+
+  $request = $null
+  $response = $null
+  $stream = $null
+  $file = $null
+  $timer = [Diagnostics.Stopwatch]::StartNew()
+  $existing = if (Test-Path -LiteralPath $OutFile) { [int64](Get-Item -LiteralPath $OutFile).Length } else { [int64]0 }
+  try {
+    $request = [Net.HttpWebRequest]::Create($Url)
+    $request.Method = 'GET'
+    $request.UserAgent = [string]$Headers['User-Agent']
+    $request.Accept = '*/*'
+    $request.AllowAutoRedirect = $true
+    $request.MaximumAutomaticRedirections = 5
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 30000
+    $request.KeepAlive = $false
+    if ($existing -gt 0) { $request.AddRange($existing) }
+    try {
+      $response = [Net.HttpWebResponse]$request.GetResponse()
+    } catch [Net.WebException] {
+      $status = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+      throw "PowerShell download failed (HTTP $status): $($_.Exception.Message)"
+    }
+    $isPartial = ($response.StatusCode -eq [Net.HttpStatusCode]::PartialContent) -and ($existing -gt 0)
+    $written = if ($isPartial) { $existing } else { [int64]0 }
+    if ($Spec -and $response.ContentLength -ge 0) {
+      $total = [int64]$response.ContentLength + $written
+      if ($total -ne [int64]$Spec.byteLength) {
+        throw "ASR download size mismatch from server: $total bytes, expected $([int64]$Spec.byteLength)."
+      }
+    }
+    Write-DownloadStatus -Url $Url -Stage 'downloading' -Bytes $written -Attempt 1
+    $stream = $response.GetResponseStream()
+    $file = if ($isPartial) {
+      [IO.File]::Open($OutFile, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    } else {
+      [IO.File]::Create($OutFile)
+    }
+    $buffer = New-Object byte[] 1048576
+    $nextReport = $written + (8MB)
+    while ($true) {
+      $read = $stream.Read($buffer, 0, $buffer.Length)
+      if ($read -le 0) { break }
+      $written += $read
+      if ($Spec -and $written -gt [int64]$Spec.byteLength) {
+        throw "ASR download exceeded the authorized size ($([int64]$Spec.byteLength) bytes)."
+      }
+      $file.Write($buffer, 0, $read)
+      if ($written -ge $nextReport) {
+        Write-DownloadStatus -Url $Url -Stage 'downloading' -Bytes $written -Attempt 1
+        $nextReport = $written + (8MB)
+      }
+    }
+  } finally {
+    if ($file) { $file.Dispose() }
+    if ($stream) { $stream.Dispose() }
+    if ($response) { $response.Dispose() }
+  }
+  $bytes = if (Test-Path -LiteralPath $OutFile) { [int64](Get-Item -LiteralPath $OutFile).Length } else { [int64]0 }
+  Write-DownloadStatus -Url $Url -Stage 'complete' -Bytes $bytes -Attempt 1 -Seconds $timer.Elapsed.TotalSeconds
+}
+
 function Download-File {
   param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][string]$OutFile, [switch]$Resume)
   $outDir = Split-Path -Parent $OutFile
@@ -409,15 +504,25 @@ function Download-File {
     }
   }
   [IO.File]::WriteAllText($metaPath, (ConvertTo-Json -Compress -InputObject @{ identity = $identity }), (New-Object Text.UTF8Encoding($false)))
-  $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-  if (-not $curl) { throw 'curl.exe is required for resumable Windows ASR downloads; cached progress was preserved.' }
+  $curlPath = Resolve-CurlPath
+  if (-not $curlPath) {
+    Write-Host 'curl.exe not found in PATH or System32; using the PowerShell download fallback.'
+    Invoke-SystemDownload -Url $Url -OutFile $OutFile -Spec $spec
+    if ($spec -and -not (Test-DownloadComplete -Path $OutFile -Spec $spec)) {
+      $bytes = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
+      Write-DownloadStatus -Url $Url -Stage 'integrity-failed' -Bytes $bytes -Attempt 1
+      Preserve-UnverifiedDownload -Path $OutFile
+      throw 'Authorized ASR download size or SHA256 mismatch; package was not installed.'
+    }
+    return
+  }
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     $offset = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
     Write-DownloadStatus -Url $Url -Stage 'downloading' -Bytes $offset -Attempt $attempt
     $timer = [Diagnostics.Stopwatch]::StartNew()
     $sizeArgs = @()
     if ($spec) { $sizeArgs = @('--max-filesize', [string]$spec.byteLength) }
-    & $curl.Source @sizeArgs -L --fail --silent --show-error --retry 0 --connect-timeout 30 --speed-limit $DownloadLowSpeedLimitBytesPerSecond --speed-time $DownloadLowSpeedTimeoutSeconds --max-time $DownloadTimeoutSeconds -C - -o $OutFile $Url
+    & $curlPath @sizeArgs -L --fail --silent --show-error --retry 0 --connect-timeout 30 --speed-limit $DownloadLowSpeedLimitBytesPerSecond --speed-time $DownloadLowSpeedTimeoutSeconds --max-time $DownloadTimeoutSeconds -C - -o $OutFile $Url
     $exitCode = $LASTEXITCODE
     $bytes = if (Test-Path -LiteralPath $OutFile) { (Get-Item -LiteralPath $OutFile).Length } else { 0 }
     if ($exitCode -eq 0) {

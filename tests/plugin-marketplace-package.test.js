@@ -356,7 +356,7 @@ assert.ok(windowsInstaller.includes('Existing whisper.cpp is usable; skipping do
 assert.ok(windowsInstaller.includes('Existing ffmpeg is usable; skipping download.'));
 assert.ok(windowsInstaller.includes('$CacheRoot = Join-Path $InstallRoot "cache"'));
 assert.ok(windowsInstaller.includes('$InstallStatePath = Join-Path $InstallRoot ".install-state.json"'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.34"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.35"'));
 assert.ok(windowsInstaller.includes('$NativeProcessRunnerVersion = "diagnostics-process-v2"'));
 assert.ok(windowsInstaller.includes('$PublicCloudBaseCdnDisabled = $env:WECHAT_INBOX_DISABLE_PUBLIC_CLOUDBASE_CDN -eq "1"'));
 assert.ok(windowsInstaller.includes('$WhisperWindowsAuthorizedUrls = @($env:WECHAT_INBOX_ASR_WHISPER_URL)'));
@@ -412,7 +412,7 @@ assert.ok(windowsInstaller.includes('$WhisperModelFileName = "ggml-small.bin"'),
 assert.ok(windowsInstaller.includes('Download-File -Url $Url -OutFile $CachePath -Resume'));
 assert.ok(windowsInstaller.includes('-C - -o $OutFile'));
 assert.ok(windowsInstaller.includes('Keeping partial $Label package for retry'));
-assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.34"'));
+assert.ok(windowsInstaller.includes('$InstallerScriptVersion = "1.2.35"'));
 assert.strictEqual(windowsInstaller.includes('tcloudbaseapp.com'), false, 'Windows ASR must never embed the public CloudBase static domain');
 assert.ok(windowsInstaller.includes('Move-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'));
 assert.strictEqual(windowsInstaller.includes('Copy-Item -LiteralPath $cachedModelPath -Destination $modelPath -Force'), false);
