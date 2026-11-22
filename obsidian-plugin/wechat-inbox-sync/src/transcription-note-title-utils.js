@@ -215,8 +215,7 @@ function buildTranscriptionNoteIdentity(record, options = {}) {
   const semanticFallbackTitle = stripSourcePrefix(fallbackWithoutBinding, source);
   const candidate = buildSemanticTitleCandidate(record, semanticFallbackTitle);
   const displayTitle = stripSourcePrefix(candidate.title, source) || '转写内容';
-  const bindingLabel = cleanTitlePart(options.bindingLabel || '', 24);
-  const fileTitle = [bindingLabel, source, displayTitle].filter(Boolean).join('-');
+  const fileTitle = [source, displayTitle].filter(Boolean).join('-');
   return {
     displayTitle,
     fileTitle,
