@@ -24023,8 +24023,7 @@ var require_transcription_note_title_utils = __commonJS({
       const semanticFallbackTitle = stripSourcePrefix(fallbackWithoutBinding, source);
       const candidate = buildSemanticTitleCandidate(record, semanticFallbackTitle);
       const displayTitle = stripSourcePrefix(candidate.title, source) || "转写内容";
-      const bindingLabel = cleanTitlePart(options.bindingLabel || "", 24);
-      const fileTitle = [bindingLabel, source, displayTitle].filter(Boolean).join("-");
+      const fileTitle = [source, displayTitle].filter(Boolean).join("-");
       return {
         displayTitle,
         fileTitle,
@@ -24471,7 +24470,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.21";
+var PLUGIN_RUNTIME_VERSION = "1.4.22";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -40467,7 +40466,7 @@ var _WechatObsidianInboxPlugin = class _WechatObsidianInboxPlugin extends Plugin
     const noteDir = normalizeVaultPath(this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`);
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
-    const fallbackTitle = await this.nextRecordTitle(noteDir, record, "");
+    const fallbackTitle = await this.nextRecordTitle(noteDir, record);
     let recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, { fallbackTitle });
     recordForMarkdown = noteIdentity.record;
@@ -51603,10 +51602,8 @@ ${finalized.markdown}
       };
     }
   }
-  async nextRecordTitle(dayDir, record, bindingLabel = "") {
-    const label = sanitizeNoteTitlePart(bindingLabel, "");
-    const baseTitle = buildRecordTitleBase(record);
-    return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
+  async nextRecordTitle(dayDir, record) {
+    return this.nextTitle(dayDir, buildRecordTitleBase(record));
   }
   async findRecoveredWechatArticleNotePath(recordId) {
     const files = this.app && this.app.vault && this.app.vault.getMarkdownFiles ? this.app.vault.getMarkdownFiles() : [];
@@ -51702,7 +51699,6 @@ ${finalized.markdown}
           record,
           now,
           null,
-          false,
           { signal: controller.signal, current: 1, total: 1, skipAi: true }
         );
         const reconciled = await this.reconcileRecoveredWechatArticleFailure(sourceRecordId, record, result);
@@ -51875,20 +51871,22 @@ ${finalized.markdown}
   async prepareAdvancedAiRecord(record) {
     return record;
   }
-  async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
+  async writeRecord(record, syncedAt, binding = null, legacyShouldPrefixTitle = false, progress = {}) {
     var _a;
+    if (legacyShouldPrefixTitle && typeof legacyShouldPrefixTitle === "object") {
+      progress = legacyShouldPrefixTitle;
+    }
     const signal = progress.signal || null;
     let verifiedArticleLease = null;
     throwIfAborted(signal);
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = normalizeConfiguredVaultPath(this.settings.inboxDir);
     const noteDir = normalizeVaultPath(this.settings.noteSaveMode === "root" ? rootDir : `${rootDir}/${dateFolder}`);
-    const bindingLabel = shouldPrefixTitle && binding ? binding.label : "";
     const progressTitle = buildRecordTitleBase(record);
     this.showSyncProgress({ ...progress, stage: "processing", title: progressTitle });
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
-    let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
+    let title = await this.nextRecordTitle(noteDir, record);
     let localizedImageFolderTitle = title;
     let recordForMarkdown = record;
     const recordType = String(record.type || "").toLowerCase();
@@ -51964,7 +51962,7 @@ ${finalized.markdown}
         }
       }
       recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
-      title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
+      title = await this.nextRecordTitle(noteDir, recordForMarkdown);
     }
     throwIfAborted(signal);
     const qualityRejectedPartial = isRejectedWechatChannelsTranscript(recordForMarkdown);
@@ -52028,8 +52026,7 @@ ${finalized.markdown}
     if (!progress.skipAi && !qualityRejectedPartial) recordForMarkdown = await this.prepareAdvancedAiRecord(recordForMarkdown, title, signal);
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
-      fallbackTitle: title,
-      bindingLabel
+      fallbackTitle: title
     });
     recordForMarkdown = noteIdentity.record;
     const displayTitle = noteIdentity.displayTitle || title;
@@ -52389,7 +52386,7 @@ ${finalized.markdown}
       code
     }, binding);
   }
-  async syncBinding(binding, shouldPrefixTitle) {
+  async syncBinding(binding) {
     var _a, _b, _c, _d, _e;
     this.ensureSerializedSaveData();
     clearXiaohongshuRestriction();
@@ -52633,7 +52630,7 @@ ${finalized.markdown}
             diagnostic: { cloudFallback: { status, code: ((_d = record.metadata.cloudFallbackError) == null ? void 0 : _d.code) || "", stage: ((_e = record.metadata.cloudFallbackError) == null ? void 0 : _e.stage) || "" } }
           });
         }
-        const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
+        const item = await this.writeRecord(record, syncedAt, binding, processingProgress);
         if (item.partialSaved) {
           throw Object.assign(new Error(QUALITY_PARTIAL_NOTICE), { code: "TRANSCRIPTION_LOW_QUALITY", partialSaved: item, diagnostic: item.mediaResolutionDiagnostic || null });
         }
@@ -52868,7 +52865,6 @@ ${finalized.markdown}
     try {
       this.lastXiaohongshuBrowserDiagnostic = null;
       const bindings = this.backgroundSyncActive ? this.getAutoSyncBindings() : this.getActiveBindings();
-      const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
       const partialSavedNotes = [];
@@ -52887,7 +52883,7 @@ ${finalized.markdown}
         if (this.autoSyncDisposed || this.backgroundSyncActive && this.settings.autoSyncEnabled === false) break;
         if (this.backgroundSyncActive && binding.status === "needs_rebind") continue;
         try {
-          const result = await this.syncBinding(binding, shouldPrefixTitle);
+          const result = await this.syncBinding(binding);
           written.push(...result.written);
           failed.push(...result.failed);
           partialSavedNotes.push(...result.failed.filter((item) => item.partialSaved).map((item) => item.partialSaved));

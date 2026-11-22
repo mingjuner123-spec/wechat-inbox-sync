@@ -104,11 +104,11 @@ assert.deepStrictEqual(
   }),
   {
     displayTitle: '为什么越努力的人越容易焦虑',
-    fileTitle: '微信 1-抖音-为什么越努力的人越容易焦虑',
+    fileTitle: '抖音-为什么越努力的人越容易焦虑',
     source: '抖音',
     titleSource: 'transcription',
   },
-  'multiple bindings must preserve the existing binding label prefix',
+  'binding labels must not prefix the note title',
 );
 
 const transcriptFallbackRecord = {
@@ -392,11 +392,11 @@ assert.deepStrictEqual(
   }),
   {
     displayTitle: '20260803-100000',
-    fileTitle: '微信 1-录音-20260803-100000',
+    fileTitle: '录音-20260803-100000',
     source: '录音',
     titleSource: 'fallback',
   },
-  'binding labels and source prefixes must stay out of the pure title and must not repeat in the file name',
+  'binding labels stay out of the note title; source prefixes must not repeat in the file name',
 );
 
 const longRecord = {

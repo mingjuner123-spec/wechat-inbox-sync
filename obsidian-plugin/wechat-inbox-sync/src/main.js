@@ -408,7 +408,7 @@ const XIAOHONGSHU_SESSION_PARTITION = 'persist:wechat-inbox-sync-xiaohongshu';
 // document request must present the mobile surface; media downloads are not
 // affected by this and keep the shared social headers.
 const XIAOHONGSHU_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1';
-const PLUGIN_RUNTIME_VERSION = '1.4.21';
+const PLUGIN_RUNTIME_VERSION = '1.4.22';
 const PLUGIN_RUNTIME_BUILD_MARKER = 'clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1';
 
 const LEGACY_OFFICIAL_SYNC_API_BASES = [
@@ -18573,7 +18573,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     const noteDir = normalizeVaultPath(this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`);
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
-    const fallbackTitle = await this.nextRecordTitle(noteDir, record, '');
+    const fallbackTitle = await this.nextRecordTitle(noteDir, record);
     let recordForMarkdown = await this.enrichRecordMetadataWithAi(record, binding);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, { fallbackTitle });
     recordForMarkdown = noteIdentity.record;
@@ -30836,10 +30836,8 @@ class WechatObsidianInboxPlugin extends Plugin {
     }
   }
 
-  async nextRecordTitle(dayDir, record, bindingLabel = '') {
-    const label = sanitizeNoteTitlePart(bindingLabel, '');
-    const baseTitle = buildRecordTitleBase(record);
-    return this.nextTitle(dayDir, label ? `${label}-${baseTitle}` : baseTitle);
+  async nextRecordTitle(dayDir, record) {
+    return this.nextTitle(dayDir, buildRecordTitleBase(record));
   }
 
   async findRecoveredWechatArticleNotePath(recordId) {
@@ -30923,7 +30921,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           new Notice('这条公众号内容已有重新提取的完整笔记：' + existing, 8000);
           return { filePath: existing, reused: true };
         }
-        const result = await this.writeRecord(record, now, null, false,
+        const result = await this.writeRecord(record, now, null,
           { signal: controller.signal, current: 1, total: 1, skipAi: true });
         const reconciled = await this.reconcileRecoveredWechatArticleFailure(sourceRecordId, record, result);
         this.lastSyncDiagnostic = { status: 'success', stage: 'finished', current: 1, total: 1,
@@ -31088,21 +31086,25 @@ class WechatObsidianInboxPlugin extends Plugin {
   }
 
 
-  async writeRecord(record, syncedAt, binding = null, shouldPrefixTitle = false, progress = {}) {
+  async writeRecord(record, syncedAt, binding = null, legacyShouldPrefixTitle = false, progress = {}) {
+    // 1.4.22 stopped prefixing note titles with the binding label. Older
+    // callers still pass the removed boolean as the fourth argument.
+    if (legacyShouldPrefixTitle && typeof legacyShouldPrefixTitle === 'object') {
+      progress = legacyShouldPrefixTitle;
+    }
     const signal = progress.signal || null;
     let verifiedArticleLease = null;
     throwIfAborted(signal);
     const dateFolder = getDateFolderName(record.createdAt);
     const rootDir = normalizeConfiguredVaultPath(this.settings.inboxDir);
     const noteDir = normalizeVaultPath(this.settings.noteSaveMode === 'root' ? rootDir : `${rootDir}/${dateFolder}`);
-    const bindingLabel = shouldPrefixTitle && binding ? binding.label : '';
     const progressTitle = buildRecordTitleBase(record);
     this.showSyncProgress({ ...progress, stage: 'processing', title: progressTitle });
 
     await this.ensureFolder(rootDir);
     await this.ensureFolder(noteDir);
 
-    let title = await this.nextRecordTitle(noteDir, record, bindingLabel);
+    let title = await this.nextRecordTitle(noteDir, record);
     let localizedImageFolderTitle = title;
     let recordForMarkdown = record;
     const recordType = String(record.type || '').toLowerCase();
@@ -31189,7 +31191,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       }
       recordForMarkdown = await this.saveSourceMediaAttachment(recordForMarkdown, rootDir, dateFolder, title);
-      title = await this.nextRecordTitle(noteDir, recordForMarkdown, bindingLabel);
+      title = await this.nextRecordTitle(noteDir, recordForMarkdown);
     }
     throwIfAborted(signal);
     const qualityRejectedPartial = isRejectedWechatChannelsTranscript(recordForMarkdown);
@@ -31269,7 +31271,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     throwIfAborted(signal);
     const noteIdentity = applyTranscriptionNoteIdentity(recordForMarkdown, {
       fallbackTitle: title,
-      bindingLabel,
     });
     recordForMarkdown = noteIdentity.record;
     const displayTitle = noteIdentity.displayTitle || title;
@@ -31698,7 +31699,7 @@ class WechatObsidianInboxPlugin extends Plugin {
     }, binding);
   }
 
-  async syncBinding(binding, shouldPrefixTitle) {
+  async syncBinding(binding) {
     this.ensureSerializedSaveData();
     // Restriction state is scoped to one sync run: a wall stops the rest of
     // this batch, and the next run starts with a clean slate.
@@ -31968,7 +31969,7 @@ class WechatObsidianInboxPlugin extends Plugin {
             diagnostic: { cloudFallback: { status, code: record.metadata.cloudFallbackError?.code || '', stage: record.metadata.cloudFallbackError?.stage || '' } },
           });
         }
-        const item = await this.writeRecord(record, syncedAt, binding, shouldPrefixTitle, processingProgress);
+        const item = await this.writeRecord(record, syncedAt, binding, processingProgress);
         if (item.partialSaved) {
           throw Object.assign(new Error(QUALITY_PARTIAL_NOTICE), { code: 'TRANSCRIPTION_LOW_QUALITY', partialSaved: item, diagnostic: item.mediaResolutionDiagnostic || null });
         }
@@ -32220,7 +32221,6 @@ class WechatObsidianInboxPlugin extends Plugin {
     try {
       this.lastXiaohongshuBrowserDiagnostic = null;
       const bindings = this.backgroundSyncActive ? this.getAutoSyncBindings() : this.getActiveBindings();
-      const shouldPrefixTitle = bindings.length > 1;
       const written = [];
       const failed = [];
       const partialSavedNotes = [];
@@ -32240,7 +32240,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         if (this.autoSyncDisposed || (this.backgroundSyncActive && this.settings.autoSyncEnabled === false)) break;
         if (this.backgroundSyncActive && binding.status === 'needs_rebind') continue;
         try {
-          const result = await this.syncBinding(binding, shouldPrefixTitle);
+          const result = await this.syncBinding(binding);
           written.push(...result.written);
           failed.push(...result.failed);
           partialSavedNotes.push(...result.failed.filter((item) => item.partialSaved).map((item) => item.partialSaved));
