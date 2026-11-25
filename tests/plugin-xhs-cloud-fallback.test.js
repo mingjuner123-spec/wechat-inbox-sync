@@ -52,6 +52,40 @@ function stubSubmit(plugin, job) {
 }
 
 async function run() {
+  // A blank landing page alone cannot establish that the original note expired.
+  for (const [status, unavailablePage, shouldSubmit] of [[200, false, true], [404, false, false], [410, false, false], [200, true, false]]) {
+    const plugin = fixture();
+    plugin.settings.cloudFallbackEnabled = true;
+    const gates = stubGate(plugin, { allowed: true });
+    const sent = stubSubmit(plugin, { status: 'queued', jobId: 'job-landing' });
+    const attempt = plugin.maybeSubmitXiaohongshuCloudFallback({ id: 'record-landing', createdAt: '2026-11-26T00:00:00Z' }, {
+      url: SHARE_URL, binding: { token: 'fixture' },
+      linkDiagnostic: { request: { pageType: 'unexpected-host', responseStatus: status },
+        extraction: { genericLanding: true, unavailablePage, bodyCharacterCount: 0, imageCount: 0 } },
+    });
+    if (shouldSubmit) {
+      await assert.rejects(attempt, { code: 'CLOUD_FALLBACK_QUEUED' });
+      assert.deepEqual(sent.map(call => call.sourceUrl), [SHARE_URL]);
+    } else {
+      assert.equal(await attempt, null);
+    }
+    assert.equal(gates.length, Number(shouldSubmit));
+    assert.equal(sent.length, Number(shouldSubmit));
+  }
+  for (const code of ['AbortError', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN']) {
+    const plugin = fixture();
+    plugin.settings.cloudFallbackEnabled = true;
+    stubGate(plugin, { allowed: true });
+    let calls = 0;
+    plugin.submitCloudFallbackJob = async () => {
+      calls++;
+      throw Object.assign(new Error('fixture'), code === 'AbortError' ? { name: code } : { code });
+    };
+    await assert.rejects(plugin.maybeSubmitXiaohongshuCloudFallback({ id: 'fixture', createdAt: '2026-11-26T00:00:00Z' },
+      { url: SHARE_URL, binding: {token: 'fixture'}, linkDiagnostic: { extraction: {genericLanding: true} } }),
+      error => error.name === code || error.code === code);
+    assert.equal(calls, 1);
+  }
   // 1. A Xiaohongshu media failure on the local path must reach the worker
   // queue before the retryable short-circuit turns it into another user-retry
   // record. The submission carries the original share link, not the CDN URL no

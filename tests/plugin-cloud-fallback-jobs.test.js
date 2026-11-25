@@ -633,6 +633,19 @@ function makePlugin({ jobs = [], bindingToken = 'ABC-123' } = {}) {
 
   // A setup failure that surfaces after candidate transcription must not be
   // re-submitted as a cloud job by the outer catch.
+  for (const allowed of [true, false]) {
+    const plugin = makePlugin();
+    const code = 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL';
+    plugin.runConfiguredTranscription = async () => { throw Object.assign(new Error('fixture'), { code }); };
+    plugin.getLocalTranscriptionComponentReadiness = () => ({ asrStatus: { ready: allowed } });
+    let submissions = 0;
+    plugin.submitCloudFallbackJob = async () => { submissions++; return { jobId: 'fixture-job', status: 'queued' }; };
+    const url = 'https://www.xiaohongshu.com/explore/1234567890abcdef12345678';
+    await assert.rejects(plugin.buildTranscriptRecordFromMedia({ id: 'fixture', type: 'link', createdAt: '2026-11-26T00:00:00Z', metadata: { url } },
+      { url, platform: '小红书', mediaUrl: 'https://cdn.example.test/media.mp4', preparedMedia: true,
+        binding: plugin.settings.bindings[0] }), { code: allowed ? 'CLOUD_FALLBACK_QUEUED' : code });
+    assert.strictEqual(submissions, Number(allowed));
+  }
   const setupErrorPlugin = makePlugin();
   let setupErrorSubmitted = false;
   setupErrorPlugin.runConfiguredTranscription = async () => {

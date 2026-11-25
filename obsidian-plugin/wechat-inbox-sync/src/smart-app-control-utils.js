@@ -16,9 +16,7 @@ const SMART_APP_CONTROL_EXIT_CODES = Object.freeze(['0XC0E90002', '0XC0000428'])
 const SMART_APP_CONTROL_EXIT_DECIMALS = Object.freeze(['-1058471934', '-1073740760']);
 
 function smartAppControlGuidance() {
-  return 'Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）。'
-    + '\n请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。'
-    + '\n关闭后回到这里点“安装／更新本地组件”。部分 Windows 版本关闭后需要重装系统才能再开启。';
+  return '本地组件因 Windows 智能应用控制或代码完整性检查而暂停。请保留安全设置和任务编号，以便排查组件兼容性。';
 }
 
 // `reg query` prints "VerifiedAndReputablePolicyState    REG_DWORD    0x1".

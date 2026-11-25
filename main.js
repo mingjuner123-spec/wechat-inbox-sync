@@ -3223,7 +3223,7 @@ var require_failure_reason_utils = __commonJS({
       LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: ["本地转写未通过会员权益校验。", "请在插件设置中检查当前绑定和权益状态；已开通不要重复购买。"],
       LOCAL_TRANSCRIPTION_BINDING_REQUIRED: ["本地转写需要有效绑定。", "请在插件设置中检查当前绑定状态后重试，不要提交绑定令牌。"],
       LOCAL_COMPONENT_SETUP_REQUIRED: ["本地转写组件尚未就绪。", "请在插件设置中完成所需组件安装或修复后重试。"],
-      LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: ["Windows 智能应用控制拦截了本地组件。", "请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后，重新安装组件并重试。"],
+      LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: ["插件检测到 Windows 智能应用控制已开启，本地组件在预检时暂停。", "请保留安全设置和任务编号，以便排查组件兼容性。"],
       NODE_HTTP_TIMEOUT: ["处理所需的网络请求超时。", "请在网络恢复后重试；若持续失败，保留此任务编号排查请求环节，无需因此重装转写组件。"],
       MEDIA_DOWNLOAD_INTERRUPTED: ["媒体下载中断，未完成下载。", "请在网络恢复后重试；仍失败时保留任务编号排查媒体链接与下载环节。"],
       ERR_SSL_BAD_PACKET_LENGTH: ["下载连接的 TLS 通信失败。", "请检查当前网络或代理后重试，保留安全证书校验。"],
@@ -8135,7 +8135,7 @@ var require_smart_app_control_utils = __commonJS({
     var SMART_APP_CONTROL_EXIT_CODES = Object.freeze(["0XC0E90002", "0XC0000428"]);
     var SMART_APP_CONTROL_EXIT_DECIMALS = Object.freeze(["-1058471934", "-1073740760"]);
     function smartAppControlGuidance2() {
-      return "Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）。\n请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。\n关闭后回到这里点“安装／更新本地组件”。部分 Windows 版本关闭后需要重装系统才能再开启。";
+      return "本地组件因 Windows 智能应用控制或代码完整性检查而暂停。请保留安全设置和任务编号，以便排查组件兼容性。";
     }
     __name(smartAppControlGuidance2, "smartAppControlGuidance");
     function parseSmartAppControlPolicyState2(stdout) {
@@ -19270,7 +19270,7 @@ var require_sync_lifecycle_utils = __commonJS({
       LOCAL_TRANSCRIPTION_MEMBERSHIP_REQUIRED: "当前 Pro 权益未确认有效，请在插件刷新权限并核对有效期。",
       LOCAL_TRANSCRIPTION_BINDING_REQUIRED: "请先完成小程序与插件绑定，再重新同步。",
       LOCAL_COMPONENT_SETUP_REQUIRED: "本地转写组件未就绪，请在插件设置安装或更新组件后重试。",
-      LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: "Windows 智能应用控制拦截了本地组件，请关闭后重新安装组件并重试。",
+      LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL: "插件检测到 Windows 智能应用控制已开启，本地组件在预检时暂停。请保留安全设置和任务编号。",
       DOUYIN_LOGIN_REQUIRED: "请在插件设置中登录抖音后重试。",
       DOUYIN_RESOLVER_NOT_INSTALLED: "抖音解析组件未就绪，请在插件设置安装或更新组件后重试。",
       CLOUD_FALLBACK_SUBMIT_FAILED: "本地提取失败，云端兜底暂未接收任务；请保持插件联网，稍后重试。",
@@ -24470,7 +24470,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.22";
+var PLUGIN_RUNTIME_VERSION = "1.4.23";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -25419,7 +25419,7 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
 __name(getLocalAsrRunLogPath, "getLocalAsrRunLogPath");
 function explainLocalAsrExitCode(value) {
   const text = String(value || "");
-  if (isSmartAppControlBlockingMessage(text)) return "Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）；请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。";
+  if (isSmartAppControlBlockingMessage(text)) return smartAppControlGuidance();
   if (asrRecovery.isMacNativeCrash({ message: text })) return "本地转写引擎崩溃；请复制诊断信息联系支持，不能仅凭此错误判断内存不足。";
   if (text.includes("-1073741515") || text.toUpperCase().includes("0XC0000135")) {
     return "缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。";
@@ -26751,13 +26751,17 @@ function isXiaohongshuPageTransportFailure(error) {
   return message === "网页抓取超时" || /^(?:ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|BROWSER_TASK_TIMEOUT)$/.test(code) || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message) || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
 }
 __name(isXiaohongshuPageTransportFailure, "isXiaohongshuPageTransportFailure");
+function supportsNewFailureHandoff(record) {
+  return Date.parse(record && record.createdAt) >= Date.parse("2026-11-25T03:27:59.285Z");
+}
+__name(supportsNewFailureHandoff, "supportsNewFailureHandoff");
 function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
   const source = diagnostic && typeof diagnostic === "object" ? diagnostic : {};
   const request = source.request && typeof source.request === "object" ? source.request : {};
   const extraction = source.extraction && typeof source.extraction === "object" ? source.extraction : {};
   const pageType = String(request.pageType || "");
-  const looksLikeLanding = extraction.genericLanding === true || extraction.unavailablePage === true || ["xiaohongshu-generic-landing", "xiaohongshu-unavailable"].includes(pageType);
-  if (!looksLikeLanding) return false;
+  const unavailable = extraction.unavailablePage === true || pageType === "xiaohongshu-unavailable";
+  if (!unavailable) return false;
   return (Number(extraction.bodyCharacterCount) || 0) <= 0 && (Number(extraction.imageCount) || 0) <= 0;
 }
 __name(isExpiredXiaohongshuLinkDiagnostic, "isExpiredXiaohongshuLinkDiagnostic");
@@ -43283,12 +43287,15 @@ ${installation}`, "sync-install-diagnostic.txt");
     localError = "",
     linkDiagnostic = null
   } = {}) {
+    var _a;
     if (this.settings.cloudFallbackEnabled !== true) return { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "本地提取失败；云端兜底未开启，请在插件设置中开启后重试。" };
     if (!binding || !binding.token) return { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "云端兜底未提交：请先完成小程序绑定。" };
     if (!isXiaohongshuUrl(url)) return null;
     const diagnostic = linkDiagnostic && typeof linkDiagnostic === "object" ? linkDiagnostic : null;
     const responseStatus = Number(diagnostic && diagnostic.request && diagnostic.request.responseStatus) || 0;
-    if (isExpiredXiaohongshuLinkDiagnostic(diagnostic || {}) || responseStatus === 404 || responseStatus === 410) {
+    const extraction = (diagnostic == null ? void 0 : diagnostic.extraction) || {};
+    const emptyLanding = (extraction.genericLanding || ((_a = diagnostic == null ? void 0 : diagnostic.request) == null ? void 0 : _a.pageType) === "xiaohongshu-generic-landing") && !Number(extraction.bodyCharacterCount) && !Number(extraction.imageCount);
+    if (emptyLanding && (!supportsNewFailureHandoff(record) || responseStatus >= 400 && responseStatus < 500) || isExpiredXiaohongshuLinkDiagnostic(diagnostic || {}) || responseStatus === 404 || responseStatus === 410) {
       return null;
     }
     const gate = await this.evaluateCloudFallbackUserGate({
@@ -43317,6 +43324,7 @@ ${installation}`, "sync-install-diagnostic.txt");
         "云端兜底任务已提交，正在由云端电脑抓取小红书内容"
       );
     } catch (error) {
+      if (isAbortError(error) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
       if (error && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(error.code)) throw error;
       return { gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED", gateMessage: "云端兜底暂未接收任务，请保持插件联网，稍后重试。" };
     }
@@ -48086,7 +48094,8 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         throw error;
       }
       let finalError = error;
-      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding && !isAbortError(error) && error.transcriptionSetupRequired !== true && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding, requireDouyinLogin: true, requireDouyinResolver: true } : { binding }) : null;
+      const windowsPreflight = supportsNewFailureHandoff(record) && error.code === "LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL";
+      const fallbackGate2 = this.settings.cloudFallbackEnabled === true && fallbackSourceType && binding && !isAbortError(error) && (windowsPreflight || error.transcriptionSetupRequired !== true && !isSetupRequired(error)) && error.code !== "TRANSCRIPTION_NO_SPEECH" ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === "douyin_url" ? { binding, requireDouyinLogin: true, requireDouyinResolver: true } : { binding }) : null;
       if (fallbackGate2 && fallbackGate2.allowed) {
         try {
           const job = await this.submitCloudFallbackJob({
@@ -48126,6 +48135,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
           }
           throw createCloudFallbackPendingError(job, error.message || String(error));
         } catch (cloudError) {
+          if (isAbortError(cloudError) || (signal == null ? void 0 : signal.aborted)) throw createAbortError();
           if (cloudError && ["CLOUD_FALLBACK_QUEUED", "CLOUD_FALLBACK_SUBMISSION_UNCERTAIN"].includes(cloudError.code)) throw cloudError;
           finalError = attachFallbackDecision(error, {
             gateCode: "CLOUD_FALLBACK_SUBMIT_FAILED",
@@ -48134,7 +48144,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         }
       } else if (fallbackGate2) {
         finalError = attachFallbackDecision(error, { gateCode: fallbackGate2.code, gateMessage: fallbackGate2.message });
-      } else if (fallbackSourceType && !isSetupRequired(error) && error.code !== "TRANSCRIPTION_NO_SPEECH") {
+      } else if (fallbackSourceType && (windowsPreflight || !isSetupRequired(error)) && error.code !== "TRANSCRIPTION_NO_SPEECH") {
         finalError = attachFallbackDecision(error, this.settings.cloudFallbackEnabled !== true ? { gateCode: "CLOUD_FALLBACK_DISABLED", gateMessage: "云端兜底未开启，请在插件设置中开启。" } : { gateCode: "CLOUD_FALLBACK_BINDING_REQUIRED", gateMessage: "尚未绑定，请先完成插件绑定。" });
       }
       const recoveryCandidate = platform === "视频号" && finalError.code === "TRANSCRIPTION_LOW_QUALITY" && finalError.qualityRecoveryCandidate && finalError.qualityRecoveryCandidate.fullAudioProcessed === true && getChannelsUnresolvedWindowCount(finalError.qualityRecoveryCandidate) > 0 && Number(finalError.qualityRecoveryCandidate.windowCount) > 0 ? String(finalError.qualityRecoveryCandidate.transcription || "").trim() : "";
@@ -48146,7 +48156,7 @@ model=${installStatus.hasModel ? installStatus.modelPath : "missing"}`,
         recoveryCandidate.slice(0, 32e3),
         recoveryCandidate.length > 32e3 ? "（候选文本较长，后续内容已截断。）" : ""
       ].filter(Boolean).join("\n") : "";
-      if (isSetupRequired(error)) throw error;
+      if (isSetupRequired(error)) throw finalError;
       const failureMetadata = buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
         url,
         platform,
