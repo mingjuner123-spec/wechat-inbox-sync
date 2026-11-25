@@ -1647,7 +1647,7 @@ function getLocalAsrRunLogPath(installRoot = getLocalAsrInstallRoot()) {
 
 function explainLocalAsrExitCode(value) {
   const text = String(value || '');
-  if (isSmartAppControlBlockingMessage(text)) return 'Windows 安全策略拦截了本地组件（智能应用控制或代码完整性策略）；请在 Windows 安全中心 → 应用和浏览器控制 → 智能应用控制 中关闭后重试。';
+  if (isSmartAppControlBlockingMessage(text)) return smartAppControlGuidance();
   if (asrRecovery.isMacNativeCrash({ message: text })) return '本地转写引擎崩溃；请复制诊断信息联系支持，不能仅凭此错误判断内存不足。';
   if (text.includes('-1073741515') || text.toUpperCase().includes('0XC0000135')) {
     return '缺少 Windows VC++ 运行库或 whisper 依赖 DLL，请重新点击“安装/更新本地转写组件”修复。';
@@ -3252,15 +3252,18 @@ function isXiaohongshuPageTransportFailure(error) {
     || /\b(?:ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ERR_(?:CONNECTION_(?:REFUSED|RESET|CLOSED|TIMED_OUT)|PROXY_CONNECTION_FAILED|TIMED_OUT|NAME_NOT_RESOLVED|INTERNET_DISCONNECTED|NETWORK_CHANGED|NETWORK_IO_SUSPENDED))\b/i.test(message)
     || /^(?:NetworkError|Failed to fetch|socket hang up)\b/i.test(message);
 }
+// Only newly created records opt into the expanded handoff. Missing dates retain legacy behavior.
+function supportsNewFailureHandoff(record) {
+  return Date.parse(record && record.createdAt) >= Date.parse('2026-11-25T03:27:59.285Z');
+}
+
 function isExpiredXiaohongshuLinkDiagnostic(diagnostic = {}) {
   const source = diagnostic && typeof diagnostic === 'object' ? diagnostic : {};
   const request = source.request && typeof source.request === 'object' ? source.request : {};
   const extraction = source.extraction && typeof source.extraction === 'object' ? source.extraction : {};
   const pageType = String(request.pageType || '');
-  const looksLikeLanding = extraction.genericLanding === true
-    || extraction.unavailablePage === true
-    || ['xiaohongshu-generic-landing', 'xiaohongshu-unavailable'].includes(pageType);
-  if (!looksLikeLanding) return false;
+  const unavailable = extraction.unavailablePage === true || pageType === 'xiaohongshu-unavailable';
+  if (!unavailable) return false;
   return (Number(extraction.bodyCharacterCount) || 0) <= 0
     && (Number(extraction.imageCount) || 0) <= 0;
 }
@@ -21779,7 +21782,11 @@ class WechatObsidianInboxPlugin extends Plugin {
     if (!isXiaohongshuUrl(url)) return null;
     const diagnostic = linkDiagnostic && typeof linkDiagnostic === 'object' ? linkDiagnostic : null;
     const responseStatus = Number(diagnostic && diagnostic.request && diagnostic.request.responseStatus) || 0;
-    if (isExpiredXiaohongshuLinkDiagnostic(diagnostic || {})
+    const extraction = diagnostic?.extraction || {};
+    const emptyLanding = (extraction.genericLanding || diagnostic?.request?.pageType === 'xiaohongshu-generic-landing')
+      && !Number(extraction.bodyCharacterCount) && !Number(extraction.imageCount);
+    if ((emptyLanding && (!supportsNewFailureHandoff(record) || (responseStatus >= 400 && responseStatus < 500)))
+      || isExpiredXiaohongshuLinkDiagnostic(diagnostic || {})
       || responseStatus === 404
       || responseStatus === 410) {
       // A dead link stays local: the user has to copy a new share link, and no
@@ -21812,6 +21819,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         '云端兜底任务已提交，正在由云端电脑抓取小红书内容',
       );
     } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw createAbortError();
       if (error && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(error.code)) throw error;
       return { gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED', gateMessage: '云端兜底暂未接收任务，请保持插件联网，稍后重试。' };
     }
@@ -26910,12 +26918,14 @@ class WechatObsidianInboxPlugin extends Plugin {
       // worker can resolve it independently; a stale media URL is not a
       // usable fallback source. No-speech and user-stop paths return above or
       // are retryable and therefore never enter this branch.
+      // A Windows preflight can stop a local run on a fully configured device.
+      // Recheck the existing entitlement and component gates before handing off.
+      const windowsPreflight = supportsNewFailureHandoff(record) && error.code === 'LOCAL_COMPONENT_BLOCKED_BY_SMART_APP_CONTROL';
       const fallbackGate = (this.settings.cloudFallbackEnabled === true
         && fallbackSourceType
         && binding
         && !isAbortError(error)
-        && error.transcriptionSetupRequired !== true
-        && !isSetupRequired(error)
+        && (windowsPreflight || (error.transcriptionSetupRequired !== true && !isSetupRequired(error)))
         && error.code !== 'TRANSCRIPTION_NO_SPEECH')
         ? await this.evaluateCloudFallbackUserGate(fallbackSourceType === 'douyin_url'
           ? { binding, requireDouyinLogin: true, requireDouyinResolver: true }
@@ -26961,6 +26971,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           }
           throw createCloudFallbackPendingError(job, error.message || String(error));
         } catch (cloudError) {
+          if (isAbortError(cloudError) || signal?.aborted) throw createAbortError();
           if (cloudError && ['CLOUD_FALLBACK_QUEUED', 'CLOUD_FALLBACK_SUBMISSION_UNCERTAIN'].includes(cloudError.code)) throw cloudError;
           finalError = attachFallbackDecision(error, {
             gateCode: 'CLOUD_FALLBACK_SUBMIT_FAILED',
@@ -26969,7 +26980,7 @@ class WechatObsidianInboxPlugin extends Plugin {
         }
       } else if (fallbackGate) {
         finalError = attachFallbackDecision(error, { gateCode: fallbackGate.code, gateMessage: fallbackGate.message });
-      } else if (fallbackSourceType && !isSetupRequired(error) && error.code !== 'TRANSCRIPTION_NO_SPEECH') {
+      } else if (fallbackSourceType && (windowsPreflight || !isSetupRequired(error)) && error.code !== 'TRANSCRIPTION_NO_SPEECH') {
         finalError = attachFallbackDecision(error, this.settings.cloudFallbackEnabled !== true
           ? { gateCode: 'CLOUD_FALLBACK_DISABLED', gateMessage: '云端兜底未开启，请在插件设置中开启。' }
           : { gateCode: 'CLOUD_FALLBACK_BINDING_REQUIRED', gateMessage: '尚未绑定，请先完成插件绑定。' });
@@ -26992,7 +27003,7 @@ class WechatObsidianInboxPlugin extends Plugin {
           recoveryCandidate.length > 32000 ? '（候选文本较长，后续内容已截断。）' : '',
         ].filter(Boolean).join('\n')
         : '';
-      if (isSetupRequired(error)) throw error;
+      if (isSetupRequired(error)) throw finalError;
       const failureMetadata = buildTranscriptOnlyMetadata(metadataWithSocialMetrics, {
         url,
         platform,

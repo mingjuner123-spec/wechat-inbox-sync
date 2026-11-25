@@ -100,6 +100,7 @@ async function run() {
     assert.strictEqual(helpers.isSmartAppControlBlockingMessage('exit code -1073740286'), false);
     assert.strictEqual(helpers.isSmartAppControlBlockingMessage('unrelated failure'), false);
     assert.ok(helpers.smartAppControlGuidance().includes('智能应用控制'));
+    assert.doesNotMatch(helpers.explainLocalAsrExitCode('0xC0E90002'), /关闭/);
     assert.strictEqual(helpers.SMART_APP_CONTROL_SETTINGS_URI, 'windowsdefender://smartapp/');
     const fakeReg = (stdout) => (file, args, options, callback) => {
       assert.ok(String(file).toLowerCase().endsWith('reg.exe'));
