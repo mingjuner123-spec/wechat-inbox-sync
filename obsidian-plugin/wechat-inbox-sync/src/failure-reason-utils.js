@@ -3,6 +3,7 @@
 // Only existing machine codes are promoted. Never index raw messages, paths,
 // URLs or arbitrary nested data. Categories and business decisions stay intact.
 const FAILURE_DETAILS = Object.freeze({
+  DOUYIN_LOGIN_REQUIRED: ['抖音登录校验未通过。', '请在插件设置中确认抖音登录状态后重试；已登录仍失败时，保留任务编号排查登录校验连接。'],
   OPERATOR_WECHAT_ARTICLE_EMPTY: ['云端节点未取得公众号正文。', '请确认原文可打开，保留任务编号；无需重装本地组件。'],
   OPERATOR_WECHAT_ARTICLE_CAPTCHA: ['公众号要求云端节点完成访问验证。', '我们需要处理节点访问验证，请保留任务编号；无需调整你的本地组件。'],
   OPERATOR_MEDIA_ACQUIRE_EMPTY: ['云端节点未提取到可用音频。', '请确认原内容可打开，保留任务编号排查云端提取。'],
