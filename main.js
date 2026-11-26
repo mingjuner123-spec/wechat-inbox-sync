@@ -3211,6 +3211,7 @@ var require_failure_reason_utils = __commonJS({
   "src/failure-reason-utils.js"(exports2, module2) {
     "use strict";
     var FAILURE_DETAILS = Object.freeze({
+      DOUYIN_LOGIN_REQUIRED: ["抖音登录校验未通过。", "请在插件设置中确认抖音登录状态后重试；已登录仍失败时，保留任务编号排查登录校验连接。"],
       OPERATOR_WECHAT_ARTICLE_EMPTY: ["云端节点未取得公众号正文。", "请确认原文可打开，保留任务编号；无需重装本地组件。"],
       OPERATOR_WECHAT_ARTICLE_CAPTCHA: ["公众号要求云端节点完成访问验证。", "我们需要处理节点访问验证，请保留任务编号；无需调整你的本地组件。"],
       OPERATOR_MEDIA_ACQUIRE_EMPTY: ["云端节点未提取到可用音频。", "请确认原内容可打开，保留任务编号排查云端提取。"],
@@ -24470,7 +24471,7 @@ var WECHAT_ARTICLE_DESKTOP_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x6
 var WECHAT_ARTICLE_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
 var XIAOHONGSHU_SESSION_PARTITION = "persist:wechat-inbox-sync-xiaohongshu";
 var XIAOHONGSHU_MOBILE_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-var PLUGIN_RUNTIME_VERSION = "1.4.24";
+var PLUGIN_RUNTIME_VERSION = "1.4.25";
 var PLUGIN_RUNTIME_BUILD_MARKER = "clipboard-link-path-v1+dns-recovery-v1+receipt-reconcile-v1+wechat-navigation-history-v2+macos-cpu-recovery-v1+wechat-article-pacing-v1+ocr-private-first-v1+channels-failure-v1+xhs-comment-diagnostic-v1+xhs-video-diagnostic-v2+xhs-static-document-v1+asr-resume-v1+xhs-comment-recovery-v1+wechat-article-pre-imagepost-v1+zhihu-toutiao-article-v1+xhs-cloud-fallback-v1+fallback-upload-timeout-telemetry-v1+asr-diagnostic-candidate-match-v1";
 var LEGACY_OFFICIAL_SYNC_API_BASES = [
   "https://he02-d8gebzv050ed6c4ef-d350b93bf-1357443479.ap-shanghai.app.tcloudbase.com/sync"
@@ -51577,7 +51578,8 @@ ${finalized.markdown}
             transcriptionStatus: "failed",
             transcriptionError: error.message || String(error),
             transcriptionSource: "platform-fetch",
-            conversionStatus: "failed"
+            conversionStatus: "failed",
+            ...isDouyinUrl(url) && error.code === "DOUYIN_LOGIN_REQUIRED" && Date.parse(record.createdAt) >= Date.parse("2026-11-26T01:07:36.136Z") ? { mediaResolutionDiagnostic: { failureCode: "DOUYIN_LOGIN_REQUIRED" } } : {}
           })
         };
       }
